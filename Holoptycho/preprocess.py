@@ -107,7 +107,7 @@ class ImagePreprocessorOp(Operator):
         op_output.emit(indices, "image_indices")
 
 class PointProcessorOp(Operator):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, x_direction = -1., y_direction = -1., **kwargs):
         super().__init__(*args, **kwargs)
         self.logger = logging.getLogger("PointProcessorOp")
         logging.basicConfig(level=logging.INFO)
@@ -132,8 +132,8 @@ class PointProcessorOp(Operator):
         # Hardcode
         self.min_points = 300
         self.max_points = 20000
-        self.x_direction = -1.
-        self.y_direction = -1.
+        self.x_direction = x_direction
+        self.y_direction = y_direction
         self.pos_x_base = None
         self.pos_y_base = None
         self.x_range_um = 2.
@@ -213,6 +213,7 @@ class PointProcessorOp(Operator):
     def process_point_info(self):
 
         if (self.pos_loaded_num+1)*self.upsample <= self.raw_data.shape[1]:
+
             if self.raw_data.shape[1] > self.min_points * self.upsample:
                 
                 p_total_num = self.raw_data.shape[1]//self.upsample
@@ -327,6 +328,7 @@ class ImageSendOp(Operator):
     
     def flush(self,param):
         self.frame_ready_num = 0
+        
     
     def setup(self, spec: OperatorSpec):
         spec.input("flush",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
@@ -336,6 +338,7 @@ class ImageSendOp(Operator):
         spec.output("image_indices_out").condition(ConditionType.NONE)
 
     def compute(self, op_input, op_output, context):
+
         param = op_input.receive('flush')
         if param:
             self.flush(param)

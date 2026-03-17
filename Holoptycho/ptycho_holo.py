@@ -27,6 +27,7 @@ from holoscan.decorator import create_op
 from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressOp
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
 from .liverecon_utils import parse_scan_header
+from .live_simulation import InitSimul
 
 class InitRecon(Operator):
     def __init__(self, *args, param, batchsize,min_points,scan_header_file, **kwargs):
@@ -128,7 +129,7 @@ class PtychoRecon(Operator):
     
     def flush(self,param):
 
-        print('flush ptycho recon')
+        print(f'flush ptycho recon {str(param[0])}')
         self.it = 0
         self.it_last_update = np.inf
         self.pos_ready_num = 0
@@ -258,6 +259,84 @@ def SaveResult(output):
     print('Saving results done.')
     return
     
+class PtychoSimulApp(Application):
+    def __init__(self, *args, config_path=None, **kwargs):
+        super().__init__(*args,**kwargs)
+
+        self.config_path = config_path
+        self.param = parse_config(self.config_path)
+        self.gpu = self.param.gpus[0]
+
+    def config_ops(self,param):
+
+        nx_prb = self.pty.recon.nx_prb
+        ny_prb = self.pty.recon.ny_prb
+        nz = self.pty.recon.num_points
+
+        self.image_send.diff_d_target = self.pty.recon.diff_d
+        self.image_send.max_points = nz
+
+        self.point_proc.point_info = np.zeros((nz,4),dtype = np.int32)
+        self.point_proc.point_info_target = self.pty.recon.point_info_d
+
+        self.point_proc.min_points = self.min_points
+        self.point_proc.max_points = nz
+        self.point_proc.x_direction = self.pty.recon.x_direction
+        self.point_proc.y_direction = self.pty.recon.y_direction
+        self.point_proc.x_range_um = self.pty.recon.x_range_um
+        self.point_proc.y_range_um = self.pty.recon.y_range_um
+        self.point_proc.x_pixel_m = self.pty.recon.x_pixel_m
+        self.point_proc.y_pixel_m = self.pty.recon.y_pixel_m
+        self.point_proc.nx_prb = nx_prb
+        self.point_proc.ny_prb = ny_prb
+        self.point_proc.obj_pad = self.pty.recon.obj_pad
+
+        self.point_proc.angle_correction_flag = param.angle_correction_flag
+        self.init.angle_correction_flag = param.angle_correction_flag
+
+        self.pty.num_points_min = self.min_points
+
+
+
+    def compose(self):
+
+        self.param.live_recon_flag = True
+
+        self.batchsize = 64
+        self.min_points = 256
+
+        self.flip_image = True #According to detector settings
+
+        self.image_send = ImageSendOp(self, name="image_send")
+        self.point_proc = PointProcessorOp(self, x_direction=self.param.x_direction, y_direction=self.param.y_direction, name="point_proc")
+
+        # self.init_recon = InitRecon(self)
+        self.pty = PtychoRecon(self,param=self.param,name='pty')
+        # self.pty_ctrl = PtychoCtrl(self)
+
+        self.init = InitSimul(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points, name='InitSimul')
+
+        # Temp
+        self.o = SaveResult(self,name='out')
+        self.live_result = SaveLiveResult(self,name='live_result')
+
+        self.config_ops(self.param)
+
+        self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
+        
+        self.add_flow(self.init,self.point_proc,{("pointRx_out","pointOp_in")})
+        self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
+
+        self.add_flow(self.image_send,self.pty,{("frame_ready_num","frame_ready_num")})
+        self.add_flow(self.point_proc,self.pty,{("pos_ready_num","pos_ready_num")})
+
+        self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
+        self.add_flow(self.init,self.pty,{("flush_pty","flush")})
+
+        self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
+        self.add_flow(self.pty,self.o,{("output","output")})
+
+
 
 class PtychoApp(Application):
     def __init__(self, *args, config_path=None, **kwargs):
@@ -327,7 +406,7 @@ class PtychoApp(Application):
         self.image_batch = ImageBatchOp(self, name="image_batch")
         self.image_proc = ImagePreprocessorOp(self, name="image_proc")
         self.image_send = ImageSendOp(self, name="image_send")
-        self.point_proc = PointProcessorOp(self, name="point_proc")
+        self.point_proc = PointProcessorOp(self, x_direction=self.param.x_direction, y_direction=self.param.y_direction, name="point_proc")
 
         # self.init_recon = InitRecon(self)
         self.pty = PtychoRecon(self,param=self.param,name='pty')
@@ -387,7 +466,7 @@ def main():
     if len(sys.argv) == 1: # started from commmandline
         # raise NotImplementedError("No config file for Holoptycho")
         config_path = '/eiger_dir/ptycho_holo/ptycho_config.txt'
-    elif len(sys.argv) == 2: # started from GUI
+    elif len(sys.argv) >= 2: # started from GUI
         config_path = sys.argv[1]
     #config = parse_args()
 
@@ -397,7 +476,10 @@ def main():
     cuda.select_device(gpu)
     cp.cuda.set_pinned_memory_allocator()
 
-    app = PtychoApp(config_path=config_path)
+    if len(sys.argv) >= 3 and sys.argv[2] == 'simulate':
+        app = PtychoSimulApp(config_path=config_path)
+    else:
+        app = PtychoApp(config_path=config_path)
     
     #app.config()
     
