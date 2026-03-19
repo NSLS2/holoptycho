@@ -38,22 +38,27 @@ class InitSimul(Operator):
         self.working_dir = param.working_directory
         self.h5_file = self.working_dir+'/scan_'+str(self.scan_num)+'.h5'
 
-        with h5py.File(self.h5_file,'r',locking=False) as f:
-            self.ic = np.array(f['ic'])
-            self.ic = self.ic/np.mean(self.ic)
-            self.rawdata_filename = f['raw_data/filename'][()]
-            self.roi = np.array(f['raw_data/roi'])
+        self.h5_header = h5py.File(self.h5_file,'r',locking=False)
+        self.ic = np.array(self.h5_header['ic'])
+        self.ic = self.ic/np.mean(self.ic)
+        if 'raw_data' in self.h5_header.keys() and self.h5_header['raw_data/flag'][()]:
+            self.rawdata_filename = self.h5_header['raw_data/filename'][()]
+            self.roi = np.array(self.h5_header['raw_data/roi'])
+            self.badpixels = np.array(self.h5_header['raw_data/badpixels'])
             self.nx = self.roi[0,1] - self.roi[0,0]
             self.ny = self.roi[1,1] - self.roi[1,0]
-            self.nz = f['points'].shape[1]
-            self.points = np.array(f['points'][:]) # scan grid info
-            self.points_simulate = np.zeros((2,self.points.shape[1]*10))
-            self.points_simulate[0] = np.repeat(self.points[0],10)
-            self.points_simulate[1] = np.repeat(self.points[1],10)
-            self.badpixels = np.array(f['raw_data/badpixels'])
+            self.h5_raw = h5py.File(self.rawdata_filename[0],'r',locking=False)
+            self.rawdata = self.h5_raw['entry/data/data']
+        else:
+            self.h5_raw = None
+            self.rawdata  = self.h5_header['diffamp']
+            self.nx,self.ny,_ = self.rawdata.shape
+        self.nz = self.h5_header['points'].shape[1]
+        self.points = np.array(self.h5_header['points'][:]) # scan grid info
+        self.points_simulate = np.zeros((2,self.points.shape[1]*10))
+        self.points_simulate[0] = np.repeat(self.points[0],10)
+        self.points_simulate[1] = np.repeat(self.points[1],10)
         
-        self.h5_raw = h5py.File(self.rawdata_filename[0],'r',locking=False)
-        self.rawdata = self.h5_raw['entry/data/data']
         self.nz = self.nz - self.nz%self.batchsize
         self.x_num = self.param.x_range // self.param.dr_x
 
@@ -87,21 +92,24 @@ class InitSimul(Operator):
 
         if self.counter < self.nz:
             i = self.counter
-            detmap = np.array(self.rawdata[i:i+self.batchsize])
+            if self.h5_raw is not None:
+                detmap = np.array(self.rawdata[i:i+self.batchsize])
 
-            for bd in self.badpixels.T:
-                x = int(bd[0])
-                y = int(bd[1])
+                for bd in self.badpixels.T:
+                    x = int(bd[0])
+                    y = int(bd[1])
 
-                # Skip bad pixels outside the roi
-                if x>=self.roi[0,0] and x<self.roi[0,1] and y>=self.roi[1,0] and y<self.roi[1,1]:
-                    for iz in range(self.batchsize):
-                        detmap[iz,x,y] = np.median(detmap[iz,x-1:x+2,y-1:y+2])
-                
-            detmap = detmap[:,self.roi[0,0]:self.roi[0,1],self.roi[1,0]:self.roi[1,1]]
-            detmap = np.rot90(detmap,axes=(2,1))
-            detmap = np.fft.fftshift(detmap,axes=(1,2))
-            diff_l = np.sqrt(detmap,dtype = np.float32,order='C')
+                    # Skip bad pixels outside the roi
+                    if x>=self.roi[0,0] and x<self.roi[0,1] and y>=self.roi[1,0] and y<self.roi[1,1]:
+                        for iz in range(self.batchsize):
+                            detmap[iz,x,y] = np.median(detmap[iz,x-1:x+2,y-1:y+2])
+                    
+                detmap = detmap[:,self.roi[0,0]:self.roi[0,1],self.roi[1,0]:self.roi[1,1]]
+                detmap = np.rot90(detmap,axes=(2,1))
+                detmap = np.fft.fftshift(detmap,axes=(1,2))
+                diff_l = np.sqrt(detmap,dtype = np.float32,order='C')
+            else:
+                diff_l = np.array(self.rawdata[i:i+self.batchsize],dtype = np.float32,order='C')
 
             op_output.emit(diff_l, "diff_amp")
             op_output.emit(np.arange(i,i+self.batchsize), "image_indices")
@@ -111,7 +119,9 @@ class InitSimul(Operator):
             self.point_datapack_counter += 1
             time.sleep(self.batchsize / 1000)
         else:
-            self.h5_raw.close()
+            self.h5_header.close()
+            if self.h5_raw:
+                self.h5_raw.close()
             self.stop_execution()
             
         # self.stop_execution()
