@@ -193,7 +193,7 @@ class PtychoRecon(Operator):
             self.frame_ready_num = int(frame_ready_num)
 
         if self.it - self.it_last_update < self.it_ends_after and self.points_total>0:
-            print(f"Recv pos {self.pos_ready_num} frame {self.frame_ready_num} / {self.points_total}")
+            print(f"Recv pos {self.pos_ready_num} frame {self.frame_ready_num} / {self.points_total} {self.num_points_min}")
 
         ready_num = np.minimum(self.pos_ready_num,self.frame_ready_num)
 
@@ -333,11 +333,12 @@ class PtychoSimulApp(Application):
         self.config_ops(self.param)
 
         # --- PtychoViT inference (parallel to iterative recon) ---
+        # Simulate diffamp path: data is unshifted (DC at corners) — no undo needed
         self.vit = PtychoViTInferenceOp(
             self,
             engine_path="/models/ptycho_vit_amp_phase_b64.engine",
             gpu=1,
-
+            data_is_shifted=False,
             name="vit_inference",
         )
         self.vit_save = SaveViTResult(self, name="vit_save")
@@ -435,7 +436,7 @@ class PtychoApp(Application):
         self.pty = PtychoRecon(self,param=self.param,name='pty')
         # self.pty_ctrl = PtychoCtrl(self)
 
-        self.init = InitRecon(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points,scan_header_file='/nsls2/data2/hxn/legacy/users/startup_parameters/scan_header.txt')
+        self.init = InitRecon(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points,scan_header_file=os.environ.get('SCAN_HEADER_FILE', '/nsls2/data2/hxn/legacy/users/startup_parameters/scan_header.txt'))
 
         # Temp
         self.o = SaveResult(self,name='out')
@@ -444,11 +445,12 @@ class PtychoApp(Application):
         self.config_ops(self.param)
 
         # --- PtychoViT inference (parallel to iterative recon) ---
+        # Live mode: ImagePreprocessorOp applies fftshift — undo it for model
         self.vit = PtychoViTInferenceOp(
             self,
             engine_path="/models/ptycho_vit_amp_phase_b64.engine",
             gpu=1,
-
+            data_is_shifted=True,
             name="vit_inference",
         )
         self.vit_save = SaveViTResult(self, name="vit_save")

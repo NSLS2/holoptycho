@@ -44,6 +44,7 @@ class PtychoViTInferenceOp(Operator):
         engine_path: str,
         gpu: int = 1,
         output_save_dir: str = "/data/users/Holoscan",
+        data_is_shifted: bool = False,
         **kwargs,
     ):
         super().__init__(fragment, *args, **kwargs)
@@ -51,6 +52,7 @@ class PtychoViTInferenceOp(Operator):
         self.engine_path = engine_path
         self.gpu = gpu
         self.output_save_dir = output_save_dir
+        self._data_is_shifted = data_is_shifted
 
         # Lazy-initialized in first compute()
         self._initialized = False
@@ -157,9 +159,14 @@ class PtychoViTInferenceOp(Operator):
                 self._logger.warning("Engine reload failed: %s", e)
 
         # --- Prepare input ---
-        # diff_amp arrives as [B, H, W] float32 from ImagePreprocessorOp.
-        # TRT engine expects [B_engine, 1, H_engine, W_engine]. Add channel dimension.
-        diff_amp = np.fft.fftshift(diff_amp, axes=(1, 2))
+        # Model was trained on unshifted diffraction amplitudes (DC at corners).
+        # In simulate mode (diffamp path): data arrives unshifted — no action needed.
+        # In live mode / simulate raw_data path: data arrives fftshift'd by
+        # ImagePreprocessorOp / InitSimul — undo the shift so model sees DC at corners.
+        # For even-sized arrays, fftshift == ifftshift, so applying fftshift
+        # to already-shifted data returns it to unshifted.
+        if self._data_is_shifted:
+            diff_amp = np.fft.fftshift(diff_amp, axes=(1, 2))
         B_actual = diff_amp.shape[0]
         H_data = diff_amp.shape[1]
         W_data = diff_amp.shape[2]

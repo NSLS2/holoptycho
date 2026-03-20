@@ -147,6 +147,18 @@ class IncrementalStitcher:
         return (self.mosaic / np.maximum(self.counts, 1)).astype(np.float32)
 
 
+def _clear_output_dir(save_dir):
+    """Remove stale VIT batch files and live results from a previous run."""
+    for pattern in ["vit_batch_*_pred.npy", "vit_batch_*_indices.npy",
+                     "vit_pred_latest.npy", "obj_live.npy", "prb_live.npy"]:
+        for f in glob(os.path.join(save_dir, pattern)):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    print(f"Cleared old results from {save_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Live side-by-side: iterative recon vs VIT"
@@ -188,6 +200,9 @@ def main():
 
     stitcher = IncrementalStitcher(positions_um, pixel_size_m, inner_crop=args.inner_crop)
 
+    # Clear stale results from previous runs so we start fresh
+    _clear_output_dir(save_dir)
+
     # Set up matplotlib — 3 panels: diffraction pattern, iterative recon, VIT
     plt.ion()
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
@@ -213,6 +228,7 @@ def main():
 
     last_batch_num = 0
     latest_frame_idx = 0
+    batch0_mtime = 0.0  # track batch 0 mtime to detect scan restarts
 
     print(f"Polling {save_dir} for results... (Ctrl+C to stop)")
     try:
@@ -231,10 +247,23 @@ def main():
                 except Exception as e:
                     print(f"  obj_live load error: {e}")
 
-            # --- Poll VIT batches (process up to N per cycle for live update) ---
-            max_per_cycle = 5
-            batches_this_cycle = 0
-            while batches_this_cycle < max_per_cycle:
+            # --- Detect new scan (batch 0 reappears with newer mtime) ---
+            batch0_path = os.path.join(save_dir, "vit_batch_000000_pred.npy")
+            if os.path.exists(batch0_path):
+                mtime = os.path.getmtime(batch0_path)
+                if mtime > batch0_mtime and last_batch_num > 0:
+                    print("  New scan detected — resetting viewer")
+                    last_batch_num = 0
+                    latest_frame_idx = 0
+                    stitcher = IncrementalStitcher(
+                        positions_um, pixel_size_m, inner_crop=args.inner_crop
+                    )
+                    im_vit.set_data(np.zeros((2, 2)))
+                    im_recon.set_data(np.zeros((2, 2)))
+                batch0_mtime = mtime
+
+            # --- Poll VIT batches (drain all available) ---
+            while True:
                 pred_path = os.path.join(
                     save_dir, f"vit_batch_{last_batch_num:06d}_pred.npy"
                 )
@@ -252,7 +281,6 @@ def main():
                         print(f"  VIT batch {last_batch_num}: "
                               f"indices {indices[0]}-{indices[-1]}")
                     last_batch_num += 1
-                    batches_this_cycle += 1
                 except Exception as e:
                     print(f"  VIT batch {last_batch_num} error: {e}")
                     break
@@ -261,7 +289,7 @@ def main():
             if latest_frame_idx > 0 and latest_frame_idx < nz:
                 try:
                     diff_frame = diffamp_dset[latest_frame_idx]
-                    im_diff.set_data(np.log1p(diff_frame))
+                    im_diff.set_data(np.log1p(np.fft.fftshift(diff_frame)))
                     im_diff.autoscale()
                     updated = True
                 except Exception:

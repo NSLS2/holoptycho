@@ -120,7 +120,7 @@ class InitSimul(Operator):
 
             self.counter += self.batchsize
             self.point_datapack_counter += 1
-            time.sleep(self.batchsize / 1000)
+            time.sleep(self.batchsize / 200)
         else:
             self.h5_header.close()
             if self.h5_raw:

@@ -1,4 +1,4 @@
-#!/nsls2/data2/hxn/legacy/home/home/zgao/conda_envs/astra-env/bin/python3.9
+#!/usr/bin/env python3
 # NOTE: decoding currently works only with bslz4 encoding. lz4 encoding does not work !!!
 
 import time
