@@ -31,7 +31,7 @@ class InitSimul(Operator):
 
         self.batchsize = batchsize
         self.min_points = min_points
-        self.angle_correction_flag = True
+        self.angle_correction_flag = param.angle_correction_flag
 
         self.param = param
         self.scan_num = param.scan_num
@@ -78,16 +78,16 @@ class InitSimul(Operator):
         spec.output("flush_pos_proc").condition(ConditionType.NONE)
         spec.output("flush_pty").condition(ConditionType.NONE)
 
-        spec.output("diff_amp").condition(ConditionType.NONE)
-        spec.output("image_indices").condition(ConditionType.NONE)
+        spec.output("diff_amp").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
+        spec.output("image_indices").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
 
-        spec.output("pointRx_out").condition(ConditionType.NONE)
+        spec.output("pointRx_out")
 
     def compute(self,op_input,op_output,context):
         if self.counter == 0:
             # flush to begin
             op_output.emit(True,'flush_image_send')
-            op_output.emit((self.param.x_range,self.param.y_range,1,1,self.x_num*2,self.param.angle,False),'flush_pos_proc')
+            op_output.emit((self.param.x_range,self.param.y_range,1.0,1.0,self.x_num*2,self.param.angle,False),'flush_pos_proc')
             op_output.emit((self.scan_num,self.param.x_range,self.param.y_range,np.maximum(self.x_num*2,self.min_points),self.nz),'flush_pty')
 
         if self.counter < self.nz:

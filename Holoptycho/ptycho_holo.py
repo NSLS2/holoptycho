@@ -310,11 +310,17 @@ class PtychoSimulApp(Application):
         self.image_send = ImageSendOp(self, name="image_send")
         self.point_proc = PointProcessorOp(self, x_direction=self.param.x_direction, y_direction=self.param.y_direction, name="point_proc")
 
+        self.init = InitSimul(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points, name='InitSimul')
+
+        # Additional margin to avoid wrapping
+        self.param.x_range += 5
+        self.param.y_range += 5
         # self.init_recon = InitRecon(self)
         self.pty = PtychoRecon(self,param=self.param,name='pty')
         # self.pty_ctrl = PtychoCtrl(self)
+        self.param.x_range -= 5
+        self.param.y_range -= 5
 
-        self.init = InitSimul(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points, name='InitSimul')
 
         # Temp
         self.o = SaveResult(self,name='out')
