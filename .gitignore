@@ -59,3 +59,7 @@ recon_result/
 *.nsys-rep
 *.sqlite
 *.log
+
+# model files (GPU-specific, not portable)
+*.engine
+*.onnx

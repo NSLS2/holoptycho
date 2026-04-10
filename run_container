@@ -1,4 +1,16 @@
 #!/bin/bash
+# ---- Holoscan pipeline container launcher ----
+#
+# The pixi environment is baked into /pixi_env/ at build time.
+# We do NOT mount ./podman_dir:/podman_dir — that would overwrite
+# the pre-installed .pixi/ and force pixi to re-resolve from the
+# internet, breaking offline machines (axinite, amazonite, NSLS-II).
+#
+# Source code (Holoptycho, nsls2ptycho) is mounted read-only via
+# the /ptycho_gui_holoscan bind-mount.
+#
+# EDIT /path/to/models below before running (directory with .engine files).
+
 if [ $# == 0 ]; then
 	ARG="shell"
 else
@@ -6,7 +18,6 @@ else
 fi
 podman run --rm --net host -it \
 --shm-size=32g \
--v ./podman_dir:/podman_dir \
 -v ../:/ptycho_gui_holoscan \
 -v "$HOME/.Xauthority:/root/.Xauthority:rw" \
 -v /nsls2/data/hxn/legacy:/nsls2/data2/hxn/legacy \
@@ -14,8 +25,10 @@ podman run --rm --net host -it \
 -v /nsls2/data/hxn/legacy:/data \
 -v /nsls2/data/hxn/legacy/home/xf03id/src/hxntools:/hxntools \
 -v $HOME/.ptycho_gui/root_home:/root \
--w /podman_dir \
+-v /path/to/models:/models \
+-w /pixi_env \
 -e DISPLAY="$DISPLAY" \
+-e PYTHONPATH=/ptycho_gui_holoscan/src:/ptycho_gui_holoscan/holoscan-framework:/hxntools/src \
 -e OMPI_ALLOW_RUN_AS_ROOT=1 \
 -e OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1 \
 -e OMPI_COMM_WORLD_LOCAL_RANK=0 \

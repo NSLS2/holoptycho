@@ -10,7 +10,10 @@ import numpy as np
 import cupy as cp
 from numba import cuda
 
-from hxntools.motor_info import motor_table
+try:
+    from hxntools.motor_info import motor_table
+except ModuleNotFoundError:
+    motor_table = None  # OK for simulate mode; live mode requires hxntools
 
 
 from ..ptycho.utils import parse_config
@@ -52,7 +55,7 @@ class InitSimul(Operator):
         else:
             self.h5_raw = None
             self.rawdata  = self.h5_header['diffamp']
-            self.nx,self.ny,_ = self.rawdata.shape
+            _,self.nx,self.ny = self.rawdata.shape
         self.nz = self.h5_header['points'].shape[1]
         self.points = np.array(self.h5_header['points'][:]) # scan grid info
         self.points_simulate = np.zeros((2,self.points.shape[1]*10))
@@ -117,7 +120,7 @@ class InitSimul(Operator):
 
             self.counter += self.batchsize
             self.point_datapack_counter += 1
-            time.sleep(self.batchsize / 1000)
+            time.sleep(self.batchsize / 200)
         else:
             self.h5_header.close()
             if self.h5_raw:

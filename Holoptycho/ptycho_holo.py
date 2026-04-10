@@ -9,7 +9,10 @@ import numpy as np
 import cupy as cp
 from numba import cuda
 
-from hxntools.motor_info import motor_table
+try:
+    from hxntools.motor_info import motor_table
+except ModuleNotFoundError:
+    motor_table = None  # OK for simulate mode; live mode requires hxntools
 
 
 from ..ptycho.utils import parse_config
@@ -28,6 +31,7 @@ from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressO
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
 from .liverecon_utils import parse_scan_header
 from .live_simulation import InitSimul
+from .vit_inference import PtychoViTInferenceOp, SaveViTResult
 
 class InitRecon(Operator):
     def __init__(self, *args, param, batchsize,min_points,scan_header_file, **kwargs):
@@ -189,7 +193,7 @@ class PtychoRecon(Operator):
             self.frame_ready_num = int(frame_ready_num)
 
         if self.it - self.it_last_update < self.it_ends_after and self.points_total>0:
-            print(f"Recv pos {self.pos_ready_num} frame {self.frame_ready_num} / {self.points_total}")
+            print(f"Recv pos {self.pos_ready_num} frame {self.frame_ready_num} / {self.points_total} {self.num_points_min}")
 
         ready_num = np.minimum(self.pos_ready_num,self.frame_ready_num)
 
@@ -328,8 +332,19 @@ class PtychoSimulApp(Application):
 
         self.config_ops(self.param)
 
+        # --- PtychoViT inference (parallel to iterative recon) ---
+        # Simulate diffamp path: data is unshifted (DC at corners) — no undo needed
+        self.vit = PtychoViTInferenceOp(
+            self,
+            engine_path="/models/ptycho_vit_amp_phase_b64.engine",
+            gpu=1,
+            data_is_shifted=False,
+            name="vit_inference",
+        )
+        self.vit_save = SaveViTResult(self, name="vit_save")
+
         self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
-        
+
         self.add_flow(self.init,self.point_proc,{("pointRx_out","pointOp_in")})
         self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
 
@@ -342,6 +357,9 @@ class PtychoSimulApp(Application):
         self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
         self.add_flow(self.pty,self.o,{("output","output")})
 
+        # VIT: branch off InitSimul's diff_amp (fan-out, parallel to image_send)
+        self.add_flow(self.init, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
+        self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
 
 
 class PtychoApp(Application):
@@ -418,7 +436,7 @@ class PtychoApp(Application):
         self.pty = PtychoRecon(self,param=self.param,name='pty')
         # self.pty_ctrl = PtychoCtrl(self)
 
-        self.init = InitRecon(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points,scan_header_file='/nsls2/data2/hxn/legacy/users/startup_parameters/scan_header.txt')
+        self.init = InitRecon(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points,scan_header_file=os.environ.get('SCAN_HEADER_FILE', '/nsls2/data2/hxn/legacy/users/startup_parameters/scan_header.txt'))
 
         # Temp
         self.o = SaveResult(self,name='out')
@@ -426,6 +444,16 @@ class PtychoApp(Application):
 
         self.config_ops(self.param)
 
+        # --- PtychoViT inference (parallel to iterative recon) ---
+        # Live mode: ImagePreprocessorOp applies fftshift — undo it for model
+        self.vit = PtychoViTInferenceOp(
+            self,
+            engine_path="/models/ptycho_vit_amp_phase_b64.engine",
+            gpu=1,
+            data_is_shifted=True,
+            name="vit_inference",
+        )
+        self.vit_save = SaveViTResult(self, name="vit_save")
 
         self.add_flow(self.eiger_zmq_rx,self.eiger_decompress,{("image_index_encoding","image_index_encoding")})
         self.add_flow(self.eiger_decompress,self.image_batch,{("decompressed_image","image"),("image_index","image_index")})
@@ -467,6 +495,10 @@ class PtychoApp(Application):
         self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
         self.add_flow(self.pty,self.o,{("output","output")})
 
+        # VIT: branch off ImagePreprocessorOp's diff_amp (fan-out, parallel to image_send)
+        self.add_flow(self.image_proc, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
+        self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
+
 
 def main():
     if len(sys.argv) == 1: # started from commmandline
@@ -500,7 +532,7 @@ def main():
     
     scheduler = MultiThreadScheduler(
                 app,
-                worker_thread_number=9,
+                worker_thread_number=11,
                 check_recession_period_ms=0.001,
                 stop_on_deadlock=True,
                 stop_on_deadlock_timeout=500,

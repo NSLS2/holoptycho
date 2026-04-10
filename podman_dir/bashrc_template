@@ -1,5 +1,5 @@
 # Copy this file to the root home folder mapped in podman container and rename it to ".bashrc"
-export PYTHONPATH=/ptycho_gui_holoscan/src:/hxntools/src
+export PYTHONPATH=/ptycho_gui_holoscan/src:/ptycho_gui_holoscan/holoscan-framework:/hxntools/src
 export CLIENT_SECRET_KEY='#'
 export CLIENT_PUBLIC_KEY='#'
 
