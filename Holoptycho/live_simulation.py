@@ -16,9 +16,6 @@ except ModuleNotFoundError:
     motor_table = None  # OK for simulate mode; live mode requires hxntools
 
 
-from ..ptycho.utils import parse_config
-from ..ptycho.recon_ptycho_gui import recon_thread
-
 from holoscan.core import Application, Operator, OperatorSpec, ConditionType, IOSpec
 from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
 from holoscan.logger import LogLevel, set_log_level
