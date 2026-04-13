@@ -1,0 +1,63 @@
+[workspace]
+name = "holoptycho"
+description = "Streaming ptychographic reconstruction on NVIDIA Holoscan (NSLS-II HXN)"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[system-requirements]
+libc = { family = "glibc", version = "2.35" }
+
+[dependencies]
+python = ">=3.11,<3.12"
+numpy = ">=1.20,<1.27"
+scipy = ">=1.14"
+h5py = ">=3.12"
+pyzmq = ">=26.0"
+cuda-cudart = ">=12.6.77,<13"
+libcublas = ">=12.6.3.3,<13"
+libcufft = ">=11.3.0.4,<12"
+libcurand = ">=10.3.7.77,<11"
+libcusparse-dev = ">=12.5.4.2,<13"
+libcusolver = ">=11.7.1.2,<12"
+libgl = "*"
+gcc = "==11.4"
+gxx = "==11.4"
+gcc_linux-64 = "==11.4"
+gxx_linux-64 = "==11.4"
+nvtx = "==0.2.10"
+pycuda = "*"
+onnx = "*"
+pyyaml = "*"
+cbor2 = "*"
+pytest = "*"
+
+[feature.gpu.dependencies]
+cupy = "*"
+numba = "*"
+
+[feature.mpi.dependencies]
+openmpi = "*"
+mpi4py = "*"
+
+[environments]
+default = { features = ["gpu", "mpi"], solve-group = "default" }
+
+[pypi-dependencies]
+holoscan = "==3.1.*"
+dectris-compression = ">=0.3"
+matplotlib = ">=3.9"
+Cython = ">=3.0.11"
+pyFFTW = ">=0.15"
+pyqt5 = "*"
+numba-cuda = {version = "*", extras = ["cu12"]}
+tensorrt-cu12 = "*"
+holoptycho = { path = ".", editable = true }
+ptycho = { path = "../ptycho", editable = true }
+
+[activation]
+# Holoscan bundles its own UCX/GXF libs that must take precedence over
+# conda-forge's versions.  Its lib/ directory goes first.
+env = { LD_LIBRARY_PATH = "$CONDA_PREFIX/lib/python3.11/site-packages/holoscan/lib:$CONDA_PREFIX/lib" }
+
+[tasks]
+test = "pytest tests/ -v"
