@@ -3,8 +3,6 @@ name: Build and Push to ACR
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -25,7 +23,6 @@ jobs:
           ssh-private-key: ${{ secrets.PTYCHO_DEPLOY_KEY }}
 
       - name: Azure Login (OIDC)
-        if: ${{ github.event_name != 'pull_request' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -33,10 +30,9 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Log in to ACR
-        if: ${{ github.event_name != 'pull_request' }}
         run: az acr login --name nsls2hackathonacr
 
-      - name: Build container
+      - name: Build and push
         run: |
           IMAGE=nsls2hackathonacr.azurecr.io/holoptycho
           DOCKER_BUILDKIT=1 docker build \
@@ -44,10 +40,5 @@ jobs:
             -t $IMAGE:${{ github.sha }} \
             -t $IMAGE:latest \
             .
-
-      - name: Push to ACR
-        if: ${{ github.event_name != 'pull_request' }}
-        run: |
-          IMAGE=nsls2hackathonacr.azurecr.io/holoptycho
           docker push $IMAGE:${{ github.sha }}
           docker push $IMAGE:latest
