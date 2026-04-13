@@ -15,8 +15,9 @@ RUN curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/usr/local bash
 
 WORKDIR /app
 
-# Copy dependency files first for layer caching
+# Copy dependency files and source (editable install needs the package dir)
 COPY pixi.toml pixi.lock pyproject.toml set-ld-path.sh ./
+COPY holoptycho/ ./holoptycho/
 
 # SSH forwarding for private ptycho repo during pixi install.
 # Requires: docker build --ssh default ...
@@ -27,9 +28,6 @@ RUN --mount=type=ssh pixi install --locked && \
 
 # Generate shell activation hook (no pixi binary needed at runtime)
 RUN pixi shell-hook -s bash > /shell-hook.sh
-
-# Copy application source
-COPY holoptycho/ ./holoptycho/
 
 # ---------- Runtime stage ----------
 FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
@@ -45,6 +43,7 @@ COPY --from=build /app/.pixi /app/.pixi
 
 # Copy app source and activation scripts
 COPY --from=build /app/holoptycho ./holoptycho
+COPY --from=build /app/pyproject.toml ./pyproject.toml
 COPY --from=build /app/set-ld-path.sh ./set-ld-path.sh
 COPY --from=build /shell-hook.sh /shell-hook.sh
 
