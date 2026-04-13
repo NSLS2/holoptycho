@@ -93,10 +93,6 @@ def gpu_recon():
     return recon
 
 
-@pytest.mark.skipif(
-    not pytest.importorskip("cupy", reason="cupy not available"),
-    reason="GPU required",
-)
 class TestGpuSetup:
     def test_buffer_shapes(self, gpu_recon):
         import cupy as cp
@@ -124,10 +120,6 @@ class TestGpuSetup:
         assert recon.mmap_prb.shape[0] == recon.n_iterations
 
 
-@pytest.mark.skipif(
-    not pytest.importorskip("cupy", reason="cupy not available"),
-    reason="GPU required",
-)
 class TestResetForScan:
     def test_resets_object_dimensions(self, gpu_recon):
         recon = gpu_recon
@@ -155,10 +147,6 @@ class TestResetForScan:
         assert np.allclose(recon.obj_mode[0, 0, 0], expected, atol=1e-6)
 
 
-@pytest.mark.skipif(
-    not pytest.importorskip("cupy", reason="cupy not available"),
-    reason="GPU required",
-)
 class TestInitialProbe:
     def test_probe_from_synthetic_diff(self, gpu_recon):
         import cupy as cp
@@ -178,10 +166,6 @@ class TestInitialProbe:
         assert np.any(recon.prb_mode[0] != 0)
 
 
-@pytest.mark.skipif(
-    not pytest.importorskip("cupy", reason="cupy not available"),
-    reason="GPU required",
-)
 class TestSaveFinal:
     def test_saves_probe_and_object(self, gpu_recon, tmp_path):
         recon = gpu_recon
