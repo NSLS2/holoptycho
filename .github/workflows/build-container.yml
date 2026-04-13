@@ -3,6 +3,8 @@ name: Build and Push to ACR
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -32,7 +34,7 @@ jobs:
       - name: Log in to ACR
         run: az acr login --name nsls2hackathonacr
 
-      - name: Build and push
+      - name: Build container
         run: |
           IMAGE=nsls2hackathonacr.azurecr.io/holoptycho
           DOCKER_BUILDKIT=1 docker build \
@@ -40,5 +42,10 @@ jobs:
             -t $IMAGE:${{ github.sha }} \
             -t $IMAGE:latest \
             .
+
+      - name: Push to ACR
+        if: ${{ github.event_name != 'pull_request' }}
+        run: |
+          IMAGE=nsls2hackathonacr.azurecr.io/holoptycho
           docker push $IMAGE:${{ github.sha }}
           docker push $IMAGE:latest
