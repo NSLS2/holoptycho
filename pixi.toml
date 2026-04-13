@@ -7,19 +7,28 @@ platforms = ["linux-64"]
 [system-requirements]
 libc = { family = "glibc", version = "2.35" }
 
+# Base dependencies shared by all environments (including CI)
 [dependencies]
 python = ">=3.12"
-numpy = ">=1.20,<1.27"
+numpy = ">=1.20"
 scipy = ">=1.14"
 h5py = ">=3.12"
 pyzmq = ">=26.0"
+libgl = "*"
+pyyaml = "*"
+cbor2 = "*"
+pytest = "*"
+
+# GPU/CUDA dependencies (not available on CI runners)
+[feature.gpu.dependencies]
+cupy = "*"
+numba = "*"
 cuda-cudart = ">=12.6.77,<13"
 libcublas = ">=12.6.3.3,<13"
 libcufft = ">=11.3.0.4,<12"
 libcurand = ">=10.3.7.77,<11"
 libcusparse-dev = ">=12.5.4.2,<13"
 libcusolver = ">=11.7.1.2,<12"
-libgl = "*"
 gcc = "==11.4"
 gxx = "==11.4"
 gcc_linux-64 = "==11.4"
@@ -27,30 +36,34 @@ gxx_linux-64 = "==11.4"
 nvtx = "==0.2.10"
 pycuda = "*"
 onnx = "*"
-pyyaml = "*"
-cbor2 = "*"
-pytest = "*"
 
-[feature.gpu.dependencies]
-cupy = "*"
-numba = "*"
+[feature.gpu.pypi-dependencies]
+holoscan = ">=4.0"
+numba-cuda = {version = "*", extras = ["cu12"]}
+tensorrt-cu12 = "*"
 
 [feature.mpi.dependencies]
 openmpi = "*"
 mpi4py = "*"
 
+# Python version features for CI matrix
+[feature.py312.dependencies]
+python = ">=3.12,<3.13"
+
+[feature.py313.dependencies]
+python = ">=3.13,<3.14"
+
 [environments]
 default = { features = ["gpu", "mpi"], solve-group = "default" }
+ci-py312 = { features = ["py312"], solve-group = "ci-py312" }
+ci-py313 = { features = ["py313"], solve-group = "ci-py313" }
 
 [pypi-dependencies]
-holoscan = ">=4.0"
 dectris-compression = ">=0.3"
 matplotlib = ">=3.9"
 Cython = ">=3.0.11"
 pyFFTW = ">=0.15"
 pyqt5 = "*"
-numba-cuda = {version = "*", extras = ["cu12"]}
-tensorrt-cu12 = "*"
 holoptycho = { path = ".", editable = true }
 ptycho = { git = "ssh://git@github.com/NSLS2/ptycho.git", branch = "master" }
 
