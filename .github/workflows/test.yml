@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [ci-py312, ci-py313]
+      fail-fast: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH for ptycho repo access
+        uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.PTYCHO_DEPLOY_KEY }}
+
+      - uses: prefix-dev/setup-pixi@v0.8.8
+        with:
+          environments: ${{ matrix.environment }}
+
+      - name: Run tests
+        run: pixi run -e ${{ matrix.environment }} test

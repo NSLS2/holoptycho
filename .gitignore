@@ -63,3 +63,6 @@ recon_result/
 # model files (GPU-specific, not portable)
 *.engine
 *.onnx
+
+# pixi
+.pixi/
