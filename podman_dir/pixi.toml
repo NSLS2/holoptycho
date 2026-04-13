@@ -6,7 +6,6 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
-postinstall = "pip install --no-build-isolation -e /ptycho_gui"
 
 [system-requirements]
 libc = { family = "glibc", version = "2.35" }
@@ -54,6 +53,13 @@ numba-cuda = {version = "*", extras = ["cu12"]}
 
 # PtychoViT TRT inference
 tensorrt-cu12 = "*"
+
+# ptycho is imported as a kernel library by Holoptycho/streaming_recon.py.
+# We use ptycho's cupy_util, cupy_collection, numba_collection, and
+# prop_class_asm modules for GPU kernel dispatch; the streaming state machine
+# lives locally in Holoptycho. Pinned to a specific master commit for
+# reproducibility; bump this consciously.
+ptycho = { git = "https://github.com/NSLS2/ptycho.git", rev = "488c4765b79c3453af212b0db61576f6f84acd69" }
 
 #nsls2ptycho = { path = "/ptycho_gui", editable = true }
 #posix_ipc = "==1.1.1"

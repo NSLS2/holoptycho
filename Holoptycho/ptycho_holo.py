@@ -15,12 +15,28 @@ except ModuleNotFoundError:
     motor_table = None  # OK for simulate mode; live mode requires hxntools
 
 
-from ..ptycho.utils import parse_config
-from ..ptycho.recon_ptycho_gui import recon_thread
+# Ptycho is imported purely as a library. The streaming-reconstruction
+# state machine lives locally in ``streaming_recon.StreamingPtychoRecon``
+# and uses ptycho only for stateless kernel libraries (cupy_util,
+# prop_class_asm, cupy_collection, numba_collection). See streaming_recon.py
+# for the architectural note.
+from types import SimpleNamespace
 
-# from nsls2ptycho.core.ptycho.recon_ptycho_gui import create_recon_object, deal_with_init_prb
-# from nsls2ptycho.core.ptycho.utils import parse_config
-# from nsls2ptycho.core.ptycho_param import Param
+from ptycho.utils import parse_config as _ptycho_parse_config
+
+from .streaming_recon import StreamingPtychoRecon
+
+
+def parse_config(config_path):
+    """Parse a ptycho config file into a SimpleNamespace.
+
+    Wraps ``ptycho.utils.parse_config`` (which requires a mutable ``param``
+    object to populate) by supplying a fresh ``SimpleNamespace`` so callers
+    don't need to construct a Param themselves. Holoptycho calls this with
+    a single positional argument.
+    """
+    param = SimpleNamespace(gui=False)
+    return _ptycho_parse_config(config_path, param)
 
 from holoscan.core import Application, Operator, OperatorSpec, ConditionType, IOSpec
 from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
@@ -117,9 +133,15 @@ class PtychoRecon(Operator):
     def __init__(self, *args, param=None, **kwargs):
         super().__init__(*args,**kwargs)
 
-        self.recon, rank = recon_thread(param)
-        self.recon.setup()
-        self.recon.keep_obj0()
+        # The streaming reconstruction engine owns all GPU state that was
+        # previously behind ``recon_thread`` / ``ptycho_trans``. It imports
+        # ptycho's kernel libraries directly; see streaming_recon.py.
+        self.recon = StreamingPtychoRecon(config=param)
+        # Allocate GPU buffers once per process. ``live_num_points_max``
+        # comes from the config; fall back to a reasonable upper bound if
+        # not set.
+        num_points_max = int(getattr(param, "live_num_points_max", 0)) or 8192
+        self.recon.gpu_setup(num_points_max=num_points_max)
 
         self.num_points_min = 300
         self.it = 0
@@ -130,7 +152,7 @@ class PtychoRecon(Operator):
         self.points_total = 0
         self.timestamp_iter = []
         self.num_points_recv_iter = []
-    
+
     def flush(self,param):
 
         print(f'flush ptycho recon {str(param[0])}')
@@ -138,13 +160,18 @@ class PtychoRecon(Operator):
         self.it_last_update = np.inf
         self.pos_ready_num = 0
         self.frame_ready_num = 0
-        self.probe_initialized = False # not self.recon.init_prb_flag
+        self.probe_initialized = False
 
-        self.recon.num_points_recon = 0
-
-        self.recon.scan_num = str(param[0])
-        self.recon.x_range_um = np.abs(param[1])
-        self.recon.y_range_um = np.abs(param[2])
+        # Reset the engine for a new scan region. This combines what the
+        # HXN_development code called ``new_obj()`` + ``flush_live_recon()``:
+        # re-dimension the object, zero the accumulation buffers, and
+        # random-init the object.
+        self.recon.reset_for_scan(
+            scan_num=str(param[0]),
+            x_range_um=np.abs(param[1]),
+            y_range_um=np.abs(param[2]),
+            num_points_max=param[3],
+        )
 
         self.num_points_min = param[3]
         self.points_total = param[4]
@@ -154,14 +181,7 @@ class PtychoRecon(Operator):
 
         self.timestamp_iter = []
         self.num_points_recv_iter = []
-
-        # nx_obj_new = int(self.recon.nx_prb + np.ceil(self.recon.x_range_um*1e-6/self.recon.x_pixel_m) + self.recon.obj_pad)
-        # ny_obj_new = int(self.recon.ny_prb + np.ceil(self.recon.y_range_um*1e-6/self.recon.y_pixel_m) + self.recon.obj_pad)
-
-        self.recon.new_obj()
         print('reload shared memory')
-
-        # self.recon.init_mmap()
 
     def setup(self,spec):
         spec.input("flush",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
@@ -205,25 +225,26 @@ class PtychoRecon(Operator):
 
         if ready_num > self.recon.num_points_recon and self.num_points_min < np.inf:
             if np.ceil(self.recon.x_range_um*1e-6/self.recon.x_pixel_m)*np.ceil(self.recon.y_range_um*1e-6/self.recon.x_pixel_m)/self.points_total > 16:
-                self.recon.clear_obj_tail(self.recon.num_points_recon,ready_num)
+                self.recon.clear_region(self.recon.num_points_recon, ready_num)
             self.recon.num_points_recon = ready_num
             if ready_num > np.minimum(self.recon.num_points_l,self.points_total)*0.97:
                 self.it_last_update = self.it
-        
+
         if self.recon.num_points_recon > self.num_points_min:
             if not self.probe_initialized:
-                self.recon.init_live_prb(self.recon.num_points_recon)
+                self.recon.initial_probe(self.recon.num_points_recon)
                 if self.recon.prb_prop_dist_um != 0:
-                    self.recon.propagate_prb()
+                    self.recon.propagate_probe()
                 self.probe_initialized = True
 
             self.timestamp_iter.append(time.time())
             self.num_points_recv_iter.append(self.recon.num_points_recon)
-            self.recon.one_iter(self.it)
+            self.recon.iter_once(self.it)
+            self.recon._track_iter(self.it)
 
             if self.it % 10 == 0:
-                it_mmap = self.it % self.recon.n_iterations
-                op_output.emit((self.recon.mmap_prb[it_mmap],self.recon.mmap_obj[it_mmap],self.it,self.recon.scan_num),"save_live_result")
+                prb_snap, obj_snap, it_num, scan_num = self.recon.snapshot()
+                op_output.emit((prb_snap, obj_snap, it_num, scan_num), "save_live_result")
 
             self.it += 1
 
@@ -256,8 +277,10 @@ def SaveLiveResult(results):
 @create_op(inputs="output")
 def SaveResult(output):
     print('Live recon done! Saving results..')
-    output[0].save_recon()
-    save_dir = output[0].save_recon_flow()
+    engine = output[0]
+    # StreamingPtychoRecon.save_final writes probe.npy + object.npy and
+    # returns the directory it wrote to.
+    save_dir = engine.save_final(save_dir=None)
     np.save(save_dir+'/timestamp_iter',np.array(output[1]))
     np.save(save_dir+'/num_points_recv_iter',np.array(output[2]))
     print('Saving results done.')
