@@ -25,6 +25,7 @@ jobs:
           ssh-private-key: ${{ secrets.PTYCHO_DEPLOY_KEY }}
 
       - name: Azure Login (OIDC)
+        if: ${{ github.event_name != 'pull_request' }}
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -32,6 +33,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Log in to ACR
+        if: ${{ github.event_name != 'pull_request' }}
         run: az acr login --name nsls2hackathonacr
 
       - name: Build container
