@@ -15,7 +15,7 @@ Real-time streaming ptychographic reconstruction using the [NVIDIA Holoscan](htt
 | Repo | Role | Used by holoptycho as |
 |---|---|---|
 | [`NSLS2/ptycho`](https://github.com/NSLS2/ptycho) | Iterative reconstruction algorithms + GPU kernels | Kernel library |
-| `NSLS2/ptychoml` (planned) | Neural network inference (PtychoViT TRT) | Inference library |
+| [`NSLS2/ptychoml`](https://github.com/NSLS2/ptychoml) | Neural network inference (PtychoViT TRT) | Inference library |
 | `ptycho-vit` | PyTorch training for PtychoViT models | Not imported — produces ONNX files for `ptychoml` to convert to TensorRT |
 
 **Design principle**: `ptycho` and `ptychoml` are pure computation libraries (no I/O). Holoptycho handles all I/O — ZMQ streams, filesystem writes, Tiled publishing — and pipeline orchestration.
