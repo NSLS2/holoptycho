@@ -30,8 +30,9 @@ parent_dir/
 │       └── core/
 │           ├── ptycho/        # Iterative reconstruction engine
 │           └── Holoptycho/    # ← symlink or copy of holoscan-framework/Holoptycho/
-└── (optional) edgePtychoViT/  # ONNX export / TRT engine build scripts
 ```
+
+TRT engine building is provided by the [ptychoml](https://github.com/NSLS2/ptychoml) package (a holoptycho dependency), via the `ptychoml-build-engine` CLI or `pixi run build-engine`.
 
 > **Important:** `Holoptycho/` lives inside `nsls2ptycho.core` because it uses relative imports (`from ..ptycho.utils import parse_config`). The entry point is:
 > ```
@@ -115,9 +116,9 @@ python export_edge_onnx.py \
 podman run --rm --device nvidia.com/gpu=all \
     -v /local/pmyint/models:/models \
     hxn-ptycho-holoscan \
-    pixi run python /edgePtychoViT/build_trt_engine.py \
+    pixi run ptychoml-build-engine \
       --onnx /models/ptycho_vit_amp_phase_b64.onnx \
-      --engine /models/ptycho_vit_amp_phase_b64.engine \
+      --output /models/ptycho_vit_amp_phase_b64.engine \
       --fp16
 ```
 
@@ -134,7 +135,6 @@ podman run --rm -it --userns=keep-id \
     --device nvidia.com/gpu=all \
     --shm-size=32g \
     -v /path/to/ptycho_gui_holoscan:/ptycho_gui_holoscan:ro \
-    -v /path/to/edgePtychoViT:/edgePtychoViT:ro \
     -v /local/pmyint/holoscan-test/models:/models:ro \
     -v /local/pmyint/holoscan-test/data:/data \
     -v /local/pmyint/holoscan-test/output:/data/users/Holoscan \
@@ -340,12 +340,6 @@ The viewer polls the output directory for `obj_live.npy` (iterative) and `vit_ba
 
 **Solution:** Already handled — the import is wrapped in a `try/except` that sets `motor_table = None`. Simulate mode does not use it; live mode requires hxntools to be mounted (via `run_container`'s `-v .../hxntools:/hxntools`).
 
-### edgePtychoViT symlink / path
-
-**Problem:** `vit_inference.py` imports from `.edgePtychoViT.helper_trt`, which lives at `Holoptycho/edgePtychoViT/`. This subdirectory must exist inside the `Holoptycho` package.
-
-**Solution:** Either copy or symlink `edgePtychoViT/` into `Holoptycho/`. Verify `__init__.py` exists in the directory.
-
 ### Spatial padding for mismatched model/data sizes
 
 **Problem:** If the diffraction data is 128x128 but the TRT engine expects 256x256 input, inference will fail.
@@ -380,7 +374,7 @@ The viewer polls the output directory for `obj_live.npy` (iterative) and `vit_ba
 | `live_simulation.py` | `InitSimul` — H5 file replay for simulate mode |
 | `live_compare_viewer.py` | Live side-by-side viewer (run from host with X11) |
 | `liverecon_utils.py` | `parse_scan_header()` utility |
-| `edgePtychoViT/` | `helper_trt.py` (TRT engine loading/inference), `build_trt_engine.py` (ONNX → TRT) |
+| (TRT inference) | Provided by the [`ptychoml`](https://github.com/NSLS2/ptychoml) package — `PtychoViTInference` session class plus `ptychoml-build-engine` CLI |
 
 ### Container build (`podman_dir/`)
 

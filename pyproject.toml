@@ -12,7 +12,7 @@ dependencies = []
 test = ["pytest"]
 
 [tool.setuptools]
-packages = ["holoptycho", "holoptycho.edgePtychoViT"]
+packages = ["holoptycho"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

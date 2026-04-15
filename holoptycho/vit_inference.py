@@ -3,10 +3,12 @@ PtychoViT TensorRT inference operator for Holoscan pipeline.
 
 Runs PtychoViT neural network inference in parallel with the iterative
 PtychoRecon solver. Takes preprocessed diffraction amplitudes from
-ImagePreprocessorOp (or InitSimul in simulate mode), runs TRT inference,
-and saves predicted amplitude/phase patches to disk.
+ImagePreprocessorOp (or InitSimul in simulate mode), runs TRT inference
+via the ``ptychoml`` package, and saves predicted amplitude/phase patches
+to disk.
 
-No PyTorch imports — uses TensorRT + PyCUDA only (safe for NSLS-II container).
+No PyTorch imports — uses TensorRT + PyCUDA via ptychoml (safe for
+NSLS-II container).
 
 Usage:
     See ptycho_holo.py for wiring into PtychoApp / PtychoSimulApp.
@@ -24,6 +26,11 @@ from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 class PtychoViTInferenceOp(Operator):
     """Holoscan operator that runs PtychoViT TRT inference on diffraction batches.
 
+    Delegates TRT engine loading, buffer allocation, and inference (including
+    fftshift, spatial padding, and final-batch padding) to
+    ``ptychoml.PtychoViTInference``. This operator is a thin Holoscan adapter
+    around that session.
+
     Inputs:
         diff_amp:      [B, H, W] float32 — preprocessed diffraction amplitude
         image_indices: [B] int32 — frame indices (for correlating with scan positions)
@@ -35,6 +42,8 @@ class PtychoViTInferenceOp(Operator):
         engine_path:       Path to .engine file (must match batch size B)
         gpu:               CUDA device ordinal (default 1; leave 0 for PtychoRecon)
         output_save_dir:   Directory for saving predictions (default /data/users/Holoscan)
+        data_is_shifted:   If True, input diff_amp has been fftshift'd and
+                           should be undone before inference.
     """
 
     def __init__(
@@ -54,56 +63,33 @@ class PtychoViTInferenceOp(Operator):
         self.output_save_dir = output_save_dir
         self._data_is_shifted = data_is_shifted
 
-        # Lazy-initialized in first compute()
-        self._initialized = False
-        self.cuda_ctx = None
-        self.trt_context = None
-        self.trt_inputs = None
-        self.trt_outputs = None
-        self.trt_bindings = None
-        self.trt_stream = None
-        self.expected_input_shape = None
-        self.expected_output_shape = None
+        # Lazy-initialized on first compute()
+        self._session = None
 
         # Stats
         self.n_batches = 0
         self.total_infer_time = 0.0
 
-    def _init_engine(self):
-        """Initialize TRT engine and CUDA context. Called once on first compute()."""
-        import pycuda.driver as drv
+    def _init_session(self):
+        """Create the ptychoml inference session."""
+        from ptychoml import PtychoViTInference
 
-        drv.init()
         if self.gpu == 0:
             self._logger.warning(
                 "VIT running on GPU 0 — same as PtychoRecon (CuPy). "
                 "PyCUDA + CuPy on the same GPU from different threads can cause "
                 "CUDA context crashes. Use gpu=1 on multi-GPU systems."
             )
-        self.cuda_ctx = drv.Device(self.gpu).make_context()
-        self._logger.info(
-            "PyCUDA context created on GPU %d (%s)",
-            self.gpu,
-            drv.Device(self.gpu).name(),
+        self._session = PtychoViTInference(
+            engine_path=self.engine_path,
+            gpu=self.gpu,
+            data_is_shifted=self._data_is_shifted,
         )
-
-        from .edgePtychoViT.helper_trt import load_engine, allocate_io_buffers
-
-        engine = load_engine(self.engine_path)
-        self.trt_context = engine.create_execution_context()
-        self.trt_inputs, self.trt_outputs, self.trt_bindings, self.trt_stream = (
-            allocate_io_buffers(engine)
-        )
-
-        self.expected_input_shape = tuple(self.trt_inputs[0]["shape"])
-        self.expected_output_shape = tuple(self.trt_outputs[0]["shape"])
         self._logger.info(
-            "TRT engine loaded: %s | input=%s | output=%s",
+            "ptychoml.PtychoViTInference created: engine=%s gpu=%d",
             self.engine_path,
-            self.expected_input_shape,
-            self.expected_output_shape,
+            self.gpu,
         )
-        self._initialized = True
 
     def setup(self, spec: OperatorSpec):
         spec.input("diff_amp").connector(
@@ -121,8 +107,8 @@ class PtychoViTInferenceOp(Operator):
             self._logger.exception("VIT inference failed (pipeline continues)")
 
     def _compute_inner(self, op_input, op_output, context):
-        if not self._initialized:
-            self._init_engine()
+        if self._session is None:
+            self._init_session()
 
         diff_amp = op_input.receive("diff_amp")
         indices = op_input.receive("image_indices")
@@ -146,108 +132,21 @@ class PtychoViTInferenceOp(Operator):
                     self._logger.info(
                         "Reloading engine: %s -> %s", self.engine_path, new_path
                     )
-                    if self.cuda_ctx:
-                        self.cuda_ctx.pop()
+                    self._session.cleanup()
                     self.engine_path = new_path
-                    self._initialized = False
+                    self._session = None
                     os.remove(reload_file)
-                    self._init_engine()
+                    self._init_session()
                     self._logger.info("Engine reload complete: %s", new_path)
                 else:
                     os.remove(reload_file)
             except Exception as e:
                 self._logger.warning("Engine reload failed: %s", e)
 
-        # --- Prepare input ---
-        # Model was trained on unshifted diffraction amplitudes (DC at corners).
-        # In simulate mode (diffamp path): data arrives unshifted — no action needed.
-        # In live mode / simulate raw_data path: data arrives fftshift'd by
-        # ImagePreprocessorOp / InitSimul — undo the shift so model sees DC at corners.
-        # For even-sized arrays, fftshift == ifftshift, so applying fftshift
-        # to already-shifted data returns it to unshifted.
-        if self._data_is_shifted:
-            diff_amp = np.fft.fftshift(diff_amp, axes=(1, 2))
-        B_actual = diff_amp.shape[0]
-        H_data = diff_amp.shape[1]
-        W_data = diff_amp.shape[2]
-        B_engine = self.expected_input_shape[0]
-        H_engine = self.expected_input_shape[2]
-        W_engine = self.expected_input_shape[3]
-
-        model_input = diff_amp[:, np.newaxis, :, :]  # [B_actual, 1, H_data, W_data]
-
-        # Spatial padding: if data is smaller than engine input (e.g. 128x128 data,
-        # 256x256 model), center-pad with zeros.  Crop output back after inference.
-        self._spatial_pad = None
-        if H_data != H_engine or W_data != W_engine:
-            pad_h = H_engine - H_data
-            pad_w = W_engine - W_data
-            if pad_h < 0 or pad_w < 0:
-                self._logger.error(
-                    "Data spatial dims (%d,%d) larger than engine (%d,%d). "
-                    "Cannot run inference.", H_data, W_data, H_engine, W_engine,
-                )
-                return
-            top = pad_h // 2
-            left = pad_w // 2
-            self._spatial_pad = (top, top + H_data, left, left + W_data)
-            padded = np.zeros(
-                (B_actual, 1, H_engine, W_engine), dtype=np.float32
-            )
-            padded[:, :, top:top + H_data, left:left + W_data] = model_input
-            model_input = padded
-            if self.n_batches == 0:
-                self._logger.info(
-                    "Spatial pad: %dx%d -> %dx%d (center-padded)",
-                    H_data, W_data, H_engine, W_engine,
-                )
-
-        # Pad final batch if smaller than engine batch size (e.g. scan_points % B != 0)
-        if B_actual < B_engine:
-            pad = np.zeros((B_engine - B_actual, 1, H_engine, W_engine), dtype=np.float32)
-            model_input = np.concatenate([model_input, pad], axis=0)
-            self._logger.info(
-                "Final batch: padded %d -> %d frames", B_actual, B_engine
-            )
-        elif B_actual > B_engine:
-            self._logger.error(
-                "Batch too large: input %d vs engine %d. "
-                "Check that ONNX batch size matches ImageBatchOp batchsize.",
-                B_actual, B_engine,
-            )
-            return
-
-        model_input = np.ascontiguousarray(model_input, dtype=np.float32)
-
-        # --- Run TRT inference ---
-        np.copyto(self.trt_inputs[0]["host"], model_input.ravel())
-
-        from .edgePtychoViT.helper_trt import infer, reshape_output_flat
-
+        # --- Run inference via ptychoml (handles fftshift, padding, TRT) ---
         t0 = time.perf_counter()
-        output_flat = np.array(
-            infer(
-                self.trt_context,
-                self.trt_inputs,
-                self.trt_outputs,
-                self.trt_bindings,
-                self.trt_stream,
-                cuda_context=self.cuda_ctx,
-            )[0]
-        )
+        pred, _ = self._session.predict(diff_amp)
         dt = time.perf_counter() - t0
-
-        # --- Reshape output and strip padding ---
-        pred = reshape_output_flat(output_flat, batch_size=B_engine, height=H_engine, width=W_engine)
-        pred = pred[:B_actual]  # strip padding rows if final batch was padded
-
-        # Crop spatial padding back to original data dimensions
-        if self._spatial_pad is not None:
-            top, bot, left, right = self._spatial_pad
-            if pred.ndim == 4:  # [B, 2, H, W]
-                pred = pred[:, :, top:bot, left:right]
-            else:  # [B, H, W]
-                pred = pred[:, top:bot, left:right]
 
         # --- Stats ---
         self.n_batches += 1
@@ -266,9 +165,9 @@ class PtychoViTInferenceOp(Operator):
         op_output.emit((pred.copy(), indices.copy()), "vit_result")
 
     def __del__(self):
-        if self.cuda_ctx is not None:
+        if self._session is not None:
             try:
-                self.cuda_ctx.pop()
+                self._session.cleanup()
             except Exception:
                 pass
 
