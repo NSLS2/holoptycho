@@ -2,6 +2,32 @@
 
 Real-time streaming ptychographic reconstruction using the [NVIDIA Holoscan](https://developer.nvidia.com/holoscan-sdk) framework. Developed for the HXN beamline at NSLS-II.
 
+## Architecture
+
+**What this repo is**: streaming ptychographic reconstruction pipeline. Consumes detector data via ZMQ, emits reconstruction results to filesystem and/or Tiled.
+
+**What this repo is not**:
+- Batch/offline reconstruction → use [`NSLS2/ptycho`](https://github.com/NSLS2/ptycho)
+- Model training → use `ptycho-vit` (PyTorch training code maintained by ANL, produces ONNX checkpoints)
+
+### Related repos
+
+| Repo | Role | Used by holoptycho as |
+|---|---|---|
+| [`NSLS2/ptycho`](https://github.com/NSLS2/ptycho) | Iterative reconstruction algorithms + GPU kernels | Kernel library |
+| `NSLS2/ptychoml` (planned) | Neural network inference (PtychoViT TRT) | Inference library |
+| `ptycho-vit` | PyTorch training for PtychoViT models | Not imported — produces ONNX files for `ptychoml` to convert to TensorRT |
+
+**Design principle**: `ptycho` and `ptychoml` are pure computation libraries (no I/O). Holoptycho handles all I/O — ZMQ streams, filesystem writes, Tiled publishing — and pipeline orchestration.
+
+### Pipeline operators
+
+- **`EigerZmqRxOp` / `PositionRxOp`** — receive diffraction data and motor positions via ZMQ
+- **`ImagePreprocessorOp` / `PointProcessorOp`** — preprocess frames and compute scan coordinates
+- **`PtychoRecon`** — iterative DM reconstruction via `StreamingPtychoRecon` (uses `ptycho` kernels)
+- **`PtychoViTInferenceOp`** — optional neural network inference for fast estimates
+- **Output sinks** — filesystem today; Tiled and ZMQ-publish planned
+
 ## Prerequisites
 
 - Linux (x86_64)
@@ -25,29 +51,15 @@ pixi run test
 ```
 
 Tests include:
-- **Smoke tests** -- verify all modules import cleanly
-- **Unit tests** -- `liverecon_utils` config parsing
-- **GPU tests** -- `StreamingPtychoRecon` buffer allocation, probe initialization, scan reset, save/load
+- **Smoke tests** — verify all modules import cleanly
+- **Unit tests** — `liverecon_utils` config parsing
+- **GPU tests** — `StreamingPtychoRecon` buffer allocation, probe initialization, scan reset, save/load
 
 GPU tests require a CUDA-capable GPU and are automatically skipped if cupy is not available.
 
 ## Container deployment
 
-The `podman_dir/` directory contains the Dockerfile and container-specific pixi environment for production deployment. See [DEPLOYMENT.md](DEPLOYMENT.md) for full instructions on building and running the container.
-
-> **Note:** The container scripts (`build_container`, `run_container`) and `DEPLOYMENT.md` still reference the old `ptycho_gui` layout and will be updated in a follow-up PR.
-
-## Architecture
-
-Holoptycho is a Holoscan pipeline with these key operators:
-
-- **EigerZmqRxOp / PositionRxOp** -- receive diffraction data and motor positions via ZMQ
-- **ImagePreprocessorOp / PointProcessorOp** -- preprocess frames and compute scan coordinates
-- **PtychoRecon** -- streaming DM ptychographic reconstruction via `StreamingPtychoRecon`
-- **PtychoViTInferenceOp** -- optional TensorRT-accelerated neural network inference
-- **SaveLiveResult / SaveResult** -- live visualization and final output
-
-`StreamingPtychoRecon` (in `holoptycho/streaming_recon.py`) owns all GPU reconstruction state and uses the `ptycho` package purely as a kernel library for GPU dispatch (cupy_util, cupy_collection, numba_collection, prop_class_asm).
+A Docker image is built and pushed to Azure Container Registry on every merge to main. See [`.github/workflows/build-container.yml`](.github/workflows/build-container.yml) and the root [`Dockerfile`](Dockerfile).
 
 ## Simulating a data stream
 
