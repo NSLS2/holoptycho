@@ -89,16 +89,9 @@ hp start --mode simulate --config /path/to/ptycho_config.txt
 
 # Live mode (ZMQ streams from detector)
 hp start --mode live --config /path/to/ptycho_config.txt
-
-# Override the engine file for this run
-hp start --mode simulate --config /path/to/ptycho_config.txt --engine-path /models/custom.engine
 ```
 
-Only one Holoscan application can run at a time. Stop it before starting another:
-
-```bash
-hp stop
-```
+If the application is already running, `hp start` will return an error. Run `hp stop` first.
 
 ### CLI reference
 
