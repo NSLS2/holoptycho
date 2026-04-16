@@ -73,11 +73,7 @@ The API server must be running before any CLI commands can be used.
 pixi run start-api
 ```
 
-This starts a [uvicorn](https://www.uvicorn.org) server on `http://127.0.0.1:8000` (localhost only). To use an existing `.engine` file without pulling from Azure ML, set `HOLOPTYCHO_ENGINE_PATH` before starting:
-
-```bash
-HOLOPTYCHO_ENGINE_PATH=/models/ptycho_vit_amp_phase_b64.engine pixi run start-api
-```
+This starts a [uvicorn](https://www.uvicorn.org) server on `http://127.0.0.1:8000` (localhost only). To access it from a remote machine, set up an SSH tunnel:
 
 ```bash
 ssh -L 8000:localhost:8000 <user>@<host>
