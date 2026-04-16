@@ -65,7 +65,7 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 
 Holoptycho includes a FastAPI control server and a CLI client (`hp`) for starting, stopping, and monitoring the pipeline remotely — for example over an SSH tunnel.
 
-### Starting the API server
+### Starting the holoptycho server
 
 The API server must be running before any CLI commands can be used.
 
@@ -79,7 +79,7 @@ This starts a [uvicorn](https://www.uvicorn.org) server on `http://127.0.0.1:800
 ssh -L 8000:localhost:8000 <user>@<host>
 ```
 
-### Starting the Holoscan application via the API
+### Starting the Holoscan pipeline
 
 Once the server is running, use `hp start` to launch the pipeline:
 
