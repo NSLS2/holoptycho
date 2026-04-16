@@ -88,6 +88,15 @@ def start(
 
 
 @app.command()
+def restart(ctx: typer.Context):
+    """Restart the Holoscan application with the same mode and config."""
+    with _client(_base_url(ctx)) as c:
+        resp = c.post("/restart")
+    _handle_error(resp)
+    typer.echo(resp.json().get("detail", "Restarting"))
+
+
+@app.command()
 def stop(ctx: typer.Context):
     """Stop the running Holoscan application."""
     with _client(_base_url(ctx)) as c:

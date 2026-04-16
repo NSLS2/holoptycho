@@ -112,6 +112,7 @@ export HOLOPTYCHO_URL=http://localhost:8000   # optional, this is the default
 |---|---|
 | `hp start --mode <mode> --config <path>` | Start the Holoscan application |
 | `hp stop` | Stop the running application |
+| `hp restart` | Stop and restart with the same mode and config |
 | `hp status` | Show application status (`stopped` / `starting` / `running` / `finished` / `error`) |
 | `hp logs [--lines N]` | Tail the last N lines of `holoptycho.log` (default 100) |
 | `hp model set <name> --version <ver>` | Swap the ViT model (pulls ONNX from Azure ML, recompiles, hot-swaps) |

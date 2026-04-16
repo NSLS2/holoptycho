@@ -121,6 +121,39 @@ def test_stop_when_not_running():
 
 
 # ---------------------------------------------------------------------------
+# /restart
+# ---------------------------------------------------------------------------
+
+def test_restart_running_app():
+    state_module.state.update(status="running", mode="simulate", config_path="/tmp/cfg.txt")
+    with patch("holoptycho.server.runner.stop") as mock_stop, \
+         patch("holoptycho.server.runner.start") as mock_start, \
+         patch("holoptycho.server.runner._runner_thread", None):
+        resp = client.post("/restart")
+    assert resp.status_code == 202
+    mock_stop.assert_called_once()
+    mock_start.assert_called_once_with(
+        config_path="/tmp/cfg.txt", mode="simulate", state=state_module.state
+    )
+
+
+def test_restart_finished_app():
+    """Should restart even if app has already finished (simulate mode)."""
+    state_module.state.update(status="finished", mode="simulate", config_path="/tmp/cfg.txt")
+    with patch("holoptycho.server.runner.start") as mock_start, \
+         patch("holoptycho.server.runner._runner_thread", None):
+        resp = client.post("/restart")
+    assert resp.status_code == 202
+    mock_start.assert_called_once()
+
+
+def test_restart_no_previous_run():
+    resp = client.post("/restart")
+    assert resp.status_code == 400
+    assert "No previous run" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
 # /logs
 # ---------------------------------------------------------------------------
 

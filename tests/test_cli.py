@@ -77,6 +77,19 @@ def test_stop_command():
     assert "Stop requested" in result.output
 
 
+def test_restart_command():
+    with _patch_post({"detail": "Restarting in 'simulate' mode with config '/tmp/cfg.txt'"}):
+        result = runner.invoke(app, ["restart"])
+    assert result.exit_code == 0
+    assert "Restarting" in result.output
+
+
+def test_restart_no_previous_run():
+    with _patch_post({"detail": "No previous run to restart."}, status_code=400):
+        result = runner.invoke(app, ["restart"])
+    assert result.exit_code == 1
+
+
 # ---------------------------------------------------------------------------
 # hp logs
 # ---------------------------------------------------------------------------

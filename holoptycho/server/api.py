@@ -125,6 +125,55 @@ def get_model_status():
         }
 
 
+@app.post("/restart", status_code=202)
+def post_restart():
+    """Stop the running app and restart it with the same mode and config.
+
+    Blocks briefly until the runner thread exits before relaunching, so
+    the GPU is fully released before the new app starts.
+    """
+    with state._lock:
+        mode = state.mode
+        config_path = state.config_path
+        current_status = state.status
+
+    if current_status not in ("starting", "running", "finished", "error"):
+        raise HTTPException(
+            status_code=400,
+            detail="No previous run to restart. Use POST /run to start.",
+        )
+    if mode is None or config_path is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No mode or config recorded — cannot restart.",
+        )
+
+    # Stop if still running
+    if current_status in ("starting", "running"):
+        try:
+            runner.stop(state=state)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    # Wait for the runner thread to exit before relaunching
+    import holoptycho.server.runner as runner_mod
+    thread = runner_mod._runner_thread
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=30)
+        if thread.is_alive():
+            raise HTTPException(
+                status_code=500,
+                detail="Runner thread did not exit within 30 s — cannot restart safely.",
+            )
+
+    try:
+        runner.start(config_path=config_path, mode=mode, state=state)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return {"detail": f"Restarting in {mode!r} mode with config {config_path!r}"}
+
+
 @app.get("/model/list")
 def get_model_list():
     """List local cached engines and available Azure ML models."""
