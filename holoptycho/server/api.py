@@ -39,12 +39,6 @@ logger = logging.getLogger("holoptycho.api")
 # ---------------------------------------------------------------------------
 app = FastAPI(title="holoptycho API", version="0.1.0")
 
-# Pre-populate engine path from environment variable if provided at startup.
-_startup_engine = os.environ.get("HOLOPTYCHO_ENGINE_PATH")
-if _startup_engine:
-    state.update(current_engine_path=_startup_engine)
-    logger.info("Engine path set from environment: %s", _startup_engine)
-
 
 # ---------------------------------------------------------------------------
 # Request / response models
@@ -52,7 +46,6 @@ if _startup_engine:
 class RunRequest(BaseModel):
     mode: str  # "live" | "simulate"
     config_path: str
-    engine_path: Optional[str] = None  # overrides HOLOPTYCHO_ENGINE_PATH if provided
 
 
 class ModelSwapRequest(BaseModel):
@@ -74,7 +67,7 @@ def get_status():
 def post_run(req: RunRequest):
     """Start the Holoscan application."""
     try:
-        runner.start(config_path=req.config_path, mode=req.mode, state=state, engine_path=req.engine_path)
+        runner.start(config_path=req.config_path, mode=req.mode, state=state)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"detail": f"Starting in {req.mode!r} mode"}
@@ -134,8 +127,8 @@ def get_model_status():
 
 @app.get("/model/list")
 def get_model_list():
-    """List available models from Azure ML."""
+    """List local cached engines and available Azure ML models."""
     try:
-        return {"models": model_manager.list_models()}
+        return model_manager.list_models()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

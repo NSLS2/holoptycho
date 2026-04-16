@@ -68,22 +68,7 @@ def test_run_starts_app():
         resp = client.post("/run", json={"mode": "simulate", "config_path": "/tmp/cfg.txt"})
     assert resp.status_code == 202
     mock_start.assert_called_once_with(
-        config_path="/tmp/cfg.txt", mode="simulate", state=state_module.state, engine_path=None,
-    )
-
-
-def test_run_passes_engine_path():
-    with patch("holoptycho.server.runner.start") as mock_start:
-        resp = client.post(
-            "/run",
-            json={"mode": "simulate", "config_path": "/tmp/cfg.txt", "engine_path": "/models/custom.engine"},
-        )
-    assert resp.status_code == 202
-    mock_start.assert_called_once_with(
-        config_path="/tmp/cfg.txt",
-        mode="simulate",
-        state=state_module.state,
-        engine_path="/models/custom.engine",
+        config_path="/tmp/cfg.txt", mode="simulate", state=state_module.state,
     )
 
 
@@ -194,10 +179,33 @@ def test_model_status_after_swap(reset_state):
     assert data["current_model_version"] == "3"
 
 
+def test_model_list_returns_combined():
+    combined = {
+        "local": [{"filename": "ptycho_vit_v3.engine", "path": "/models/ptycho_vit_v3.engine", "size_mb": 120.0}],
+        "azure": [{"name": "ptycho_vit", "version": "3", "description": None, "cached": True}],
+        "azure_available": True,
+    }
+    with patch("holoptycho.server.model_manager.list_models", return_value=combined):
+        resp = client.get("/model/list")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data["local"]) == 1
+    assert data["local"][0]["filename"] == "ptycho_vit_v3.engine"
+    assert data["azure"][0]["cached"] is True
+
+
+def test_model_list_no_azure():
+    combined = {"local": [], "azure": [], "azure_available": False}
+    with patch("holoptycho.server.model_manager.list_models", return_value=combined):
+        resp = client.get("/model/list")
+    assert resp.status_code == 200
+    assert resp.json()["azure_available"] is False
+
+
 def test_model_list_error():
     with patch(
         "holoptycho.server.model_manager.list_models",
-        side_effect=Exception("Azure not configured"),
+        side_effect=Exception("unexpected error"),
     ):
         resp = client.get("/model/list")
     assert resp.status_code == 500

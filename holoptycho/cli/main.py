@@ -79,14 +79,10 @@ def start(
     ctx: typer.Context,
     mode: str = typer.Option(..., "--mode", help="'live' or 'simulate'"),
     config: str = typer.Option(..., "--config", help="Path to ptycho config file"),
-    engine_path: str = typer.Option(None, "--engine-path", help="Path to .engine file (overrides HOLOPTYCHO_ENGINE_PATH)"),
 ):
     """Start the Holoscan application."""
-    payload = {"mode": mode, "config_path": config}
-    if engine_path:
-        payload["engine_path"] = engine_path
     with _client(_base_url(ctx)) as c:
-        resp = c.post("/run", json=payload)
+        resp = c.post("/run", json={"mode": mode, "config_path": config})
     _handle_error(resp)
     typer.echo(resp.json().get("detail", "Started"))
 
@@ -141,15 +137,35 @@ def model_status(ctx: typer.Context):
 
 @model_app.command("list")
 def model_list(ctx: typer.Context):
-    """List available models from Azure ML."""
+    """List available models (local cache and Azure ML)."""
     with _client(_base_url(ctx)) as c:
         resp = c.get("/model/list")
     _handle_error(resp)
-    models = resp.json().get("models", [])
-    if not models:
-        typer.echo("No models found")
-        return
-    table = Table("Name", "Version", "Description")
-    for m in models:
-        table.add_row(m.get("name", ""), str(m.get("version", "")), m.get("description") or "")
-    rprint(table)
+    data = resp.json()
+
+    local = data.get("local", [])
+    azure = data.get("azure", [])
+    azure_available = data.get("azure_available", False)
+
+    typer.echo("Local cache:")
+    if local:
+        table = Table("File", "Size (MB)")
+        for m in local:
+            table.add_row(m["filename"], str(m["size_mb"]))
+        rprint(table)
+    else:
+        typer.echo("  (no .engine files found in model folder)")
+
+    typer.echo("")
+    if not azure_available:
+        typer.echo("Azure ML: not configured (set AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, AZURE_ML_WORKSPACE)")
+    else:
+        typer.echo("Azure ML:")
+        if azure:
+            table = Table("Name", "Version", "Cached", "Description")
+            for m in azure:
+                cached = "yes" if m.get("cached") else "no"
+                table.add_row(m["name"], str(m["version"]), cached, m.get("description") or "")
+            rprint(table)
+        else:
+            typer.echo("  (no models found in Azure ML)")

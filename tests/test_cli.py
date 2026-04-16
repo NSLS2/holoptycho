@@ -131,22 +131,30 @@ def test_model_status_command():
 
 def test_model_list_command():
     data = {
-        "models": [
-            {"name": "ptycho_vit", "version": "3", "description": "VIT model"},
-            {"name": "ptycho_vit", "version": "2", "description": None},
-        ]
+        "local": [{"filename": "ptycho_vit_v3.engine", "path": "/models/ptycho_vit_v3.engine", "size_mb": 120.0}],
+        "azure": [{"name": "ptycho_vit", "version": "3", "description": "VIT model", "cached": True}],
+        "azure_available": True,
     }
     with _patch_get(data):
         result = runner.invoke(app, ["model", "list"])
     assert result.exit_code == 0
-    assert "ptycho_vit" in result.output
+    assert "ptycho_vit_v3.engine" in result.output
 
 
-def test_model_list_empty():
-    with _patch_get({"models": []}):
+def test_model_list_no_azure():
+    data = {"local": [], "azure": [], "azure_available": False}
+    with _patch_get(data):
         result = runner.invoke(app, ["model", "list"])
     assert result.exit_code == 0
-    assert "No models found" in result.output
+    assert "not configured" in result.output
+
+
+def test_model_list_empty_local():
+    data = {"local": [], "azure": [], "azure_available": True}
+    with _patch_get(data):
+        result = runner.invoke(app, ["model", "list"])
+    assert result.exit_code == 0
+    assert "no .engine files" in result.output
 
 
 # ---------------------------------------------------------------------------

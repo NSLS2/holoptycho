@@ -152,12 +152,25 @@ The server exposes the following REST endpoints (useful for scripting or buildin
 
 ### Model hot-swap
 
-`hp model set` triggers a background job that:
-1. Pulls the ONNX file from Azure ML (`azure-ai-ml` + `AzureCliCredential`)
-2. Compiles it to a TensorRT `.engine` for the current GPU via `trtexec` (skipped if the `.engine` is newer than the `.onnx`)
-3. Writes a `reload_engine.txt` sentinel file — `PtychoViTInferenceOp` picks this up on its next iteration without any pipeline restart
+`hp model set` swaps the ViT engine without restarting the pipeline:
 
-The swap requires these environment variables:
+1. If the compiled `.engine` is already in the model folder — the sentinel is written immediately, no network access needed.
+2. If not cached locally — the ONNX is pulled from Azure ML, compiled to TensorRT via `trtexec`, cached, then the sentinel is written.
+
+`PtychoViTInferenceOp` picks up the sentinel on its next iteration tick.
+
+#### Using a local engine (no Azure ML)
+
+Drop a compiled `.engine` file into the model folder (default `/models`), then:
+
+```bash
+hp model list          # shows the file under "Local cache"
+hp model set ptycho_vit --version 3   # selects it by name/version
+```
+
+#### Pulling from Azure ML
+
+Set these environment variables, then `hp model set` will download and compile automatically if the engine is not already cached:
 
 ```bash
 export AZURE_SUBSCRIPTION_ID=<subscription-id>
@@ -165,11 +178,7 @@ export AZURE_RESOURCE_GROUP=<resource-group>
 export AZURE_ML_WORKSPACE=<workspace-name>
 ```
 
-The compiled `.engine` files are cached in `/models` by default. Override with:
-
-```bash
-export ENGINE_CACHE_DIR=/path/to/cache
-```
+The compiled `.engine` files are cached in `/models` by default. Override with `ENGINE_CACHE_DIR=/path/to/cache`.
 
 ---
 
