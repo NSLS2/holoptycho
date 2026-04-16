@@ -147,14 +147,14 @@ The server exposes the following REST endpoints (useful for scripting or buildin
 | `GET` | `/model/status` | Poll model swap progress |
 | `GET` | `/model/list` | List available models from Azure ML |
 
-### Model hot-swap
+### Model selection
 
-`hp model set` swaps the ViT engine without restarting the pipeline:
+`hp model set` selects the ViT engine to use on the **next** `hp start` or `hp restart`:
 
-1. If the compiled `.engine` is already in the model folder — the sentinel is written immediately, no network access needed.
-2. If not cached locally — the ONNX is pulled from Azure ML, compiled to TensorRT via `trtexec`, cached, then the sentinel is written.
+1. If the compiled `.engine` is already in the model folder — `state` is updated immediately, no network access needed.
+2. If not cached locally — the ONNX is pulled from Azure ML, compiled to TensorRT via `trtexec`, cached, then state is updated.
 
-`PtychoViTInferenceOp` picks up the sentinel on its next iteration tick.
+The selected engine takes effect the next time the pipeline starts.
 
 #### Using a local engine (no Azure ML)
 

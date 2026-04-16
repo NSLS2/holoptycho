@@ -8,20 +8,20 @@ Engine files (.engine) are placed in ENGINE_CACHE_DIR (default /models) either
 manually or by a previous pull+compile. Naming convention for Azure-sourced
 engines: ``{model_name}_v{version}.engine``.
 
-Model swap flow (swap_model)
-----------------------------
+Model selection flow (swap_model)
+----------------------------------
 1. Check whether the requested .engine already exists in ENGINE_CACHE_DIR.
-2. If yes → write reload_engine.txt sentinel immediately (no network needed).
-3. If no → pull ONNX from Azure ML, compile via trtexec, then write sentinel.
+2. If yes → update state.current_engine_path immediately (no network needed).
+3. If no → pull ONNX from Azure ML, compile via trtexec, then update state.
+
+The new engine takes effect the next time the Holoscan app is started via
+POST /run or POST /restart.
 
 list_models
 -----------
 Returns a combined list of:
 - Local .engine files found in ENGINE_CACHE_DIR
 - Models registered in Azure ML (if Azure env vars are configured)
-
-Each entry carries a ``sources`` field: ``["local"]``, ``["azure"]``, or
-``["local", "azure"]``.
 """
 
 import logging
@@ -90,13 +90,6 @@ def _compile_engine(onnx_path: Path, engine_path: Path) -> None:
     logger.info("Compilation complete: %s", engine_path)
 
 
-def _write_sentinel(engine_path: Path) -> None:
-    """Write reload_engine.txt so PtychoViTInferenceOp picks up the new engine."""
-    sentinel = engine_path.parent / "reload_engine.txt"
-    sentinel.write_text(str(engine_path))
-    logger.info("Sentinel written: %s → %s", sentinel, engine_path)
-
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -159,17 +152,18 @@ def list_models() -> dict:
 
 
 def swap_model(model_name: str, version: str, state) -> None:
-    """Swap to the requested model engine.
+    """Select a model engine for the next pipeline run.
 
-    If the compiled .engine is already in ENGINE_CACHE_DIR, the sentinel is
-    written immediately (no network access). Otherwise the ONNX is pulled from
-    Azure ML and compiled first.
+    If the compiled .engine is already in ENGINE_CACHE_DIR, state is updated
+    immediately. Otherwise the ONNX is pulled from Azure ML and compiled first.
+    The new engine takes effect the next time the Holoscan app is started via
+    POST /run or POST /restart.
     """
     try:
         target = _engine_path(model_name, version)
 
         if target.exists():
-            logger.info("Engine already cached: %s — skipping download", target)
+            logger.info("Engine already cached: %s", target)
             state.update(model_status="loading", model_error=None)
         else:
             if not _azure_available():
@@ -188,8 +182,6 @@ def swap_model(model_name: str, version: str, state) -> None:
 
             state.update(model_status="loading")
 
-        _write_sentinel(target)
-
         state.update(
             model_status="ready",
             current_engine_path=str(target),
@@ -197,7 +189,9 @@ def swap_model(model_name: str, version: str, state) -> None:
             current_model_version=version,
             model_error=None,
         )
-        logger.info("Model swap complete: %s v%s", model_name, version)
+        logger.info(
+            "Model selected: %s v%s — will take effect on next start", model_name, version
+        )
 
     except Exception as exc:
         logger.exception("Model swap failed")
