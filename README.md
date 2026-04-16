@@ -72,19 +72,6 @@ Connects to `http://localhost:8000` by default. Override with `--url` or `HOLOPT
 | `hp model set <name> --version <ver>` | Select model for next start |
 | `hp model status` | Show current model selection status |
 
-### API endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/run` | Start pipeline — `{"mode": "simulate"\|"live", "config_path": "..."}` |
-| `POST` | `/stop` | Stop the pipeline |
-| `POST` | `/restart` | Restart with same mode and config |
-| `GET` | `/status` | Pipeline status and uptime |
-| `GET` | `/logs?lines=N` | Tail of `holoptycho.log` |
-| `POST` | `/model` | Select model — `{"name": "...", "version": "..."}` |
-| `GET` | `/model/status` | Current model selection status |
-| `GET` | `/model/list` | Local and Azure ML model inventory |
-
 ### Model selection
 
 `hp model list` shows two sections:
