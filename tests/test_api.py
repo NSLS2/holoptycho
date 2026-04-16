@@ -68,7 +68,22 @@ def test_run_starts_app():
         resp = client.post("/run", json={"mode": "simulate", "config_path": "/tmp/cfg.txt"})
     assert resp.status_code == 202
     mock_start.assert_called_once_with(
-        config_path="/tmp/cfg.txt", mode="simulate", state=state_module.state
+        config_path="/tmp/cfg.txt", mode="simulate", state=state_module.state, engine_path=None,
+    )
+
+
+def test_run_passes_engine_path():
+    with patch("holoptycho.server.runner.start") as mock_start:
+        resp = client.post(
+            "/run",
+            json={"mode": "simulate", "config_path": "/tmp/cfg.txt", "engine_path": "/models/custom.engine"},
+        )
+    assert resp.status_code == 202
+    mock_start.assert_called_once_with(
+        config_path="/tmp/cfg.txt",
+        mode="simulate",
+        state=state_module.state,
+        engine_path="/models/custom.engine",
     )
 
 
@@ -96,7 +111,7 @@ def test_run_blocked_while_thread_alive():
         runner_mod._runner_thread = None
 
 
-
+def test_run_invalid_mode():
     with patch("holoptycho.server.runner.start", side_effect=ValueError("Unknown mode")):
         resp = client.post("/run", json={"mode": "badmode", "config_path": "/tmp/cfg.txt"})
     assert resp.status_code == 400

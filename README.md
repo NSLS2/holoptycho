@@ -73,7 +73,11 @@ The API server must be running before any CLI commands can be used.
 pixi run start-api
 ```
 
-This starts a [uvicorn](https://www.uvicorn.org) server on `http://127.0.0.1:8000` (localhost only). To access it from a remote machine, set up an SSH tunnel:
+This starts a [uvicorn](https://www.uvicorn.org) server on `http://127.0.0.1:8000` (localhost only). To use an existing `.engine` file without pulling from Azure ML, set `HOLOPTYCHO_ENGINE_PATH` before starting:
+
+```bash
+HOLOPTYCHO_ENGINE_PATH=/models/ptycho_vit_amp_phase_b64.engine pixi run start-api
+```
 
 ```bash
 ssh -L 8000:localhost:8000 <user>@<host>
@@ -89,6 +93,9 @@ hp start --mode simulate --config /path/to/ptycho_config.txt
 
 # Live mode (ZMQ streams from detector)
 hp start --mode live --config /path/to/ptycho_config.txt
+
+# Override the engine file for this run
+hp start --mode simulate --config /path/to/ptycho_config.txt --engine-path /models/custom.engine
 ```
 
 Only one Holoscan application can run at a time. Stop it before starting another:

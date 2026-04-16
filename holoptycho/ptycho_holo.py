@@ -287,12 +287,13 @@ def SaveResult(output):
     return
     
 class PtychoSimulApp(Application):
-    def __init__(self, *args, config_path=None, **kwargs):
+    def __init__(self, *args, config_path=None, engine_path=None, **kwargs):
         super().__init__(*args,**kwargs)
 
         self.config_path = config_path
         self.param = parse_config(self.config_path)
         self.gpu = self.param.gpus[0]
+        self.engine_path = engine_path or "/models/ptycho_vit_amp_phase_b64.engine"
 
     def config_ops(self,param):
 
@@ -359,7 +360,7 @@ class PtychoSimulApp(Application):
         # Simulate diffamp path: data is unshifted (DC at corners) — no undo needed
         self.vit = PtychoViTInferenceOp(
             self,
-            engine_path="/models/ptycho_vit_amp_phase_b64.engine",
+            engine_path=self.engine_path,
             gpu=1,
             data_is_shifted=False,
             name="vit_inference",
@@ -386,12 +387,13 @@ class PtychoSimulApp(Application):
 
 
 class PtychoApp(Application):
-    def __init__(self, *args, config_path=None, **kwargs):
+    def __init__(self, *args, config_path=None, engine_path=None, **kwargs):
         super().__init__(*args,**kwargs)
 
         self.config_path = config_path
         self.param = parse_config(self.config_path)
         self.gpu = self.param.gpus[0]
+        self.engine_path = engine_path or "/models/ptycho_vit_amp_phase_b64.engine"
 
     def config_ops(self,param):
 
@@ -471,7 +473,7 @@ class PtychoApp(Application):
         # Live mode: ImagePreprocessorOp applies fftshift — undo it for model
         self.vit = PtychoViTInferenceOp(
             self,
-            engine_path="/models/ptycho_vit_amp_phase_b64.engine",
+            engine_path=self.engine_path,
             gpu=1,
             data_is_shifted=True,
             name="vit_inference",

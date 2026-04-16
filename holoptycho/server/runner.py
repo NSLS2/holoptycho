@@ -28,11 +28,15 @@ def _run_app(app, state: AppState):
         logger.exception("Holoscan app raised an exception")
 
 
-def start(config_path: str, mode: str, state: AppState) -> None:
+def start(config_path: str, mode: str, state: AppState, engine_path: str | None = None) -> None:
     """Start the Holoscan application in a daemon background thread.
 
     Raises RuntimeError if an app is already running or if a previous
     runner thread is still alive (e.g. winding down after a stop request).
+
+    engine_path overrides the default engine file. If None, falls back to
+    state.current_engine_path (set at API startup via HOLOPTYCHO_ENGINE_PATH),
+    then to the hardcoded default in PtychoApp/PtychoSimulApp.
     """
     global _runner_thread
 
@@ -55,10 +59,13 @@ def start(config_path: str, mode: str, state: AppState) -> None:
     except ImportError as exc:
         raise RuntimeError(f"Failed to import Holoscan app: {exc}") from exc
 
+    # Resolve engine path: explicit arg > state default > app hardcoded default
+    resolved_engine = engine_path or state.current_engine_path
+
     if mode == "simulate":
-        app = PtychoSimulApp(config_path=config_path)
+        app = PtychoSimulApp(config_path=config_path, engine_path=resolved_engine)
     elif mode == "live":
-        app = PtychoApp(config_path=config_path)
+        app = PtychoApp(config_path=config_path, engine_path=resolved_engine)
     else:
         raise ValueError(f"Unknown mode {mode!r}. Use 'live' or 'simulate'.")
 

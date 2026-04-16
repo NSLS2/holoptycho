@@ -8,6 +8,7 @@ or:
 
 import logging
 import logging.handlers
+import os
 import threading
 from pathlib import Path
 from typing import Optional
@@ -38,6 +39,12 @@ logger = logging.getLogger("holoptycho.api")
 # ---------------------------------------------------------------------------
 app = FastAPI(title="holoptycho API", version="0.1.0")
 
+# Pre-populate engine path from environment variable if provided at startup.
+_startup_engine = os.environ.get("HOLOPTYCHO_ENGINE_PATH")
+if _startup_engine:
+    state.update(current_engine_path=_startup_engine)
+    logger.info("Engine path set from environment: %s", _startup_engine)
+
 
 # ---------------------------------------------------------------------------
 # Request / response models
@@ -45,6 +52,7 @@ app = FastAPI(title="holoptycho API", version="0.1.0")
 class RunRequest(BaseModel):
     mode: str  # "live" | "simulate"
     config_path: str
+    engine_path: Optional[str] = None  # overrides HOLOPTYCHO_ENGINE_PATH if provided
 
 
 class ModelSwapRequest(BaseModel):
@@ -66,7 +74,7 @@ def get_status():
 def post_run(req: RunRequest):
     """Start the Holoscan application."""
     try:
-        runner.start(config_path=req.config_path, mode=req.mode, state=state)
+        runner.start(config_path=req.config_path, mode=req.mode, state=state, engine_path=req.engine_path)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"detail": f"Starting in {req.mode!r} mode"}

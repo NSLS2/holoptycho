@@ -79,10 +79,14 @@ def start(
     ctx: typer.Context,
     mode: str = typer.Option(..., "--mode", help="'live' or 'simulate'"),
     config: str = typer.Option(..., "--config", help="Path to ptycho config file"),
+    engine_path: str = typer.Option(None, "--engine-path", help="Path to .engine file (overrides HOLOPTYCHO_ENGINE_PATH)"),
 ):
     """Start the Holoscan application."""
+    payload = {"mode": mode, "config_path": config}
+    if engine_path:
+        payload["engine_path"] = engine_path
     with _client(_base_url(ctx)) as c:
-        resp = c.post("/run", json={"mode": mode, "config_path": config})
+        resp = c.post("/run", json=payload)
     _handle_error(resp)
     typer.echo(resp.json().get("detail", "Started"))
 
