@@ -64,9 +64,16 @@ pyqt5 = "*"
 holoptycho = { path = ".", editable = true }
 ptycho = { git = "ssh://git@github.com/NSLS2/ptycho.git", branch = "master" }
 ptychoml = { git = "ssh://git@github.com/NSLS2/ptychoml.git", branch = "main" }
+fastapi = ">=0.110"
+uvicorn = {version = ">=0.29", extras = ["standard"]}
+httpx = ">=0.27"
+typer = ">=0.12"
+azure-ai-ml = ">=1.15"
+azure-identity = ">=1.16"
 
 [activation]
 scripts = ["set-ld-path.sh"]
 
 [tasks]
 test = "pytest tests/ -v"
+start-api = "uvicorn holoptycho.server.api:app --host 127.0.0.1 --port 8000"
