@@ -79,7 +79,24 @@ def test_run_returns_400_if_already_running():
     assert "already running" in resp.json()["detail"]
 
 
-def test_run_invalid_mode():
+def test_run_blocked_while_thread_alive():
+    """start() raises if the previous runner thread is still alive."""
+    import threading
+    import holoptycho.server.runner as runner_mod
+
+    fake_thread = MagicMock(spec=threading.Thread)
+    fake_thread.is_alive.return_value = True
+    runner_mod._runner_thread = fake_thread
+
+    try:
+        resp = client.post("/run", json={"mode": "simulate", "config_path": "/tmp/cfg.txt"})
+        assert resp.status_code == 400
+        assert "shutting down" in resp.json()["detail"]
+    finally:
+        runner_mod._runner_thread = None
+
+
+
     with patch("holoptycho.server.runner.start", side_effect=ValueError("Unknown mode")):
         resp = client.post("/run", json={"mode": "badmode", "config_path": "/tmp/cfg.txt"})
     assert resp.status_code == 400

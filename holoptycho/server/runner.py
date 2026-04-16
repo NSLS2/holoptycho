@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Runs the Holoscan application (PtychoApp or PtychoSimulApp) in a
 background thread and keeps AppState in sync with its lifecycle."""
 
@@ -8,6 +10,9 @@ import time
 from .state import AppState
 
 logger = logging.getLogger("holoptycho.runner")
+
+# Module-level reference to the runner thread so we can check is_alive().
+_runner_thread: threading.Thread | None = None
 
 
 def _run_app(app, state: AppState):
@@ -26,13 +31,23 @@ def _run_app(app, state: AppState):
 def start(config_path: str, mode: str, state: AppState) -> None:
     """Start the Holoscan application in a daemon background thread.
 
-    Raises RuntimeError if an app is already running.
+    Raises RuntimeError if an app is already running or if a previous
+    runner thread is still alive (e.g. winding down after a stop request).
     """
+    global _runner_thread
+
     with state._lock:
         if state.status in ("starting", "running"):
             raise RuntimeError(
                 f"App is already {state.status}. Stop it first."
             )
+
+    # Guard against the race where stop() has been called but the thread
+    # hasn't exited yet — two Holoscan apps on the same GPU would conflict.
+    if _runner_thread is not None and _runner_thread.is_alive():
+        raise RuntimeError(
+            "Previous runner thread is still shutting down. Try again in a moment."
+        )
 
     # Import heavy GPU deps here so the FastAPI server can start without them.
     try:
@@ -54,13 +69,13 @@ def start(config_path: str, mode: str, state: AppState) -> None:
         error=None,
     )
 
-    thread = threading.Thread(
+    _runner_thread = threading.Thread(
         target=_run_app,
         args=(app, state),
         daemon=True,
         name="holoscan-runner",
     )
-    thread.start()
+    _runner_thread.start()
     logger.info("Runner thread started")
 
 
