@@ -142,10 +142,24 @@ The server exposes the following REST endpoints (useful for scripting or buildin
 
 ### Model selection
 
-`hp model set` selects the ViT engine to use on the **next** `hp start` or `hp restart`:
+Use `hp model list` to see what is available:
 
-1. If the compiled `.engine` is already in the model folder — `state` is updated immediately, no network access needed.
-2. If not cached locally — the ONNX is pulled from Azure ML, compiled to TensorRT via `trtexec`, cached, then state is updated.
+```bash
+hp model list
+```
+
+This shows two sections:
+- **Local cache** — `.engine` files already in the model folder (`/models` by default), ready to use immediately
+- **Azure ML** — models registered in Azure ML, with a `cached` column indicating whether the compiled engine is already local
+
+Use `hp model set` to select the ViT engine for the **next** `hp start` or `hp restart`:
+
+```bash
+hp model set ptycho_vit --version 3
+```
+
+1. If the compiled `.engine` is already in the model folder — selected immediately, no network access needed.
+2. If not cached locally — the ONNX is pulled from Azure ML, compiled to TensorRT via `trtexec`, cached, then selected.
 
 The selected engine takes effect the next time the pipeline starts.
 
