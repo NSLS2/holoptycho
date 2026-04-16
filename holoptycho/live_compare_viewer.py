@@ -38,7 +38,7 @@ def load_scan_info(h5_path):
 class IncrementalStitcher:
     """Incrementally stitches VIT patches into a mosaic.
 
-    Follows the same approach as edgePtychoViT/stitch_viewer.py:
+    Follows the stitching approach from the ViT training codebase:
     - Scan positions (microns) are converted to meters
     - Centered local patch coordinates are computed from pixel_size_m
     - Patches are cropped (inner_crop) to reduce edge artifacts

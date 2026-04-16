@@ -34,13 +34,10 @@ gxx = "==11.4"
 gcc_linux-64 = "==11.4"
 gxx_linux-64 = "==11.4"
 nvtx = "==0.2.10"
-pycuda = "*"
-onnx = "*"
 
 [feature.gpu.pypi-dependencies]
 holoscan = ">=4.0"
 numba-cuda = {version = "*", extras = ["cu12"]}
-tensorrt-cu12 = "*"
 
 [feature.mpi.dependencies]
 openmpi = "*"
@@ -66,6 +63,7 @@ pyFFTW = ">=0.15"
 pyqt5 = "*"
 holoptycho = { path = ".", editable = true }
 ptycho = { git = "ssh://git@github.com/NSLS2/ptycho.git", branch = "master" }
+ptychoml = { git = "ssh://git@github.com/NSLS2/ptychoml.git", branch = "main" }
 
 [activation]
 scripts = ["set-ld-path.sh"]
