@@ -93,17 +93,9 @@ Override the default model folder with `ENGINE_CACHE_DIR=/path/to/cache`.
 
 ## Simulating a data stream
 
-### In-process H5 replay
+Use `hp start --mode simulate` to replay from a pre-recorded HDF5 file without a live detector. The H5 path is `{working_directory}/scan_{scan_num}.h5` (from config). Outputs land at `/data/users/Holoscan/`.
 
-Reads from a pre-recorded HDF5 file, bypassing ZMQ:
-
-```bash
-pixi run python -m holoptycho <config_file> simulate
-```
-
-The H5 path is `{working_directory}/scan_{scan_num}.h5` (from config). Outputs land at `/data/users/Holoscan/`.
-
-### Eiger simulator (end-to-end ZMQ)
+For end-to-end ZMQ testing with the Eiger simulator container:
 
 ```bash
 docker build ./eiger_simulation -t eiger_sim:test --network host
@@ -111,7 +103,7 @@ docker run -d -p 8000:8000 -p 5555:5555 eiger_sim:test
 docker exec -it <container_id> python trigger_detector.py -n 10000 -dt 0.001
 ```
 
-Point `SERVER_STREAM_SOURCE` at `tcp://<host>:5555` and run without `simulate`.
+Point `SERVER_STREAM_SOURCE` at `tcp://<host>:5555` and use `hp start --mode live`.
 
 ## Profiling
 
