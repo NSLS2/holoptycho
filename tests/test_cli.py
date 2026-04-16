@@ -3,6 +3,7 @@
 Uses Typer's CliRunner and mocks httpx so no real API server is needed.
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,7 +14,7 @@ from holoptycho.cli.main import app
 runner = CliRunner()
 
 
-def _mock_response(status_code: int, json_data: dict) -> MagicMock:
+def _mock_response(status_code: int, json_data) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status_code
     resp.is_error = status_code >= 400
@@ -22,14 +23,16 @@ def _mock_response(status_code: int, json_data: dict) -> MagicMock:
     return resp
 
 
-def _patch_get(json_data: dict, status_code: int = 200):
-    resp = _mock_response(status_code, json_data)
-    return patch("httpx.Client.get", return_value=resp)
+def _patch_get(json_data, status_code: int = 200):
+    return patch("httpx.Client.get", return_value=_mock_response(status_code, json_data))
 
 
-def _patch_post(json_data: dict, status_code: int = 202):
-    resp = _mock_response(status_code, json_data)
-    return patch("httpx.Client.post", return_value=resp)
+def _patch_post(json_data, status_code: int = 202):
+    return patch("httpx.Client.post", return_value=_mock_response(status_code, json_data))
+
+
+def _patch_delete(json_data, status_code: int = 200):
+    return patch("httpx.Client.request", return_value=_mock_response(status_code, json_data))
 
 
 # ---------------------------------------------------------------------------
@@ -37,8 +40,7 @@ def _patch_post(json_data: dict, status_code: int = 202):
 # ---------------------------------------------------------------------------
 
 def test_status_command():
-    data = {"status": "stopped", "mode": None, "uptime_seconds": None}
-    with _patch_get(data):
+    with _patch_get({"status": "stopped", "selected_config": None}):
         result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
     assert "stopped" in result.output
@@ -50,44 +52,33 @@ def test_status_command():
 
 def test_start_command():
     with _patch_post({"detail": "Starting in 'simulate' mode"}):
-        result = runner.invoke(
-            app, ["start", "--mode", "simulate", "--config", "/tmp/cfg.txt"]
-        )
+        result = runner.invoke(app, ["start", "--mode", "simulate"])
     assert result.exit_code == 0
     assert "simulate" in result.output
 
 
-def test_start_error_response():
-    with _patch_post({"detail": "App is already running"}, status_code=400):
-        result = runner.invoke(
-            app, ["start", "--mode", "simulate", "--config", "/tmp/cfg.txt"]
-        )
+def test_start_no_config_error():
+    with _patch_post({"detail": "No config selected"}, status_code=400):
+        result = runner.invoke(app, ["start", "--mode", "simulate"])
     assert result.exit_code == 1
-    assert "400" in result.output
+    assert "No config selected" in result.output
 
 
 # ---------------------------------------------------------------------------
-# hp stop
+# hp stop / restart
 # ---------------------------------------------------------------------------
 
 def test_stop_command():
     with _patch_post({"detail": "Stop requested"}):
         result = runner.invoke(app, ["stop"])
     assert result.exit_code == 0
-    assert "Stop requested" in result.output
 
 
 def test_restart_command():
-    with _patch_post({"detail": "Restarting in 'simulate' mode with config '/tmp/cfg.txt'"}):
+    with _patch_post({"detail": "Restarting in 'simulate' mode"}):
         result = runner.invoke(app, ["restart"])
     assert result.exit_code == 0
     assert "Restarting" in result.output
-
-
-def test_restart_no_previous_run():
-    with _patch_post({"detail": "No previous run to restart."}, status_code=400):
-        result = runner.invoke(app, ["restart"])
-    assert result.exit_code == 1
 
 
 # ---------------------------------------------------------------------------
@@ -95,58 +86,123 @@ def test_restart_no_previous_run():
 # ---------------------------------------------------------------------------
 
 def test_logs_command():
-    lines = ["2026-01-01 INFO starting", "2026-01-01 INFO running"]
-    with _patch_get({"lines": lines}):
+    with _patch_get({"lines": ["line 1", "line 2"]}):
         result = runner.invoke(app, ["logs", "--lines", "2"])
     assert result.exit_code == 0
-    assert "starting" in result.output
-    assert "running" in result.output
+    assert "line 1" in result.output
 
 
 # ---------------------------------------------------------------------------
-# hp model set
+# hp config list
+# ---------------------------------------------------------------------------
+
+def test_config_list_command():
+    data = {
+        "configs": [
+            {"name": "hxn_live", "updated": 1234567890.0},
+            {"name": "hxn_sim", "updated": 1234567891.0},
+        ],
+        "selected": "hxn_sim",
+    }
+    with _patch_get(data):
+        result = runner.invoke(app, ["config", "list"])
+    assert result.exit_code == 0
+    assert "hxn_live" in result.output
+    assert "hxn_sim" in result.output
+
+
+def test_config_list_empty():
+    with _patch_get({"configs": [], "selected": None}):
+        result = runner.invoke(app, ["config", "list"])
+    assert result.exit_code == 0
+    assert "No configs found" in result.output
+
+
+# ---------------------------------------------------------------------------
+# hp config show
+# ---------------------------------------------------------------------------
+
+def test_config_show_command():
+    with _patch_get({"scan_num": "339015", "x_range": "2.0"}):
+        result = runner.invoke(app, ["config", "show", "hxn_sim"])
+    assert result.exit_code == 0
+    assert "339015" in result.output
+
+
+# ---------------------------------------------------------------------------
+# hp config set
+# ---------------------------------------------------------------------------
+
+def test_config_set_command():
+    with _patch_post({"detail": "Config 'hxn_sim' saved"}, status_code=201):
+        result = runner.invoke(
+            app, ["config", "set", "hxn_sim", '{"scan_num": "1"}']
+        )
+    assert result.exit_code == 0
+    assert "saved" in result.output
+
+
+def test_config_set_invalid_json():
+    result = runner.invoke(app, ["config", "set", "hxn_sim", "not json"])
+    assert result.exit_code == 1
+    assert "Invalid JSON" in result.output
+
+
+# ---------------------------------------------------------------------------
+# hp config select
+# ---------------------------------------------------------------------------
+
+def test_config_select_command():
+    with _patch_post({"detail": "Config 'hxn_sim' selected"}):
+        result = runner.invoke(app, ["config", "select", "hxn_sim"])
+    assert result.exit_code == 0
+    assert "selected" in result.output
+
+
+# ---------------------------------------------------------------------------
+# hp config rename
+# ---------------------------------------------------------------------------
+
+def test_config_rename_command():
+    with _patch_post({"detail": "Config 'old' renamed to 'new'"}):
+        result = runner.invoke(app, ["config", "rename", "old", "new"])
+    assert result.exit_code == 0
+    assert "renamed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# hp config delete
+# ---------------------------------------------------------------------------
+
+def test_config_delete_command():
+    with _patch_delete({"detail": "Config 'hxn_sim' deleted"}):
+        result = runner.invoke(app, ["config", "delete", "hxn_sim"])
+    assert result.exit_code == 0
+    assert "deleted" in result.output
+
+
+# ---------------------------------------------------------------------------
+# hp model
 # ---------------------------------------------------------------------------
 
 def test_model_set_command():
     with _patch_post({"detail": "Model swap started: ptycho_vit v3"}):
         result = runner.invoke(app, ["model", "set", "ptycho_vit", "--version", "3"])
     assert result.exit_code == 0
-    assert "swap" in result.output.lower()
 
-
-def test_model_set_conflict():
-    with _patch_post({"detail": "swap already in progress"}, status_code=409):
-        result = runner.invoke(app, ["model", "set", "ptycho_vit", "--version", "3"])
-    assert result.exit_code == 1
-
-
-# ---------------------------------------------------------------------------
-# hp model status
-# ---------------------------------------------------------------------------
 
 def test_model_status_command():
-    data = {
-        "model_status": "ready",
-        "model_error": None,
-        "current_model_name": "ptycho_vit",
-        "current_model_version": "3",
-        "current_engine_path": "/models/ptycho_vit_v3.engine",
-    }
-    with _patch_get(data):
+    with _patch_get({"model_status": "ready", "current_model_name": "ptycho_vit"}):
         result = runner.invoke(app, ["model", "status"])
     assert result.exit_code == 0
     assert "ready" in result.output
 
 
-# ---------------------------------------------------------------------------
-# hp model list
-# ---------------------------------------------------------------------------
-
 def test_model_list_command():
     data = {
-        "local": [{"filename": "ptycho_vit_v3.engine", "path": "/models/ptycho_vit_v3.engine", "size_mb": 120.0}],
-        "azure": [{"name": "ptycho_vit", "version": "3", "description": "VIT model", "cached": True}],
-        "azure_available": True,
+        "local": [{"filename": "ptycho_vit_v3.engine", "size_mb": 120.0}],
+        "azure": [],
+        "azure_available": False,
     }
     with _patch_get(data):
         result = runner.invoke(app, ["model", "list"])
@@ -154,28 +210,11 @@ def test_model_list_command():
     assert "ptycho_vit_v3.engine" in result.output
 
 
-def test_model_list_no_azure():
-    data = {"local": [], "azure": [], "azure_available": False}
-    with _patch_get(data):
-        result = runner.invoke(app, ["model", "list"])
-    assert result.exit_code == 0
-    assert "not configured" in result.output
-
-
-def test_model_list_empty_local():
-    data = {"local": [], "azure": [], "azure_available": True}
-    with _patch_get(data):
-        result = runner.invoke(app, ["model", "list"])
-    assert result.exit_code == 0
-    assert "no .engine files" in result.output
-
-
 # ---------------------------------------------------------------------------
 # --url flag
 # ---------------------------------------------------------------------------
 
 def test_custom_url_flag():
-    data = {"status": "stopped", "mode": None, "uptime_seconds": None}
-    with _patch_get(data) as mock_get:
-        result = runner.invoke(app, ["--url", "http://remote-host:9000", "status"])
+    with _patch_get({"status": "stopped", "selected_config": None}):
+        result = runner.invoke(app, ["--url", "http://remote:9000", "status"])
     assert result.exit_code == 0

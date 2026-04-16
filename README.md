@@ -50,9 +50,17 @@ ssh -L 8000:localhost:8000 <user>@<host>
 
 ### Starting the Holoscan pipeline
 
+Before starting the pipeline, select a config:
+
 ```bash
-hp start --mode simulate --config /path/to/ptycho_config.txt  # replay from H5
-hp start --mode live --config /path/to/ptycho_config.txt      # live ZMQ streams
+hp config select <name>
+```
+
+Then start:
+
+```bash
+hp start --mode simulate   # replay from H5
+hp start --mode live       # live ZMQ streams
 ```
 
 If already running, `hp start` returns an error — run `hp stop` first.
@@ -70,13 +78,35 @@ Options:
 Commands:
   start    Start the pipeline
   stop     Stop the pipeline
-  restart  Stop and restart with the same mode and config
+  restart  Stop and restart with the same mode
   status   Show pipeline status
   logs     Tail holoptycho.log
+  config   Config management commands
   model    Model management commands
 ```
 
-Use `hp <command> --help` for options on any command, e.g. `hp model --help`.
+Use `hp <command> --help` for options on any command, e.g. `hp config --help`.
+
+### Config management
+
+Configs are stored on the server as JSON key/value pairs (saved as INI files internally). The selected config is persisted across server restarts.
+
+```bash
+hp config list                              # list configs, show which is selected
+hp config set <name> '<json>'               # create or overwrite a config
+hp config show <name>                       # print config as JSON
+hp config select <name>                     # select config for next run
+hp config rename <old_name> <new_name>      # rename a config
+hp config delete <name>                     # delete a config
+```
+
+Example:
+
+```bash
+hp config set hxn_sim '{"scan_num": "339015", "x_range": "2.0", "working_directory": "/nsls2/data/..."}'
+hp config select hxn_sim
+hp start --mode simulate
+```
 
 ### Model selection
 

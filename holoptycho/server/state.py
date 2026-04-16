@@ -1,10 +1,14 @@
 """Thread-safe application state shared between the FastAPI server and the
 Holoscan runner thread."""
 
+import os
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+
+# Where the server writes temporary INI files for the Holoscan app to read.
+CONFIG_DIR = os.environ.get("HOLOPTYCHO_CONFIG_DIR", "configs")
 
 
 @dataclass
@@ -12,18 +16,20 @@ class AppState:
     # Holoscan app lifecycle
     status: str = "stopped"  # stopped | starting | running | finished | error
     mode: Optional[str] = None  # live | simulate
-    config_path: Optional[str] = None
     start_time: Optional[float] = None
     error: Optional[str] = None
 
-    # Model swap state
+    # Config selection (persisted in DB)
+    selected_config: Optional[str] = None  # name of selected config
+
+    # Model (persisted in DB)
     model_status: str = "ready"  # ready | downloading | compiling | loading | error
     model_error: Optional[str] = None
     current_engine_path: Optional[str] = None
     current_model_name: Optional[str] = None
     current_model_version: Optional[str] = None
 
-    # Log file path (set at server startup)
+    # Log file path
     log_file: str = "holoptycho.log"
 
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
@@ -45,9 +51,9 @@ class AppState:
             return {
                 "status": self.status,
                 "mode": self.mode,
-                "config_path": self.config_path,
                 "uptime_seconds": uptime,
                 "error": self.error,
+                "selected_config": self.selected_config,
                 "model_status": self.model_status,
                 "model_error": self.model_error,
                 "current_engine_path": self.current_engine_path,

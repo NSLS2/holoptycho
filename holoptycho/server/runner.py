@@ -7,7 +7,8 @@ import logging
 import threading
 import time
 
-from .state import AppState
+from .state import AppState, CONFIG_DIR
+from . import db
 
 logger = logging.getLogger("holoptycho.runner")
 
@@ -28,11 +29,12 @@ def _run_app(app, state: AppState):
         logger.exception("Holoscan app raised an exception")
 
 
-def start(config_path: str, mode: str, state: AppState) -> None:
+def start(mode: str, state: AppState) -> None:
     """Start the Holoscan application in a daemon background thread.
 
-    Raises RuntimeError if an app is already running or if a previous
-    runner thread is still alive (e.g. winding down after a stop request).
+    Resolves the config path from the selected config in the database.
+    Raises RuntimeError if an app is already running, if a previous runner
+    thread is still alive, or if no config is selected.
     """
     global _runner_thread
 
@@ -43,11 +45,20 @@ def start(config_path: str, mode: str, state: AppState) -> None:
             )
 
     # Guard against the race where stop() has been called but the thread
-    # hasn't exited yet — two Holoscan apps on the same GPU would conflict.
+    # hasn't exited yet.
     if _runner_thread is not None and _runner_thread.is_alive():
         raise RuntimeError(
             "Previous runner thread is still shutting down. Try again in a moment."
         )
+
+    # Resolve config from DB
+    config_name = state.selected_config
+    if not config_name:
+        raise RuntimeError(
+            "No config selected. Run 'hp config select <name>' first."
+        )
+    config_path = db.write_config_ini(config_name, CONFIG_DIR)
+    logger.info("Using config %r written to %s", config_name, config_path)
 
     # Import heavy GPU deps here so the FastAPI server can start without them.
     try:
@@ -55,8 +66,6 @@ def start(config_path: str, mode: str, state: AppState) -> None:
     except ImportError as exc:
         raise RuntimeError(f"Failed to import Holoscan app: {exc}") from exc
 
-    # Resolve engine path: use current model from state if a swap has happened,
-    # otherwise fall back to the hardcoded default in PtychoApp/PtychoSimulApp.
     resolved_engine = state.current_engine_path
 
     if mode == "simulate":
@@ -69,7 +78,6 @@ def start(config_path: str, mode: str, state: AppState) -> None:
     state.update(
         status="starting",
         mode=mode,
-        config_path=config_path,
         error=None,
     )
 
@@ -84,18 +92,10 @@ def start(config_path: str, mode: str, state: AppState) -> None:
 
 
 def stop(state: AppState) -> None:
-    """Request the running Holoscan app to stop.
-
-    Holoscan does not expose a public stop() on Application, so we set
-    status to 'stopped' optimistically; the runner thread will overwrite it
-    with 'finished' or 'error' when app.run() returns.
-    """
+    """Request the running Holoscan app to stop."""
     with state._lock:
         if state.status not in ("starting", "running"):
             raise RuntimeError(f"App is not running (status={state.status!r})")
 
-    # Mark as stopped; the Holoscan pipeline will wind down naturally.
-    # For simulate mode this happens quickly; for live mode the operator
-    # threads exit on their own schedule.
     state.update(status="stopped")
     logger.info("Stop requested — pipeline will finish current iteration")
