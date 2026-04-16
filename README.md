@@ -63,7 +63,32 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 
 ## Simulating a data stream
 
-To test without a live detector, use the simulated Eiger data stream:
+Two simulation modes are available for testing without a live detector.
+
+### In-process H5 replay (simplest)
+
+Reads diffraction patterns + scan positions from a pre-recorded HDF5 file and feeds them into the pipeline, bypassing ZMQ entirely:
+
+```bash
+pixi run python -m holoptycho <config_file> simulate
+```
+
+The config's `working_directory` + `scan_num` together determine the H5 path: `{working_directory}/scan_{scan_num}.h5`. The file must contain:
+
+| Dataset | Shape | Description |
+|---|---|---|
+| `diffamp` | `[N, H, W]` | Diffraction amplitudes (or use the `raw_data` subgroup for Eiger-style raw files) |
+| `ic` | `[N]` | Intensity normalization vector |
+| `points` | `[2, N]` | Scan positions (x, y) in microns |
+
+Outputs land at `/data/users/Holoscan/`:
+- `prb_live.npy` / `obj_live.npy` — updated every 10 iterations
+- `probe.npy` / `object.npy` — final reconstruction (in a timestamped directory)
+- `vit_batch_*_pred.npy` — per-batch ViT predictions
+
+### Eiger simulator container (end-to-end with ZMQ)
+
+For testing the full ZMQ path, including the detector network protocol:
 
 ```bash
 # Build the simulator container
@@ -75,6 +100,8 @@ docker run -d -p 8000:8000 -p 5555:5555 eiger_sim:test
 # Trigger frames
 docker exec -it <container_id> python trigger_detector.py -n 10000 -dt 0.001
 ```
+
+Then point holoptycho's `SERVER_STREAM_SOURCE` env var at `tcp://<host>:5555` and run without the `simulate` argument.
 
 ## Profiling
 
