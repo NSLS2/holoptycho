@@ -61,16 +61,22 @@ If already running, `hp start` returns an error — run `hp stop` first.
 
 Connects to `http://localhost:8000` by default. Override with `--url` or `HOLOPTYCHO_URL`.
 
-| Command | Description |
-|---|---|
-| `hp start --mode <mode> --config <path>` | Start the pipeline |
-| `hp stop` | Stop the pipeline |
-| `hp restart` | Stop and restart with the same mode and config |
-| `hp status` | Pipeline status (`stopped` / `starting` / `running` / `finished` / `error`) |
-| `hp logs [--lines N]` | Tail `holoptycho.log` (default 100 lines) |
-| `hp model list` | List local and Azure ML models |
-| `hp model set <name> --version <ver>` | Select model for next start |
-| `hp model status` | Show current model selection status |
+```
+Usage: hp [OPTIONS] COMMAND [ARGS]...
+
+Options:
+  --url TEXT  API base URL [env var: HOLOPTYCHO_URL]
+
+Commands:
+  start    Start the pipeline
+  stop     Stop the pipeline
+  restart  Stop and restart with the same mode and config
+  status   Show pipeline status
+  logs     Tail holoptycho.log
+  model    Model management commands
+```
+
+Use `hp <command> --help` for options on any command, e.g. `hp model --help`.
 
 ### Model selection
 
