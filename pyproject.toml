@@ -11,8 +11,11 @@ dependencies = []
 [project.optional-dependencies]
 test = ["pytest"]
 
+[project.scripts]
+hp = "holoptycho.cli.main:app"
+
 [tool.setuptools]
-packages = ["holoptycho"]
+packages = ["holoptycho", "holoptycho.server", "holoptycho.cli"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
