@@ -61,6 +61,111 @@ GPU tests require a CUDA-capable GPU and are automatically skipped if cupy is no
 
 A Docker image is built and pushed to Azure Container Registry on every merge to main. See [`.github/workflows/build-container.yml`](.github/workflows/build-container.yml) and the root [`Dockerfile`](Dockerfile).
 
+## API server and CLI (`hp`)
+
+Holoptycho includes a FastAPI control server and a CLI client (`hp`) for starting, stopping, and monitoring the pipeline remotely — for example over an SSH tunnel.
+
+### Starting the API server
+
+The API server must be running before any CLI commands can be used.
+
+```bash
+pixi run start-api
+```
+
+This starts a [uvicorn](https://www.uvicorn.org) server on `http://127.0.0.1:8000` (localhost only). To access it from a remote machine, set up an SSH tunnel:
+
+```bash
+ssh -L 8000:localhost:8000 <user>@<host>
+```
+
+### Starting the Holoscan application via the API
+
+Once the server is running, use `hp start` to launch the pipeline:
+
+```bash
+# Simulate mode (replay from H5 file on disk)
+hp start --mode simulate --config /path/to/ptycho_config.txt
+
+# Live mode (ZMQ streams from detector)
+hp start --mode live --config /path/to/ptycho_config.txt
+```
+
+Only one Holoscan application can run at a time. Stop it before starting another:
+
+```bash
+hp stop
+```
+
+### CLI reference
+
+The `hp` command connects to the API server at `http://localhost:8000` by default. Override with `--url` or the `HOLOPTYCHO_URL` environment variable.
+
+```bash
+export HOLOPTYCHO_URL=http://localhost:8000   # optional, this is the default
+```
+
+| Command | Description |
+|---|---|
+| `hp start --mode <mode> --config <path>` | Start the Holoscan application |
+| `hp stop` | Stop the running application |
+| `hp status` | Show application status (`stopped` / `starting` / `running` / `finished` / `error`) |
+| `hp logs [--lines N]` | Tail the last N lines of `holoptycho.log` (default 100) |
+| `hp model set <name> --version <ver>` | Swap the ViT model (pulls ONNX from Azure ML, recompiles, hot-swaps) |
+| `hp model status` | Poll the current model swap progress |
+| `hp model list` | List available models in Azure ML |
+
+#### Examples
+
+```bash
+# Check what's running
+hp status
+
+# Stream the last 50 log lines
+hp logs --lines 50
+
+# Swap to a new model version (returns immediately; poll hp model status)
+hp model set ptycho_vit --version 4
+hp model status
+```
+
+### API endpoints
+
+The server exposes the following REST endpoints (useful for scripting or building tooling on top):
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/run` | Start app — body: `{"mode": "simulate"\|"live", "config_path": "..."}` |
+| `POST` | `/stop` | Stop the running app |
+| `GET` | `/status` | App status, mode, uptime, current model |
+| `GET` | `/logs?lines=N` | Tail of `holoptycho.log` |
+| `POST` | `/model` | Trigger model swap — body: `{"name": "...", "version": "..."}` |
+| `GET` | `/model/status` | Poll model swap progress |
+| `GET` | `/model/list` | List available models from Azure ML |
+
+### Model hot-swap
+
+`hp model set` triggers a background job that:
+1. Pulls the ONNX file from Azure ML (`azure-ai-ml` + `AzureCliCredential`)
+2. Compiles it to a TensorRT `.engine` for the current GPU via `trtexec` (skipped if the `.engine` is newer than the `.onnx`)
+3. Writes a `reload_engine.txt` sentinel file — `PtychoViTInferenceOp` picks this up on its next iteration without any pipeline restart
+
+The swap requires these environment variables:
+
+```bash
+export AZURE_SUBSCRIPTION_ID=<subscription-id>
+export AZURE_RESOURCE_GROUP=<resource-group>
+export AZURE_ML_WORKSPACE=<workspace-name>
+```
+
+The compiled `.engine` files are cached in `/models` by default. Override with:
+
+```bash
+export ENGINE_CACHE_DIR=/path/to/cache
+```
+
+---
+
 ## Simulating a data stream
 
 Two simulation modes are available for testing without a live detector.
