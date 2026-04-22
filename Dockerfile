@@ -23,7 +23,7 @@ COPY holoptycho/ ./holoptycho/
 # Requires: docker build --ssh default ...
 RUN mkdir -p ~/.ssh && \
     ssh-keyscan github.com >> ~/.ssh/known_hosts
-RUN --mount=type=ssh pixi install --locked && \
+RUN --mount=type=ssh pixi install && \
     rm -rf ~/.cache/rattler
 
 # Generate shell activation hook (no pixi binary needed at runtime)
