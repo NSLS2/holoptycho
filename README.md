@@ -32,17 +32,47 @@ pixi run test
 
 A Docker image is built and pushed to Azure Container Registry on every merge to main. See [`.github/workflows/build-container.yml`](.github/workflows/build-container.yml).
 
+### Pulling and running the container
+
+```bash
+# Log in to Azure (if not already)
+az login
+az account set --subscription <AZURE_SUBSCRIPTION_ID>
+
+# Log in to ACR
+az acr login --name genesisdemosacr
+
+# Pull and run
+docker pull genesisdemosacr.azurecr.io/holoptycho:latest
+docker run --gpus all -p 127.0.0.1:8000:8000 \
+  --shm-size=32g \
+  genesisdemosacr.azurecr.io/holoptycho:latest
+```
+
+The container starts the API server by default. Use the `hp` CLI (or any HTTP client) to start, stop, and configure the pipeline from outside the container — typically via an SSH tunnel:
+
+```bash
+ssh -L 8000:localhost:8000 <user>@<host>
+hp status
+```
+
 ## API server and CLI (`hp`)
 
 Holoptycho includes a control server and `hp` CLI for starting, stopping, and monitoring the pipeline — for example over an SSH tunnel.
 
-### Starting the holoptycho server
+When running via the container the API starts automatically. Run the container with port 8000 mapped to the host:
+
+```bash
+docker run --gpus all -p 127.0.0.1:8000:8000 holoptycho-image
+```
+
+For a local (non-container) install:
 
 ```bash
 pixi run start-api
 ```
 
-Starts a server on `http://127.0.0.1:8000` (localhost only). For remote access, SSH tunnel:
+In both cases the server listens on `http://127.0.0.1:8000` (localhost only). For remote access, open an SSH tunnel:
 
 ```bash
 ssh -L 8000:localhost:8000 <user>@<host>
@@ -145,7 +175,7 @@ Point `SERVER_STREAM_SOURCE` at `tcp://<host>:5555` and use `hp start --mode liv
 
 ```bash
 nsys profile -t cuda,nvtx,osrt,python-gil -o ptycho_profile.nsys-rep -f true -d 30 \
-    pixi run python -m holoptycho <config_file>
+    pixi run start-api
 ```
 
 Requires `perf_event_paranoid <= 2`:

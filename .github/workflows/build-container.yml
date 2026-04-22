@@ -30,11 +30,11 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Log in to ACR
-        run: az acr login --name nsls2hackathonacr
+        run: az acr login --name genesisdemosacr
 
       - name: Build and push
         run: |
-          IMAGE=nsls2hackathonacr.azurecr.io/holoptycho
+          IMAGE=genesisdemosacr.azurecr.io/holoptycho
           DOCKER_BUILDKIT=1 docker build \
             --ssh default \
             -t $IMAGE:${{ github.sha }} \
