@@ -60,4 +60,4 @@ ENV OMPI_ALLOW_RUN_AS_ROOT=1
 ENV OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 
 ENTRYPOINT ["/app/entrypoint.sh"]
-CMD ["python", "-m", "holoptycho"]
+CMD ["pixi", "run", "start-api"]
