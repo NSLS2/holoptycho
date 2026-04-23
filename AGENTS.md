@@ -280,7 +280,7 @@ hp stop
 All values are resolved at runtime via `az cli` — no IDs hardcoded:
 
 ```bash
-docker run \
+docker run --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
   -e AZURE_CERTIFICATE_B64="$(az keyvault secret show \
     --vault-name genesisdemoskv \
     --name holoptycho-sp-cert \
