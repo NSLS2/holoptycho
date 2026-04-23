@@ -38,9 +38,9 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 # Log in to Azure — use device code flow for headless/Slurm environments
 az login --use-device-code
 
-# If you have multiple subscriptions, list them and select the right one
-az account list --query "[].{name:name, id:id}" -o table
-az account set --subscription <AZURE_SUBSCRIPTION_ID>
+# If you have multiple subscriptions, list them and select by name
+az account list --query "[].name" -o table
+az account set --subscription "<subscription name>"
 
 # Log in to ACR
 az acr login --name genesisdemosacr
