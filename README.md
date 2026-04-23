@@ -71,8 +71,32 @@ Use the `hp` CLI to start, stop, and configure the pipeline. It connects to `htt
 The `client` pixi environment installs only the CLI and its dependencies — no GPU or Holoscan deps. It works on Linux and macOS:
 
 ```bash
+git clone git@github.com:NSLS2/holoptycho.git
+cd holoptycho
 pixi install -e client
 pixi run -e client hp --help
+```
+
+To avoid typing `pixi run -e client` each time, add a shell alias. Use `--manifest-path` so it works from any directory:
+
+```bash
+# bash
+echo 'alias hp="pixi run --manifest-path ~/code/holoptycho/pixi.toml -e client hp"' >> ~/.bashrc && source ~/.bashrc
+
+# zsh
+echo 'alias hp="pixi run --manifest-path ~/code/holoptycho/pixi.toml -e client hp"' >> ~/.zshrc && source ~/.zshrc
+```
+
+### Updating the CLI
+
+```bash
+cd ~/code/holoptycho && git pull
+```
+
+If `pixi.lock` changed, also run:
+
+```bash
+pixi install -e client
 ```
 
 ### Starting and stopping
