@@ -54,6 +54,7 @@ def _get_credential():
             tenant_id=os.environ["AZURE_TENANT_ID"],
             client_id=os.environ["AZURE_CLIENT_ID"],
             certificate_data=base64.b64decode(cert_b64),
+            password=b"",
         )
     from azure.identity import AzureCliCredential
     return AzureCliCredential()
