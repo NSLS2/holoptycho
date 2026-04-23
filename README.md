@@ -22,6 +22,10 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 
 ```bash
 az login
+
+# az acr login normally hands a token to the Docker daemon, but this cluster
+# uses rootless podman (no daemon). --expose-token prints the token instead
+# so we can pass it directly to podman login.
 podman login genesisdemosacr.azurecr.io \
   --username 00000000-0000-0000-0000-000000000000 \
   --password "$(az acr login --name genesisdemosacr --expose-token --query accessToken -o tsv)"
