@@ -63,6 +63,28 @@ pixi install -e client
 pixi run -e client hp --help
 ```
 
+### 4. (Optional) Add a shell alias
+
+To avoid typing `pixi run -e client` each time, add an alias to the user's shell config. Ask the user which shell they use, then:
+
+**bash** (`~/.bashrc`):
+```bash
+echo 'alias hp="pixi run -e client hp"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+**zsh** (`~/.zshrc`):
+```bash
+echo 'alias hp="pixi run -e client hp"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+The alias assumes the user runs `hp` from the `holoptycho` repo directory, since pixi needs the `pixi.toml` to resolve the environment. If they want to run it from anywhere, use an absolute path:
+
+```bash
+echo 'alias hp="pixi run --manifest-path ~/code/holoptycho/pixi.toml -e client hp"' >> ~/.zshrc
+```
+
 ---
 
 ## Starting the server on a Slurm node
