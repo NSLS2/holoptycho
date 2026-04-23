@@ -35,8 +35,8 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 ### Pulling and running the container
 
 ```bash
-# Log in to Azure (if not already)
-az login
+# Log in to Azure — use device code flow for headless/Slurm environments
+az login --use-device-code
 
 # If you have multiple subscriptions, list them and select the right one
 az account list --query "[].{name:name, id:id}" -o table
