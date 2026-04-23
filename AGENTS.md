@@ -37,6 +37,66 @@ found it.
 
 ---
 
+## Starting the server on a Slurm node
+
+If the server is not already running, ask the user for the Slurm login node hostname, then follow these steps:
+
+### 1. Allocate a GPU node
+
+```bash
+ssh <slurm-login-node> "salloc --gpus=1 --no-shell &"
+```
+
+Or interactively via SSH:
+
+```bash
+ssh <slurm-login-node>
+salloc --gpus=1
+```
+
+Note the allocated node name from the `salloc` output (e.g. `gpu001`).
+
+### 2. Set up podman runtime
+
+Run once per session on the allocated node:
+
+```bash
+export XDG_RUNTIME_DIR=/tmp/podman-run-$(id -u)
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+```
+
+### 3. Log in to Azure and ACR
+
+```bash
+az login
+podman login genesisdemosacr.azurecr.io \
+  --username 00000000-0000-0000-0000-000000000000 \
+  --password "$(az acr login --name genesisdemosacr --expose-token --query accessToken -o tsv)"
+```
+
+### 4. Start the container
+
+```bash
+docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
+  -e AZURE_TENANT_ID="$(az account show --query tenantId -o tsv)" \
+  -e AZURE_CLIENT_ID="$(az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv)" \
+  -e AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)" \
+  -e AZURE_CERTIFICATE_B64="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-sp-cert --query value -o tsv | base64 | tr -d '\n')" \
+  -e AZURE_RESOURCE_GROUP=rg-genesis-demos \
+  -e AZURE_ML_WORKSPACE=genesis-mlw \
+  genesisdemosacr.azurecr.io/holoptycho:latest
+```
+
+### 5. Open SSH tunnel (from local machine)
+
+```bash
+ssh -L 8000:localhost:8000 <slurm-login-node>
+```
+
+The `hp` CLI can now reach the server at `http://localhost:8000`.
+
+---
+
 ## CLI reference
 
 ### Pipeline lifecycle
