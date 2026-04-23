@@ -31,8 +31,6 @@ podman login genesisdemosacr.azurecr.io \
   --password "$(az acr login --name genesisdemosacr --expose-token --query accessToken -o tsv)"
 ```
 
-The ACR token is cached in `~/.config/containers/auth.json` and lasts 3 hours. Re-run the `podman login` step when it expires.
-
 ### 2. Run the container
 
 ```bash
