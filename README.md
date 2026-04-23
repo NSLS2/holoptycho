@@ -37,6 +37,9 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 ```bash
 # Log in to Azure (if not already)
 az login
+
+# If you have multiple subscriptions, list them and select the right one
+az account list --query "[].{name:name, id:id}" -o table
 az account set --subscription <AZURE_SUBSCRIPTION_ID>
 
 # Log in to ACR
