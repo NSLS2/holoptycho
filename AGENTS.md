@@ -63,13 +63,6 @@ pixi install -e client
 pixi run -e client hp --help
 ```
 
-Or to avoid typing `pixi run -e client` each time, activate the environment:
-
-```bash
-pixi shell -e client
-hp --help
-```
-
 ---
 
 ## Starting the server on a Slurm node
