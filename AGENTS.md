@@ -39,26 +39,21 @@ found it.
 
 ## Starting the server on a Slurm node
 
-If the server is not already running, ask the user for the Slurm login node hostname, then follow these steps:
+If the server is not already running, walk the user through the following steps. Ask for the Slurm login node hostname if you don't have it.
 
 ### 1. Allocate a GPU node
 
-```bash
-ssh <slurm-login-node> "salloc --gpus=1 --no-shell &"
-```
-
-Or interactively via SSH:
+Ask the user to run on the Slurm login node:
 
 ```bash
-ssh <slurm-login-node>
 salloc --gpus=1
 ```
 
-Note the allocated node name from the `salloc` output (e.g. `gpu001`).
+Ask them to note the allocated node name from the output.
 
 ### 2. Set up podman runtime
 
-Run once per session on the allocated node:
+Ask the user to run once per session on the allocated node:
 
 ```bash
 export XDG_RUNTIME_DIR=/tmp/podman-run-$(id -u)
@@ -87,7 +82,9 @@ docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
   genesisdemosacr.azurecr.io/holoptycho:latest
 ```
 
-### 5. Open SSH tunnel (from local machine)
+### 5. Open SSH tunnel
+
+Ask the user to run on their local machine:
 
 ```bash
 ssh -L 8000:localhost:8000 <slurm-login-node>
