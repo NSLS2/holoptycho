@@ -37,6 +37,41 @@ found it.
 
 ---
 
+## Setting up the hp CLI
+
+If the user doesn't have `hp` working locally, walk them through:
+
+### 1. Install pixi
+
+If not already installed:
+
+```bash
+curl -fsSL https://pixi.sh/install.sh | bash
+```
+
+### 2. Clone the repo and install the client environment
+
+```bash
+git clone git@github.com:NSLS2/holoptycho.git
+cd holoptycho
+pixi install -e client
+```
+
+### 3. Run hp
+
+```bash
+pixi run -e client hp --help
+```
+
+Or to avoid typing `pixi run -e client` each time, activate the environment:
+
+```bash
+pixi shell -e client
+hp --help
+```
+
+---
+
 ## Starting the server on a Slurm node
 
 If the server is not already running, walk the user through the following steps. Ask for the Slurm login node hostname if you don't have it.
