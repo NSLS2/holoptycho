@@ -36,7 +36,7 @@ docker run --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
     --name holoptycho-sp-cert \
     --query value -o tsv | base64 | tr -d '\n')" \
   -e AZURE_TENANT_ID="$(az account show --query tenantId -o tsv)" \
-  -e AZURE_CLIENT_ID="$(az ad app show --display-name 'NSLS2-Genesis-Holoptycho' --query appId -o tsv)" \
+  -e AZURE_CLIENT_ID="$(az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv)" \
   -e AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)" \
   -e AZURE_RESOURCE_GROUP=rg-genesis-demos \
   -e AZURE_ML_WORKSPACE=genesis-mlw \
