@@ -22,10 +22,9 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 
 ```bash
 az login
-
-# ACR — use --expose-token since podman doesn't support az acr login directly
-TOKEN=$(az acr login --name genesisdemosacr --expose-token --query accessToken -o tsv)
-podman login genesisdemosacr.azurecr.io --username 00000000-0000-0000-0000-000000000000 --password "$TOKEN"
+podman login genesisdemosacr.azurecr.io \
+  --username 00000000-0000-0000-0000-000000000000 \
+  --password "$(az acr login --name genesisdemosacr --expose-token --query accessToken -o tsv)"
 ```
 
 The ACR token is cached in `~/.config/containers/auth.json` and lasts 3 hours. Re-run the `podman login` step when it expires.
