@@ -85,6 +85,23 @@ The alias assumes the user runs `hp` from the `holoptycho` repo directory, since
 echo 'alias hp="pixi run --manifest-path ~/code/holoptycho/pixi.toml -e client hp"' >> ~/.zshrc
 ```
 
+### 5. Updating the CLI
+
+Since the package is an editable install, a `git pull` is all that's needed to pick up new versions:
+
+```bash
+cd ~/code/holoptycho
+git pull
+```
+
+If `pixi.toml` or `pixi.lock` changed (i.e. new dependencies were added), also run:
+
+```bash
+pixi install -e client
+```
+
+To check: `git diff HEAD@{1} pixi.lock` — if it has changes, re-run `pixi install -e client`.
+
 ---
 
 ## Starting the server on a Slurm node
