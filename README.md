@@ -66,6 +66,15 @@ ssh -L 8000:localhost:8000 <user>@<host>
 
 Use the `hp` CLI to start, stop, and configure the pipeline. It connects to `http://localhost:8000` by default — override with `--url` or `HOLOPTYCHO_URL`.
 
+### Installing the CLI
+
+The `client` pixi environment installs only the CLI and its dependencies — no GPU or Holoscan deps. It works on Linux and macOS:
+
+```bash
+pixi install -e client
+pixi run -e client hp --help
+```
+
 ### Starting and stopping
 
 Select a config, then start:
