@@ -273,14 +273,14 @@ hp stop
 | `AZURE_ML_WORKSPACE` | — | Azure ML workspace name |
 | `AZURE_CERTIFICATE_B64` | — | Base64-encoded PEM (private key + cert) from Key Vault secret. If set, uses `CertificateCredential`; otherwise falls back to `AzureCliCredential`. |
 | `AZURE_TENANT_ID` | — | Entra ID tenant ID. Required when `AZURE_CERTIFICATE_B64` is set. Resolve via `az account show --query tenantId -o tsv`. |
-| `AZURE_CLIENT_ID` | — | App registration client ID (not object ID). Required when `AZURE_CERTIFICATE_B64` is set. Resolve via `az ad app show --display-name 'NSLS2-Genesis-Holoptycho' --query appId -o tsv`. |
+| `AZURE_CLIENT_ID` | — | App registration client ID (not object ID). Required when `AZURE_CERTIFICATE_B64` is set. Resolve via `az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv`. |
 
 ### Fetching the certificate for container launch
 
 All values are resolved at runtime via `az cli` — no IDs hardcoded:
 
 ```bash
-docker run --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
+docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
   -e AZURE_CERTIFICATE_B64="$(az keyvault secret show \
     --vault-name genesisdemoskv \
     --name holoptycho-sp-cert \
@@ -294,4 +294,15 @@ docker run --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
 ```
 
 The private key is never written to disk — it lives only in the container's environment for the lifetime of the process.
+
+**Note:** Key Vault exports certificates in PKCS12 format (binary), not PEM. `CertificateCredential` requires `password=b""` to deserialize it:
+
+```python
+CertificateCredential(
+    tenant_id=...,
+    client_id=...,
+    certificate_data=base64.b64decode(cert_b64),
+    password=b"",
+)
+```
 
