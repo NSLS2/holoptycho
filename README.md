@@ -22,28 +22,38 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 
 ```bash
 az login
-az acr login --name genesisdemosacr
+
+# ACR — use --expose-token since podman doesn't support az acr login directly
+TOKEN=$(az acr login --name genesisdemosacr --expose-token --query accessToken -o tsv)
+podman login genesisdemosacr.azurecr.io --username 00000000-0000-0000-0000-000000000000 --password "$TOKEN"
 ```
+
+The ACR token is cached in `~/.config/containers/auth.json` and lasts 3 hours. Re-run the `podman login` step when it expires.
 
 ### 2. Run the container
 
-The container starts the API server automatically. Pass Azure credentials via environment variables — all values are resolved at runtime, no IDs hardcoded:
+Resolve credentials into variables first, then run. This avoids shell line-continuation issues and makes it easy to verify each value before launching:
 
 ```bash
+export XDG_RUNTIME_DIR=/tmp/podman-run-$(id -u)
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+
+TENANT_ID=$(az account show --query tenantId -o tsv)
+SUB_ID=$(az account show --query id -o tsv)
+CLIENT_ID=$(az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv)
+CERT_B64=$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-sp-cert --query value -o tsv | base64 | tr -d '\n')
+
 docker run --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
-  -e AZURE_CERTIFICATE_B64="$(az keyvault secret show \
-    --vault-name genesisdemoskv \
-    --name holoptycho-sp-cert \
-    --query value -o tsv | base64 | tr -d '\n')" \
-  -e AZURE_TENANT_ID="$(az account show --query tenantId -o tsv)" \
-  -e AZURE_CLIENT_ID="$(az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv)" \
-  -e AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)" \
+  -e AZURE_TENANT_ID="$TENANT_ID" \
+  -e AZURE_CLIENT_ID="$CLIENT_ID" \
+  -e AZURE_SUBSCRIPTION_ID="$SUB_ID" \
+  -e AZURE_CERTIFICATE_B64="$CERT_B64" \
   -e AZURE_RESOURCE_GROUP=rg-genesis-demos \
   -e AZURE_ML_WORKSPACE=genesis-mlw \
   genesisdemosacr.azurecr.io/holoptycho:latest
 ```
 
-The private key is never written to disk or stored in a shell variable.
+The private key is never written to disk. The server binds to `0.0.0.0:8000` inside the container, exposed only on `127.0.0.1:8000` of the host.
 
 ### 3. Connect via SSH tunnel
 
