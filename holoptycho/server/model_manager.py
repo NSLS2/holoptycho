@@ -39,6 +39,25 @@ TRTEXEC = os.environ.get("TRTEXEC", "trtexec")
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _get_credential():
+    """Return CertificateCredential if AZURE_CERTIFICATE_B64 is set, else AzureCliCredential.
+
+    AZURE_CERTIFICATE_B64 must be a base64-encoded PEM containing both the
+    private key and the certificate (as exported from Key Vault secrets).
+    The private key is kept in memory only — never written to disk.
+    """
+    cert_b64 = os.environ.get("AZURE_CERTIFICATE_B64")
+    if cert_b64:
+        import base64
+        from azure.identity import CertificateCredential
+        return CertificateCredential(
+            tenant_id=os.environ["AZURE_TENANT_ID"],
+            client_id=os.environ["AZURE_CLIENT_ID"],
+            certificate_data=base64.b64decode(cert_b64),
+        )
+    from azure.identity import AzureCliCredential
+    return AzureCliCredential()
+
 def _engine_filename(model_name: str, version: str) -> str:
     return f"{model_name}_v{version}.engine"
 
@@ -50,10 +69,9 @@ def _engine_path(model_name: str, version: str) -> Path:
 def _pull_onnx(model_name: str, version: str, dest_dir: Path) -> Path:
     """Download the ONNX file from Azure ML and return its local path."""
     from azure.ai.ml import MLClient
-    from azure.identity import AzureCliCredential
 
     client = MLClient(
-        AzureCliCredential(),
+        _get_credential(),
         subscription_id=os.environ["AZURE_SUBSCRIPTION_ID"],
         resource_group_name=os.environ["AZURE_RESOURCE_GROUP"],
         workspace_name=os.environ["AZURE_ML_WORKSPACE"],
@@ -106,10 +124,16 @@ def list_local_engines() -> list[dict]:
 
 
 def _azure_available() -> bool:
-    return all(
+    base = all(
         os.environ.get(v)
         for v in ("AZURE_SUBSCRIPTION_ID", "AZURE_RESOURCE_GROUP", "AZURE_ML_WORKSPACE")
     )
+    if not base:
+        return False
+    # If cert auth is requested, also require tenant and client ID
+    if os.environ.get("AZURE_CERTIFICATE_B64"):
+        return all(os.environ.get(v) for v in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID"))
+    return True
 
 
 def list_azure_models() -> list[dict]:
@@ -117,10 +141,9 @@ def list_azure_models() -> list[dict]:
     if not _azure_available():
         return []
     from azure.ai.ml import MLClient
-    from azure.identity import AzureCliCredential
 
     client = MLClient(
-        AzureCliCredential(),
+        _get_credential(),
         subscription_id=os.environ["AZURE_SUBSCRIPTION_ID"],
         resource_group_name=os.environ["AZURE_RESOURCE_GROUP"],
         workspace_name=os.environ["AZURE_ML_WORKSPACE"],

@@ -271,4 +271,27 @@ hp stop
 | `AZURE_SUBSCRIPTION_ID` | — | Azure subscription (for Azure ML model pull) |
 | `AZURE_RESOURCE_GROUP` | — | Azure resource group |
 | `AZURE_ML_WORKSPACE` | — | Azure ML workspace name |
+| `AZURE_CERTIFICATE_B64` | — | Base64-encoded PEM (private key + cert) from Key Vault secret. If set, uses `CertificateCredential`; otherwise falls back to `AzureCliCredential`. |
+| `AZURE_TENANT_ID` | — | Entra ID tenant ID. Required when `AZURE_CERTIFICATE_B64` is set. Resolve via `az account show --query tenantId -o tsv`. |
+| `AZURE_CLIENT_ID` | — | App registration client ID (not object ID). Required when `AZURE_CERTIFICATE_B64` is set. Resolve via `az ad app show --display-name 'NSLS2-Genesis-Holoptycho' --query appId -o tsv`. |
+
+### Fetching the certificate for container launch
+
+All values are resolved at runtime via `az cli` — no IDs hardcoded:
+
+```bash
+docker run --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
+  -e AZURE_CERTIFICATE_B64="$(az keyvault secret show \
+    --vault-name genesisdemoskv \
+    --name holoptycho-sp-cert \
+    --query value -o tsv | base64 -w 0)" \
+  -e AZURE_TENANT_ID="$(az account show --query tenantId -o tsv)" \
+  -e AZURE_CLIENT_ID="$(az ad app show --display-name 'NSLS2-Genesis-Holoptycho' --query appId -o tsv)" \
+  -e AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)" \
+  -e AZURE_RESOURCE_GROUP=rg-genesis-demos \
+  -e AZURE_ML_WORKSPACE=genesis-mlw \
+  <image> <command>
+```
+
+The private key is never written to disk — it lives only in the container's environment for the lifetime of the process.
 
