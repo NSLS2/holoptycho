@@ -18,8 +18,8 @@ class AppState:
     start_time: Optional[float] = None
     error: Optional[str] = None
 
-    # Config selection (persisted in DB)
-    selected_config: Optional[str] = None  # name of selected config
+    # Last config used (persisted in DB across restarts)
+    last_config: Optional[dict] = None
 
     # Model (persisted in DB)
     model_status: str = "ready"  # ready | downloading | compiling | loading | error
@@ -51,7 +51,7 @@ class AppState:
                 "status": self.status,
                 "uptime_seconds": uptime,
                 "error": self.error,
-                "selected_config": self.selected_config,
+                "last_config": self.last_config,
                 "model_status": self.model_status,
                 "model_error": self.model_error,
                 "current_engine_path": self.current_engine_path,

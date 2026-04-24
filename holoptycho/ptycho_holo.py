@@ -134,6 +134,8 @@ class PtychoRecon(Operator):
     def __init__(self, *args, param=None, **kwargs):
         super().__init__(*args,**kwargs)
 
+        self.param = param
+
         # The streaming reconstruction engine owns all GPU state that was
         # previously behind ``recon_thread`` / ``ptycho_trans``. It imports
         # ptycho's kernel libraries directly; see streaming_recon.py.
@@ -168,7 +170,7 @@ class PtychoRecon(Operator):
         # re-dimension the object, zero the accumulation buffers, and
         # random-init the object.
         self.recon.reset_for_scan(
-            scan_num=str(param[0]),
+            scan_num=str(self.param.scan_num),
             x_range_um=np.abs(param[1]),
             y_range_um=np.abs(param[2]),
             num_points_max=param[3],
@@ -185,7 +187,6 @@ class PtychoRecon(Operator):
         print('reload shared memory')
 
     def setup(self,spec):
-        spec.input("flush",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
         spec.input("pos_ready_num",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
         spec.input("frame_ready_num",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
         #spec.input("ready_num")
@@ -193,14 +194,6 @@ class PtychoRecon(Operator):
         spec.output("output").condition(ConditionType.NONE)
 
     def compute(self,op_input,op_output,context):
-
-        flush_param = op_input.receive('flush')
-        if flush_param:
-            self.flush(flush_param)
-
-        # ready_num = op_input.receive("ready_num")
-
-        # self.recon.num_points_recon = int(ready_num)
 
         pos_ready_num = op_input.receive("pos_ready_num")
         
@@ -441,7 +434,6 @@ class PtychoApp(Application):
         self.point_proc.obj_pad = self.pty.recon.obj_pad
 
         self.point_proc.angle_correction_flag = param.angle_correction_flag
-        self.init.angle_correction_flag = param.angle_correction_flag
 
         self.pty.num_points_min = self.min_points
 
@@ -450,34 +442,86 @@ class PtychoApp(Application):
     def compose(self):
 
         self.param.live_recon_flag = True
-        
 
         self.batchsize = 64
         self.min_points = 256
 
-        self.flip_image = True #According to detector settings
+        self.flip_image = True  # According to detector settings
 
-        self.eiger_zmq_rx = EigerZmqRxOp(self,os.environ['SERVER_STREAM_SOURCE'], name="eiger_zmq_rx")
+        # Derive scan-size parameters from config.
+        # x_num / y_num: number of scan positions along each axis.
+        # nz: total expected frames, rounded down to batchsize multiple.
+        # num_points_max: minimum points before reconstruction begins.
+        x_num = int(self.param.x_num)
+        y_num = int(self.param.y_num)
+        nz = (x_num * y_num) - (x_num * y_num) % self.batchsize
+        num_points_max = max(x_num * 2, self.min_points)
+
+        self.eiger_zmq_rx = EigerZmqRxOp(self, os.environ['SERVER_STREAM_SOURCE'], name="eiger_zmq_rx")
         self.eiger_decompress = EigerDecompressOp(self, name="eiger_decompress")
-        self.pos_rx = PositionRxOp(self,endpoint = os.environ['PANDA_STREAM_SOURCE'], ch1 = "/INENC2.VAL.Value", ch2 = "/INENC3.VAL.Value", upsample_factor=10,
-                                   name="pos_rx")
+        self.pos_rx = PositionRxOp(
+            self,
+            endpoint=os.environ['PANDA_STREAM_SOURCE'],
+            ch1=getattr(self.param, 'pos_x_channel', '/INENC2.VAL.Value'),
+            ch2=getattr(self.param, 'pos_y_channel', '/INENC3.VAL.Value'),
+            upsample_factor=10,
+            name="pos_rx",
+        )
 
         self.image_batch = ImageBatchOp(self, name="image_batch")
         self.image_proc = ImagePreprocessorOp(self, name="image_proc")
         self.image_send = ImageSendOp(self, name="image_send")
-        self.point_proc = PointProcessorOp(self, x_direction=self.param.x_direction, y_direction=self.param.y_direction, name="point_proc")
+        self.point_proc = PointProcessorOp(
+            self,
+            x_direction=self.param.x_direction,
+            y_direction=self.param.y_direction,
+            name="point_proc",
+        )
 
-        # self.init_recon = InitRecon(self)
-        self.pty = PtychoRecon(self,param=self.param,name='pty')
-        # self.pty_ctrl = PtychoCtrl(self)
+        self.pty = PtychoRecon(self, param=self.param, name='pty')
 
-        self.init = InitRecon(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points,scan_header_file=os.environ.get('SCAN_HEADER_FILE', '/nsls2/data2/hxn/legacy/users/startup_parameters/scan_header.txt'))
-
-        # Temp
-        self.o = SaveResult(self,name='out')
-        self.live_result = SaveLiveResult(self,name='live_result')
+        self.o = SaveResult(self, name='out')
+        self.live_result = SaveLiveResult(self, name='live_result')
 
         self.config_ops(self.param)
+
+        # Initialize operators from config (replaces InitRecon scan header flush).
+        # ImageBatchOp: set detector crop ROI from config.
+        det_roiy0 = int(self.param.det_roiy0)
+        det_roix0 = int(self.param.det_roix0)
+        self.image_batch.roi = np.array([
+            [det_roiy0 + self.param.batch_y0, det_roiy0 + self.param.batch_y0 + self.param.ny],
+            [det_roix0 + self.param.batch_x0, det_roix0 + self.param.batch_x0 + self.param.nx],
+        ])
+
+        # PointProcessorOp: set scan geometry from config.
+        self.point_proc.x_range_um = np.abs(self.param.x_range)
+        self.point_proc.y_range_um = np.abs(self.param.y_range)
+        self.point_proc.x_ratio = float(self.param.x_ratio)
+        self.point_proc.y_ratio = float(self.param.y_ratio)
+        self.point_proc.min_points = num_points_max
+        self.point_proc.angle = float(getattr(self.param, 'angle', 0.0))
+        self.point_proc.simulate_positions = bool(getattr(self.param, 'simulate_positions', False))
+        if self.point_proc.simulate_positions:
+            self.point_proc.pos0_simul = np.tile(
+                np.linspace(0, self.param.x_range, x_num + 1)[:-1], [y_num, 1]
+            ).reshape((x_num * y_num,)) * self.point_proc.x_direction
+            self.point_proc.pos1_simul = np.tile(
+                np.linspace(0, self.param.y_range, y_num + 1)[:-1], [x_num, 1]
+            ).T.reshape((x_num * y_num,)) * self.point_proc.y_direction
+
+        # PtychoRecon: reset engine for this scan.
+        self.pty.recon.reset_for_scan(
+            scan_num=str(self.param.scan_num),
+            x_range_um=np.abs(self.param.x_range),
+            y_range_um=np.abs(self.param.y_range),
+            num_points_max=num_points_max,
+        )
+        self.pty.num_points_min = num_points_max
+        self.pty.points_total = nz
+        if self.pty.num_points_min < self.pty.recon.gpu_batch_size:
+            self.pty.num_points_min = self.pty.recon.gpu_batch_size
+        self.pty.probe_initialized = False
 
         # --- PtychoViT inference (parallel to iterative recon) ---
         # Live mode: ImagePreprocessorOp applies fftshift — undo it for model
@@ -490,47 +534,21 @@ class PtychoApp(Application):
         )
         self.vit_save = SaveViTResult(self, scan_num=self.param.scan_num, name="vit_save")
 
-        self.add_flow(self.eiger_zmq_rx,self.eiger_decompress,{("image_index_encoding","image_index_encoding")})
-        self.add_flow(self.eiger_decompress,self.image_batch,{("decompressed_image","image"),("image_index","image_index")})
-        self.add_flow(self.image_batch,self.image_proc,{("image_batch","image_batch"),("image_indices","image_indices_in")})
-        self.add_flow(self.image_proc,self.image_send,{("diff_amp","diff_amp"),("image_indices","image_indices")})
-        
-        self.add_flow(self.pos_rx,self.point_proc,{("pointRx_out","pointOp_in")})
-        self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
+        self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
+        self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
+        self.add_flow(self.image_batch, self.image_proc, {("image_batch", "image_batch"), ("image_indices", "image_indices_in")})
+        self.add_flow(self.image_proc, self.image_send, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
 
-        self.add_flow(self.image_send,self.pty,{("frame_ready_num","frame_ready_num")})
-        self.add_flow(self.point_proc,self.pty,{("pos_ready_num","pos_ready_num")})
+        self.add_flow(self.pos_rx, self.point_proc, {("pointRx_out", "pointOp_in")})
+        self.add_flow(self.image_send, self.point_proc, {("image_indices_out", "pointOp_in")})
 
-        self.add_flow(self.init,self.pos_rx,{("flush_pos_rx","flush")})
-        self.add_flow(self.init,self.image_batch,{("flush_image_batch","flush")})
-        self.add_flow(self.init,self.image_send,{("flush_image_send","flush")})
-        self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
-        self.add_flow(self.init,self.pty,{("flush_pty","flush")})
+        self.add_flow(self.image_send, self.pty, {("frame_ready_num", "frame_ready_num")})
+        self.add_flow(self.point_proc, self.pty, {("pos_ready_num", "pos_ready_num")})
 
-        # pool1 = self.make_thread_pool("pool1", 1)
-        # pool1.add(self.eiger_zmq_rx, True)
-    
-        # pool2 = self.make_thread_pool("pool2", 7)
-        # pool2.add(self.pos_rx, True)
-        # pool2.add(self.image_batch, True)
-        # pool2.add(self.image_proc, True)
-        # pool2.add(self.image_send, True)
-        # pool2.add(self.point_proc, True)
-        # pool2.add(self.pty, True)
-        # pool2.add(self.o, True)
-        
+        self.add_flow(self.pty, self.live_result, {("save_live_result", "results")})
+        self.add_flow(self.pty, self.o, {("output", "output")})
 
-        # self.add_flow(self.init_recon,self.pty_ctrl,{("init","ctrl_input")})
-        # self.add_flow(self.image_send,self.pty_ctrl,{("frame_ready_num","ctrl_input")})
-        # self.add_flow(self.point_proc,self.pty_ctrl,{("pos_ready_num","ctrl_input")})
-        # self.add_flow(self.pty_ctrl,self.pty,{("ready_num","ready_num")})
-        # self.add_flow(self.pty,self.pty_ctrl,{("ctrl","ctrl_input")})
-
-
-        self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
-        self.add_flow(self.pty,self.o,{("output","output")})
-
-        # VIT: branch off ImagePreprocessorOp's diff_amp (fan-out, parallel to image_send)
+        # ViT: branch off ImagePreprocessorOp's diff_amp (fan-out, parallel to image_send)
         self.add_flow(self.image_proc, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
         self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
 

@@ -18,6 +18,19 @@ _runner_thread: threading.Thread | None = None
 
 _REQUIRED_ENV_VARS = ("SERVER_STREAM_SOURCE", "PANDA_STREAM_SOURCE")
 
+# Config fields that must be present — no sensible default exists for these.
+_REQUIRED_CONFIG_FIELDS = (
+    "scan_num",
+    "nx", "ny",
+    "x_range", "y_range",
+    "x_num", "y_num",
+    "det_roix0", "det_roiy0",
+    "x_ratio", "y_ratio",
+    "xray_energy_kev",
+    "ccd_pixel_um",
+    "distance",
+)
+
 
 def _run_app(app, state: AppState):
     """Target function for the runner thread."""
@@ -32,12 +45,19 @@ def _run_app(app, state: AppState):
         logger.exception("Holoscan app raised an exception")
 
 
-def start(state: AppState) -> None:
+def start(state: AppState, config: dict | None = None) -> None:
     """Start the Holoscan application in a daemon background thread.
 
-    Resolves the config path from the selected config in the database.
+    Parameters
+    ----------
+    state:
+        Shared application state.
+    config:
+        Config dict to use for this run.  If None, the last config stored in
+        the DB is used.  Raises RuntimeError if neither is available.
+
     Raises RuntimeError if an app is already running, if a previous runner
-    thread is still alive, if no config is selected, or if required ZMQ
+    thread is still alive, if no config is available, or if required ZMQ
     environment variables are not set.
     """
     global _runner_thread
@@ -64,14 +84,28 @@ def start(state: AppState) -> None:
             "endpoints of the Eiger detector and PandA box respectively."
         )
 
-    # Resolve config from DB
-    config_name = state.selected_config
-    if not config_name:
+    # Resolve config: use provided config, fall back to last persisted config.
+    if config is not None:
+        db.set_last_config(config)
+        state.update(last_config=config)
+    else:
+        config = state.last_config or db.get_last_config()
+        if config is None:
+            raise RuntimeError(
+                "No config provided and no previous config found. "
+                "Pass a config JSON to 'hp start'."
+            )
+        state.update(last_config=config)
+
+    config_path = db.write_config_ini(config, CONFIG_DIR)
+    logger.info("Config written to %s", config_path)
+
+    # Validate required config fields before importing heavy deps.
+    missing_fields = [f for f in _REQUIRED_CONFIG_FIELDS if f not in config]
+    if missing_fields:
         raise RuntimeError(
-            "No config selected. Run 'hp config select <name>' first."
+            f"Config is missing required field(s): {', '.join(missing_fields)}."
         )
-    config_path = db.write_config_ini(config_name, CONFIG_DIR)
-    logger.info("Using config %r written to %s", config_name, config_path)
 
     # Import heavy GPU deps here so the FastAPI server can start without them.
     try:

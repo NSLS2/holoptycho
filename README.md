@@ -137,36 +137,15 @@ pixi install -e client
 
 ### Starting and stopping
 
-Select a config, then start:
-
 ```bash
-hp config select <name>
-hp start
+hp start                  # start using current config
+hp start '<json>'         # start with a new config (becomes current config)
 hp stop
-hp restart   # stop + restart with the same config; use after updating config
+hp restart                # stop + restart with current config
+hp restart '<json>'       # stop + restart with a new config
+hp config show            # print the current config as JSON
 hp status
 hp logs
-```
-
-### Config management
-
-Configs are stored on the server as JSON key/value pairs, serialised to INI files at pipeline start. The selected config persists across server restarts.
-
-```bash
-hp config list                          # list configs, show which is selected
-hp config set <name> '<json>'           # create or overwrite a config
-hp config show <name>                   # print config as JSON
-hp config select <name>                 # select config for next run
-hp config rename <old_name> <new_name>  # rename a config
-hp config delete <name>                 # delete a config
-```
-
-Example:
-
-```bash
-hp config set hxn_scan '{"scan_num": "339015", "x_range": "2.0", "working_directory": "/nsls2/data/..."}'
-hp config select hxn_scan
-hp start
 ```
 
 ### Model selection
@@ -181,6 +160,60 @@ hp start
 hp model list
 hp model set <model-name> --version <version>
 hp model status
+```
+
+---
+
+## Config parameters
+
+The config is a flat JSON dict passed to `hp start` or `hp restart`. All values are strings (matching the INI format the reconstructor reads). See `AGENTS.md` for a full example.
+
+### Parameter reference
+
+| Parameter | Type | Description |
+|---|---|---|
+| `scan_num` | int (str) | Scan number — tags all Tiled output for this run |
+| `working_directory` | path | Root directory for input/output data |
+| `shm_name` | str | Shared-memory segment name for ZMQ live data |
+| `scan_type` | str | Scan pattern, e.g. `pt_fly2dcontpd` |
+| `nx`, `ny` | int (str) | Reconstruction array size (pixels) |
+| `batch_width`, `batch_height` | int (str) | Diffraction pattern tile size |
+| `batch_x0`, `batch_y0` | int (str) | Top-left crop offset in the detector frame |
+| `det_roix0`, `det_roiy0` | int (str) | Detector ROI origin (pixels) |
+| `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
+| `xray_energy_kev` | float (str) | X-ray energy in keV |
+| `lambda_nm` | float (str) | X-ray wavelength in nm — derive from energy (see below) |
+| `ccd_pixel_um` | float (str) | Detector pixel size in µm |
+| `distance` | float (str) | Sample-to-detector distance in mm |
+| `dr_x`, `dr_y` | float (str) | Scan step size in µm |
+| `x_num`, `y_num` | int (str) | Number of scan positions (fast/slow axis) |
+| `x_range`, `y_range` | float (str) | Total scan range in µm |
+| `x_direction`, `y_direction` | float (str) | Sign convention for scan axes (`1.0` or `-1.0`) |
+| `x_ratio`, `y_ratio` | float (str) | Encoder-to-µm scale factor for each axis |
+| `pos_x_channel`, `pos_y_channel` | str | ZMQ field names for X/Y encoder values from PandA |
+| `alg_flag` | str | Primary algorithm: `ML_grad`, `DM`, `ePIE`, etc. |
+| `alg2_flag` | str | Secondary algorithm (used after `alg_percentage` of iterations) |
+| `alg_percentage` | float (str) | Fraction of iterations using `alg_flag` |
+| `n_iterations` | int (str) | Total reconstruction iterations |
+| `ml_mode` | str | Noise model: `Poisson` or `Gaussian` |
+| `ml_weight` | float (str) | ML regularisation weight |
+| `beta` | float (str) | Momentum parameter for ML gradient |
+| `init_obj_flag` | bool (str) | Initialise object from DPC (`True`/`False`) |
+| `init_prb_flag` | bool (str) | Load probe from file (`True`/`False`) |
+| `prb_path` | path | Full path to probe `.npy` file — empty to generate synthetically |
+| `prb_mode_num` | int (str) | Number of probe modes |
+| `obj_mode_num` | int (str) | Number of object modes |
+| `gpu_flag` | bool (str) | Use GPU (`True`/`False`) |
+| `gpus` | list (str) | JSON list of GPU indices, e.g. `"[0]"` |
+| `precision` | str | Float precision: `single` or `double` |
+| `nth` | int (str) | Number of threads for CPU operations |
+| `sign` | str | Arbitrary run label used to tag output |
+| `display_interval` | int (str) | Iterations between live Tiled updates |
+
+**Wavelength from energy:**
+
+```python
+lambda_nm = (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
 ```
 
 ---
