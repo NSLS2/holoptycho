@@ -278,13 +278,9 @@ class PositionRxOp(Operator):
         self.data_y_str = param[1]
 
     def setup(self, spec: OperatorSpec):
-        spec.input("flush",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
         spec.output("pointRx_out")
         
     def compute(self, op_input, op_output, context):
-        param = op_input.receive('flush')
-        if param:
-            self.flush(param)
         try:
             msg = self.socket.recv_json()
             if msg["msg_type"] == "data":

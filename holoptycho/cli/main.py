@@ -17,7 +17,7 @@ from rich.table import Table
 
 app = typer.Typer(help="holoptycho control CLI", no_args_is_help=True)
 model_app = typer.Typer(help="Model management commands", no_args_is_help=True)
-config_app = typer.Typer(help="Config management commands", no_args_is_help=True)
+config_app = typer.Typer(help="Config commands", no_args_is_help=True)
 app.add_typer(model_app, name="model")
 app.add_typer(config_app, name="config")
 
@@ -39,6 +39,17 @@ def _handle_error(resp: httpx.Response) -> None:
         except Exception:
             detail = resp.text
         typer.echo(f"Error {resp.status_code}: {detail}", err=True)
+        raise typer.Exit(1)
+
+
+def _parse_config(config_str: Optional[str]) -> Optional[dict]:
+    """Parse an optional JSON string into a dict, exiting on invalid JSON."""
+    if config_str is None:
+        return None
+    try:
+        return json.loads(config_str)
+    except json.JSONDecodeError as e:
+        typer.echo(f"Invalid JSON: {e}", err=True)
         raise typer.Exit(1)
 
 
@@ -72,11 +83,20 @@ def status(ctx: typer.Context):
 @app.command()
 def start(
     ctx: typer.Context,
-    mode: str = typer.Option(..., "--mode", help="'live' or 'simulate'"),
+    config: Optional[str] = typer.Argument(
+        None,
+        help="Config as a JSON string. Uses last config if omitted.",
+    ),
 ):
-    """Start the Holoscan pipeline using the currently selected config."""
+    """Start the Holoscan pipeline.
+
+    Optionally pass a config JSON string to use for this run.
+    If omitted, the current config is reused.
+    """
+    parsed = _parse_config(config)
+    body = {"config": parsed} if parsed is not None else {}
     with _client(_base_url(ctx)) as c:
-        resp = c.post("/run", json={"mode": mode})
+        resp = c.post("/run", json=body)
     _handle_error(resp)
     typer.echo(resp.json().get("detail", "Started"))
 
@@ -91,10 +111,21 @@ def stop(ctx: typer.Context):
 
 
 @app.command()
-def restart(ctx: typer.Context):
-    """Restart the Holoscan pipeline with the same mode."""
+def restart(
+    ctx: typer.Context,
+    config: Optional[str] = typer.Argument(
+        None,
+        help="Config as a JSON string. Uses last config if omitted.",
+    ),
+):
+    """Restart the Holoscan pipeline.
+
+    Optionally pass a new config JSON string. If omitted, the last config is reused.
+    """
+    parsed = _parse_config(config)
+    body = {"config": parsed} if parsed is not None else {}
     with _client(_base_url(ctx)) as c:
-        resp = c.post("/restart")
+        resp = c.post("/restart", json=body)
     _handle_error(resp)
     typer.echo(resp.json().get("detail", "Restarting"))
 
@@ -123,90 +154,13 @@ def config_callback(ctx: typer.Context):
         ctx.obj.update(ctx.parent.obj)
 
 
-@config_app.command("list")
-def config_list(ctx: typer.Context):
-    """List all configs and show which is selected."""
+@config_app.command("show")
+def config_show(ctx: typer.Context):
+    """Print the current config as JSON."""
     with _client(_base_url(ctx)) as c:
         resp = c.get("/config")
     _handle_error(resp)
-    data = resp.json()
-    selected = data.get("selected")
-    configs = data.get("configs", [])
-    if not configs:
-        typer.echo("No configs found. Use 'hp config set <name> <json>' to add one.")
-        return
-    table = Table("Name", "Selected", "Updated")
-    for cfg in configs:
-        is_selected = "yes" if cfg["name"] == selected else ""
-        table.add_row(cfg["name"], is_selected, str(cfg["updated"]))
-    rprint(table)
-
-
-@config_app.command("show")
-def config_show(
-    ctx: typer.Context,
-    name: str = typer.Argument(..., help="Config name"),
-):
-    """Print a config as JSON."""
-    with _client(_base_url(ctx)) as c:
-        resp = c.get(f"/config/{name}")
-    _handle_error(resp)
     typer.echo(json.dumps(resp.json(), indent=2))
-
-
-@config_app.command("set")
-def config_set(
-    ctx: typer.Context,
-    name: str = typer.Argument(..., help="Config name"),
-    content: str = typer.Argument(..., help="Config as a JSON string"),
-):
-    """Create or overwrite a config from a JSON string."""
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError as e:
-        typer.echo(f"Invalid JSON: {e}", err=True)
-        raise typer.Exit(1)
-    with _client(_base_url(ctx)) as c:
-        resp = c.post(f"/config/{name}", json=parsed)
-    _handle_error(resp)
-    typer.echo(resp.json().get("detail", "Saved"))
-
-
-@config_app.command("select")
-def config_select(
-    ctx: typer.Context,
-    name: str = typer.Argument(..., help="Config name to select"),
-):
-    """Select a config for the next pipeline run."""
-    with _client(_base_url(ctx)) as c:
-        resp = c.post(f"/config/select/{name}")
-    _handle_error(resp)
-    typer.echo(resp.json().get("detail", "Selected"))
-
-
-@config_app.command("rename")
-def config_rename(
-    ctx: typer.Context,
-    old_name: str = typer.Argument(..., help="Current config name"),
-    new_name: str = typer.Argument(..., help="New config name"),
-):
-    """Rename a config."""
-    with _client(_base_url(ctx)) as c:
-        resp = c.post(f"/config/rename/{old_name}", json={"new_name": new_name})
-    _handle_error(resp)
-    typer.echo(resp.json().get("detail", "Renamed"))
-
-
-@config_app.command("delete")
-def config_delete(
-    ctx: typer.Context,
-    name: str = typer.Argument(..., help="Config name to delete"),
-):
-    """Delete a config."""
-    with _client(_base_url(ctx)) as c:
-        resp = c.request("DELETE", f"/config/{name}")
-    _handle_error(resp)
-    typer.echo(resp.json().get("detail", "Deleted"))
 
 
 # ---------------------------------------------------------------------------

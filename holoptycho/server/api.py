@@ -25,13 +25,14 @@ from . import db, runner, model_manager
 async def lifespan(app):
     db.init_db()
     state.update(
-        selected_config=db.get_setting("selected_config"),
+        last_config=db.get_last_config(),
         current_engine_path=db.get_setting("current_engine_path"),
         current_model_name=db.get_setting("current_model_name"),
         current_model_version=db.get_setting("current_model_version"),
     )
     logger.info("holoptycho API started")
     yield
+
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -54,22 +55,17 @@ logger = logging.getLogger("holoptycho.api")
 app = FastAPI(title="holoptycho API", version="0.1.0", lifespan=lifespan)
 
 
-
 # ---------------------------------------------------------------------------
 # Request / response models
 # ---------------------------------------------------------------------------
 
 class RunRequest(BaseModel):
-    mode: str  # "live" | "simulate"
+    config: Optional[dict] = None
 
 
 class ModelSwapRequest(BaseModel):
     name: str
     version: str
-
-
-class RenameRequest(BaseModel):
-    new_name: str
 
 
 # ---------------------------------------------------------------------------
@@ -81,14 +77,24 @@ def get_status():
     return state.snapshot()
 
 
+@app.get("/config")
+def get_config():
+    """Return the current config, or 404 if none has been set yet."""
+    with state._lock:
+        cfg = state.last_config
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="No config has been set yet.")
+    return cfg
+
+
 @app.post("/run", status_code=202)
-def post_run(req: RunRequest):
-    """Start the Holoscan pipeline using the currently selected config."""
+def post_run(req: RunRequest = RunRequest()):
+    """Start the Holoscan pipeline, optionally with a new config."""
     try:
-        runner.start(mode=req.mode, state=state)
+        runner.start(state=state, config=req.config)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"detail": f"Starting in {req.mode!r} mode"}
+    return {"detail": "Starting pipeline"}
 
 
 @app.post("/stop", status_code=202)
@@ -101,10 +107,9 @@ def post_stop():
 
 
 @app.post("/restart", status_code=202)
-def post_restart():
-    """Stop the running app and restart it with the same mode."""
+def post_restart(req: RunRequest = RunRequest()):
+    """Stop the running app and restart it, optionally with a new config."""
     with state._lock:
-        mode = state.mode
         current_status = state.status
 
     if current_status not in ("starting", "running", "finished", "error"):
@@ -112,8 +117,6 @@ def post_restart():
             status_code=400,
             detail="No previous run to restart. Use POST /run to start.",
         )
-    if mode is None:
-        raise HTTPException(status_code=400, detail="No mode recorded — cannot restart.")
 
     if current_status in ("starting", "running"):
         try:
@@ -132,11 +135,11 @@ def post_restart():
             )
 
     try:
-        runner.start(mode=mode, state=state)
+        runner.start(state=state, config=req.config)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    return {"detail": f"Restarting in {mode!r} mode"}
+    return {"detail": "Restarting pipeline"}
 
 
 # ---------------------------------------------------------------------------
@@ -151,74 +154,6 @@ def get_logs(lines: int = 100):
     with log_path.open() as f:
         all_lines = f.readlines()
     return {"lines": [l.rstrip("\n") for l in all_lines[-lines:]]}
-
-
-# ---------------------------------------------------------------------------
-# Config management
-# ---------------------------------------------------------------------------
-
-@app.get("/config")
-def get_config_list():
-    """List all configs and show which is currently selected."""
-    configs = db.list_configs()
-    return {
-        "configs": configs,
-        "selected": state.selected_config,
-    }
-
-
-@app.get("/config/{name}")
-def get_config(name: str):
-    """Return a config as a flat JSON dict."""
-    content = db.get_config(name)
-    if content is None:
-        raise HTTPException(status_code=404, detail=f"Config {name!r} not found")
-    return content
-
-
-@app.post("/config/{name}", status_code=201)
-def post_config(name: str, content: dict):
-    """Create or overwrite a config from a flat JSON dict."""
-    db.set_config(name, content)
-    return {"detail": f"Config {name!r} saved"}
-
-
-@app.post("/config/select/{name}", status_code=200)
-def post_config_select(name: str):
-    """Select a config for the next pipeline run."""
-    if db.get_config(name) is None:
-        raise HTTPException(status_code=404, detail=f"Config {name!r} not found")
-    state.update(selected_config=name)
-    db.set_setting("selected_config", name)
-    return {"detail": f"Config {name!r} selected"}
-
-
-@app.post("/config/rename/{name}", status_code=200)
-def post_config_rename(name: str, req: RenameRequest):
-    """Rename a config."""
-    ok = db.rename_config(name, req.new_name)
-    if not ok:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Rename failed — {name!r} not found or {req.new_name!r} already exists",
-        )
-    # Keep selected_config in sync
-    if state.selected_config == name:
-        state.update(selected_config=req.new_name)
-        db.set_setting("selected_config", req.new_name)
-    return {"detail": f"Config {name!r} renamed to {req.new_name!r}"}
-
-
-@app.delete("/config/{name}", status_code=200)
-def delete_config(name: str):
-    """Delete a config."""
-    ok = db.delete_config(name)
-    if not ok:
-        raise HTTPException(status_code=404, detail=f"Config {name!r} not found")
-    if state.selected_config == name:
-        state.update(selected_config=None)
-        db.set_setting("selected_config", None)
-    return {"detail": f"Config {name!r} deleted"}
 
 
 # ---------------------------------------------------------------------------

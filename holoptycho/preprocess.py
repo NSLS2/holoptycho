@@ -28,17 +28,12 @@ class ImageBatchOp(Operator):
         self.roi = np.array(param)
         
     def setup(self, spec: OperatorSpec):
-        spec.input("flush",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
         spec.input("image").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=256)
         spec.input("image_index").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=256)
         spec.output("image_batch")
         spec.output("image_indices")
         
     def compute(self, op_input, op_output, context):
-        param = op_input.receive('flush')
-        if param:
-            self.flush(param)
-
         image = op_input.receive("image")
         image_index = op_input.receive("image_index")
 
@@ -185,7 +180,6 @@ class PointProcessorOp(Operator):
 
         
     def setup(self, spec: OperatorSpec):
-        spec.input("flush",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
         spec.input("pointOp_in").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
 
         # An option to deal with the ugly hack:
@@ -284,10 +278,6 @@ class PointProcessorOp(Operator):
 
     def compute(self, op_input, op_output, context):
 
-        param = op_input.receive('flush')
-        if param:
-            self.flush(param)
-
         data = op_input.receive("pointOp_in")
 
         # Ugly hack
@@ -331,17 +321,12 @@ class ImageSendOp(Operator):
         
     
     def setup(self, spec: OperatorSpec):
-        spec.input("flush",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
         spec.input("diff_amp").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.input("image_indices").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.output("frame_ready_num").condition(ConditionType.NONE)
         spec.output("image_indices_out").condition(ConditionType.NONE)
 
     def compute(self, op_input, op_output, context):
-
-        param = op_input.receive('flush')
-        if param:
-            self.flush(param)
 
         diff_d = op_input.receive("diff_amp")
         indices = op_input.receive("image_indices")

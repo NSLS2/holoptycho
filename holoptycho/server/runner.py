@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-"""Runs the Holoscan application (PtychoApp or PtychoSimulApp) in a
-background thread and keeps AppState in sync with its lifecycle."""
+"""Runs the Holoscan application (PtychoApp) in a background thread and
+keeps AppState in sync with its lifecycle."""
 
 import logging
+import os
 import threading
 import time
 
@@ -15,12 +16,27 @@ logger = logging.getLogger("holoptycho.runner")
 # Module-level reference to the runner thread so we can check is_alive().
 _runner_thread: threading.Thread | None = None
 
+_REQUIRED_ENV_VARS = ("SERVER_STREAM_SOURCE", "PANDA_STREAM_SOURCE")
+
+# Config fields that must be present — no sensible default exists for these.
+_REQUIRED_CONFIG_FIELDS = (
+    "scan_num",
+    "nx", "ny",
+    "x_range", "y_range",
+    "x_num", "y_num",
+    "det_roix0", "det_roiy0",
+    "x_ratio", "y_ratio",
+    "xray_energy_kev",
+    "ccd_pixel_um",
+    "distance",
+)
+
 
 def _run_app(app, state: AppState):
     """Target function for the runner thread."""
     try:
         state.update(status="running", start_time=time.time(), error=None)
-        logger.info("Holoscan app starting (mode=%s)", state.mode)
+        logger.info("Holoscan app starting")
         app.run()
         state.update(status="finished")
         logger.info("Holoscan app finished normally")
@@ -29,12 +45,20 @@ def _run_app(app, state: AppState):
         logger.exception("Holoscan app raised an exception")
 
 
-def start(mode: str, state: AppState) -> None:
+def start(state: AppState, config: dict | None = None) -> None:
     """Start the Holoscan application in a daemon background thread.
 
-    Resolves the config path from the selected config in the database.
+    Parameters
+    ----------
+    state:
+        Shared application state.
+    config:
+        Config dict to use for this run.  If None, the last config stored in
+        the DB is used.  Raises RuntimeError if neither is available.
+
     Raises RuntimeError if an app is already running, if a previous runner
-    thread is still alive, or if no config is selected.
+    thread is still alive, if no config is available, or if required ZMQ
+    environment variables are not set.
     """
     global _runner_thread
 
@@ -51,33 +75,49 @@ def start(mode: str, state: AppState) -> None:
             "Previous runner thread is still shutting down. Try again in a moment."
         )
 
-    # Resolve config from DB
-    config_name = state.selected_config
-    if not config_name:
+    # Validate required ZMQ env vars before doing anything else.
+    missing = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v)]
+    if missing:
         raise RuntimeError(
-            "No config selected. Run 'hp config select <name>' first."
+            f"Required environment variable(s) not set: {', '.join(missing)}. "
+            "Set SERVER_STREAM_SOURCE and PANDA_STREAM_SOURCE to the ZMQ "
+            "endpoints of the Eiger detector and PandA box respectively."
         )
-    config_path = db.write_config_ini(config_name, CONFIG_DIR)
-    logger.info("Using config %r written to %s", config_name, config_path)
+
+    # Resolve config: use provided config, fall back to last persisted config.
+    if config is not None:
+        db.set_last_config(config)
+        state.update(last_config=config)
+    else:
+        config = state.last_config or db.get_last_config()
+        if config is None:
+            raise RuntimeError(
+                "No config provided and no previous config found. "
+                "Pass a config JSON to 'hp start'."
+            )
+        state.update(last_config=config)
+
+    config_path = db.write_config_ini(config, CONFIG_DIR)
+    logger.info("Config written to %s", config_path)
+
+    # Validate required config fields before importing heavy deps.
+    missing_fields = [f for f in _REQUIRED_CONFIG_FIELDS if f not in config]
+    if missing_fields:
+        raise RuntimeError(
+            f"Config is missing required field(s): {', '.join(missing_fields)}."
+        )
 
     # Import heavy GPU deps here so the FastAPI server can start without them.
     try:
-        from holoptycho.ptycho_holo import PtychoApp, PtychoSimulApp
+        from holoptycho.ptycho_holo import PtychoApp
     except ImportError as exc:
         raise RuntimeError(f"Failed to import Holoscan app: {exc}") from exc
 
     resolved_engine = state.current_engine_path
-
-    if mode == "simulate":
-        app = PtychoSimulApp(config_path=config_path, engine_path=resolved_engine)
-    elif mode == "live":
-        app = PtychoApp(config_path=config_path, engine_path=resolved_engine)
-    else:
-        raise ValueError(f"Unknown mode {mode!r}. Use 'live' or 'simulate'.")
+    app = PtychoApp(config_path=config_path, engine_path=resolved_engine)
 
     state.update(
         status="starting",
-        mode=mode,
         error=None,
     )
 

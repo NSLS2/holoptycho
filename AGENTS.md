@@ -4,6 +4,12 @@ This document teaches an AI agent how to operate the `hp` CLI to control the
 holoptycho Holoscan pipeline: start/stop runs, manage configs, and manage
 TensorRT engine models.
 
+## Scope
+
+**Holoptycho is for real-time streaming reconstruction only.** It always
+connects to live ZMQ streams from the Eiger detector and PandA box.
+For batch/offline reconstruction use `NSLS2/ptycho` or `NSLS2/ptychoml`.
+
 ## Self-improvement protocol
 
 This file is a living document. Whenever you (the agent) discover any of the
@@ -34,6 +40,8 @@ found it.
   just `hp …` if the venv is active).
 - By default all commands talk to `http://localhost:8000`.
   Override with `--url <URL>` or `HOLOPTYCHO_URL=<URL>`.
+- `SERVER_STREAM_SOURCE` and `PANDA_STREAM_SOURCE` **must** be set in the
+  container environment before `hp start` will succeed.
 
 ---
 
@@ -146,6 +154,13 @@ docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
   -e AZURE_CERTIFICATE_B64="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-sp-cert --query value -o tsv)" \
   -e AZURE_RESOURCE_GROUP=rg-genesis-demos \
   -e AZURE_ML_WORKSPACE=genesis-mlw \
+  -e TILED_BASE_URL="https://tiled.nsls2.bnl.gov" \
+  -e TILED_API_KEY="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-tiled-api-key --query value -o tsv)" \
+  -e SERVER_STREAM_SOURCE="tcp://<eiger-host>:5555" \
+  -e PANDA_STREAM_SOURCE="tcp://<panda-host>:5556" \
+  -e SERVER_PUBLIC_KEY="<eiger-server-public-key>" \
+  -e CLIENT_PUBLIC_KEY="<client-public-key>" \
+  -e CLIENT_SECRET_KEY="<client-secret-key>" \
   genesisdemosacr.azurecr.io/holoptycho:latest
 ```
 
@@ -159,6 +174,15 @@ ssh -L 8000:localhost:8000 <slurm-login-node>
 
 The `hp` CLI can now reach the server at `http://localhost:8000`.
 
+For testing with the replay script, also forward the ZMQ ports:
+
+```bash
+ssh -L 8000:localhost:8000 \
+    -L 5555:localhost:5555 \
+    -L 5556:localhost:5556 \
+    <slurm-login-node>
+```
+
 ---
 
 ## CLI reference
@@ -166,47 +190,28 @@ The `hp` CLI can now reach the server at `http://localhost:8000`.
 ### Pipeline lifecycle
 
 ```bash
-# Show current status (state, selected config, current model)
+# Show current status (state, last config summary, current model)
 hp status
 
-# Start the pipeline  (mode = "live" or "simulate")
-hp start --mode simulate
-hp start --mode live
+# Start the pipeline (always live ZMQ — no mode parameter)
+# Pass a JSON config string to use for this run; uses current config if omitted.
+hp start
+hp start '<json>'
 
 # Stop the pipeline
 hp stop
 
-# Restart with the same mode
+# Restart with the same config (use after a scan completes)
+# Optionally pass a new config JSON string.
 hp restart
+hp restart '<json>'
+
+# Print the current config as JSON
+hp config show
 
 # Tail the log
 hp logs
 hp logs --lines 50
-```
-
-### Config management
-
-Configs are stored in SQLite as flat JSON dicts.  They are converted to INI
-format (a `[GUI]` section) and written to disk when the pipeline starts.
-
-```bash
-# List all configs; the selected one is marked
-hp config list
-
-# Print a config as JSON
-hp config show <name>
-
-# Create or overwrite a config from a JSON string
-hp config set <name> '<json>'
-
-# Select a config for the next run (persists across server restarts)
-hp config select <name>
-
-# Rename a config
-hp config rename <old_name> <new_name>
-
-# Delete a config
-hp config delete <name>
 ```
 
 ### Model management
@@ -233,7 +238,7 @@ Configs are stored as **flat JSON dicts** (no nesting).  Every key maps
 directly to a parameter in the ptycho reconstructor.  When the pipeline
 starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 
-### Minimal example (simulate mode)
+### Minimal example
 
 ```json
 {
@@ -285,7 +290,6 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
   "precision": "single",
   "nth": "5",
 
-  "simulate_live_recon": "True",
   "sign": "t1",
   "display_interval": "10",
   "save_config_history": "True"
@@ -296,7 +300,7 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `scan_num` | int (str) | Scan number used to locate raw data |
+| `scan_num` | int (str) | Scan number used to tag output in Tiled |
 | `working_directory` | path | Root directory for input/output data |
 | `shm_name` | str | Shared-memory segment name for ZMQ live data |
 | `scan_type` | str | Scan pattern, e.g. `pt_fly2dcontpd` |
@@ -326,7 +330,6 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `gpu_flag` | bool (str) | Use GPU (`True`/`False`) |
 | `gpus` | list (str) | JSON list of GPU indices, e.g. `"[0]"` |
 | `precision` | str | Float precision: `single` or `double` |
-| `simulate_live_recon` | bool (str) | Replay H5 file instead of live ZMQ stream |
 | `sign` | str | Run label / tag (arbitrary string) |
 | `display_interval` | int (str) | How often (iterations) to update display |
 
@@ -345,41 +348,24 @@ lambda_nm = (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
 ## Typical workflow
 
 ```bash
-# 1. Create a config for a new scan
-hp config set scan320045 '{
-  "scan_num": "320045",
-  "working_directory": "/ptycho_gui_holoscan",
-  "shm_name": "ptycho_320045",
-  "nx": "128", "ny": "128",
-  "batch_width": "128", "batch_height": "128",
-  "gpu_batch_size": "256",
-  "xray_energy_kev": "15.093",
-  "lambda_nm": "0.08216037112357172",
-  "ccd_pixel_um": "75.0",
-  "distance": "30.0",
-  "dr_x": "0.02", "dr_y": "0.02",
-  "x_arr_size": "303.0", "y_arr_size": "336.0",
-  "x_range": "2.0", "y_range": "2.0",
-  "x_direction": "1.0", "y_direction": "-1.0",
-  "alg_flag": "ML_grad", "n_iterations": "500",
-  "gpu_flag": "True", "gpus": "[0]",
-  "simulate_live_recon": "True", "sign": "t1"
-}'
+# 1. Pull beamline metadata from Tiled and start the pipeline
+tiled login https://tiled.nsls2.bnl.gov
+hp start "$(pixi run -e client config-from-tiled --scan-num 320045)"
 
-# 2. Select it
-hp config select scan320045
+# 2. (Optional) Override reconstruction parameters
+hp start "$(pixi run -e client config-from-tiled --scan-num 320045 --nx 256 --n-iterations 1000)"
 
 # 3. (Optional) Switch to a different model
 hp model set my_vit_model --version 3
 
-# 4. Start a simulation run
-hp start --mode simulate
-
-# 5. Watch the log
+# 4. Watch the log
 hp logs --lines 200
 
-# 6. Stop when done
+# 5. Stop when done
 hp stop
+
+# 6. For the next scan: restart with a new config
+hp restart "$(pixi run -e client config-from-tiled --scan-num 320046)"
 ```
 
 ---
@@ -392,6 +378,14 @@ hp stop
 | `HOLOPTYCHO_DB_PATH` | `holoptycho.db` | SQLite DB path (server-side) |
 | `HOLOPTYCHO_CONFIG_DIR` | `configs/` | Directory for generated INI files (server-side) |
 | `ENGINE_CACHE_DIR` | `models/` | Directory for cached `.engine` files (server-side) |
+| `SERVER_STREAM_SOURCE` | — | **Required.** ZMQ endpoint of the Eiger detector |
+| `PANDA_STREAM_SOURCE` | — | **Required.** ZMQ endpoint of the PandA box |
+| `SERVER_PUBLIC_KEY` | — | CurveZMQ server (Eiger) public key |
+| `CLIENT_PUBLIC_KEY` | — | CurveZMQ client public key |
+| `CLIENT_SECRET_KEY` | — | CurveZMQ client secret key |
+| `TILED_BASE_URL` | — | Tiled server URL. If unset, falls back to .npy writes |
+| `TILED_API_KEY` | — | Tiled API key (store in Key Vault as `holoptycho-tiled-api-key`) |
+| `TILED_CATALOG_PATH` | `hxn/processed/holoptycho` | Tiled catalog path for output |
 | `AZURE_SUBSCRIPTION_ID` | — | Azure subscription (for Azure ML model pull) |
 | `AZURE_RESOURCE_GROUP` | — | Azure resource group |
 | `AZURE_ML_WORKSPACE` | — | Azure ML workspace name |
@@ -414,6 +408,13 @@ docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
   -e AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)" \
   -e AZURE_RESOURCE_GROUP=rg-genesis-demos \
   -e AZURE_ML_WORKSPACE=genesis-mlw \
+  -e TILED_BASE_URL="https://tiled.nsls2.bnl.gov" \
+  -e TILED_API_KEY="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-tiled-api-key --query value -o tsv)" \
+  -e SERVER_STREAM_SOURCE="tcp://<eiger-host>:5555" \
+  -e PANDA_STREAM_SOURCE="tcp://<panda-host>:5556" \
+  -e SERVER_PUBLIC_KEY="<eiger-server-public-key>" \
+  -e CLIENT_PUBLIC_KEY="<client-public-key>" \
+  -e CLIENT_SECRET_KEY="<client-secret-key>" \
   <image> <command>
 ```
 
@@ -429,4 +430,67 @@ CertificateCredential(
     password=b"",
 )
 ```
+
+---
+
+## Testing with the replay script
+
+To test end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. The replay script and holoptycho must run on the **same machine** — ZMQ traffic stays local. Run both on the compute node and control holoptycho from your local machine via the `8000` SSH tunnel as normal.
+
+```bash
+# On the compute node — authenticate and start the replay script
+tiled login https://tiled.nsls2.bnl.gov
+pixi install -e replay
+pixi run -e replay replay \
+    --scan-num 320045 \
+    --tiled-url https://tiled.nsls2.bnl.gov \
+    --eiger-endpoint tcp://0.0.0.0:5555 \
+    --panda-endpoint tcp://0.0.0.0:5556 \
+    --rate 200
+```
+
+Then start holoptycho with:
+
+```bash
+hp start '{"scan_num": "320045", ...}'
+```
+
+The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`.
+
+---
+
+## Tiled output structure
+
+Results are written to the Tiled catalog under `TILED_CATALOG_PATH/{scan_num}/`,
+tagged with the `synaps_project` spec:
+
+```
+hxn/processed/holoptycho/
+  {scan_num}/
+    live/
+      probe      ← overwritten every display_interval iterations
+      object     ← overwritten every display_interval iterations
+    final/
+      probe      ← written once at scan completion
+      object
+      timestamps
+      num_points
+    vit/
+      pred_latest    ← overwritten each ViT batch
+      indices_latest
+```
+
+If `TILED_BASE_URL` or `TILED_API_KEY` are not set, the pipeline falls back
+to writing `.npy` files under `/data/users/Holoscan/` with a warning.
+
+---
+
+## Deprecated (planned for removal)
+
+The following remain in the repo for reference and will be removed in a future release:
+
+- **`PtychoSimulApp`**, **`InitSimul`**, **`live_simulation.py`** — simulate mode that replayed H5 files directly, bypassing ZMQ.
+- **`InitRecon`**, **`liverecon_utils.py`** — scan header file watcher.
+- **`eiger_simulation/`** — bespoke Eiger simulator container. Use `scripts/replay_from_tiled.py` instead.
+
 

@@ -6,7 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "holoptycho"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "tiled[client]>=0.1",
+]
 
 [project.optional-dependencies]
 test = ["pytest"]
