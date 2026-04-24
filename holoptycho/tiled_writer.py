@@ -11,6 +11,10 @@ catalog.  Initialized from environment variables:
 If either TILED_BASE_URL or TILED_API_KEY is absent, all write methods fall
 back to writing .npy files under /data/users/Holoscan/ (matching the prior
 behaviour) and emit a warning.
+
+A process-wide singleton is maintained so that multiple modules (ptycho_holo,
+vit_inference) share a single Tiled connection.  Use :func:`get_writer` to
+obtain it.
 """
 
 from __future__ import annotations
@@ -28,16 +32,11 @@ _DEFAULT_CATALOG_PATH = "hxn/processed/holoptycho"
 _SPECS = ["synaps_project"]
 
 
-def _navigate(client, path: str):
-    """Walk a slash-separated path in the tiled catalog, creating containers
-    as needed at each level."""
-    node = client
-    for part in path.strip("/").split("/"):
-        if part in node:
-            node = node[part]
-        else:
-            node = node.create_container(key=part, specs=_SPECS)
-    return node
+def _get_or_create(container, key: str):
+    """Return a sub-container by key, creating it if it doesn't exist."""
+    if key in container:
+        return container[key]
+    return container.create_container(key=key, specs=_SPECS)
 
 
 class TiledWriter:
@@ -50,15 +49,20 @@ class TiledWriter:
     api_key:
         Tiled API key.
     catalog_path:
-        Slash-separated path within the catalog (e.g. ``hxn/processed/holoptycho``).
-        A sub-container named after the scan number is created beneath this path.
+        Slash-separated path to an **existing** container in the catalog
+        (e.g. ``hxn/processed/holoptycho``).  Per-scan sub-containers are
+        created beneath it as needed.
     """
 
     def __init__(self, base_url: str, api_key: str, catalog_path: str):
         from tiled.client import from_uri
 
-        self._client = from_uri(base_url, api_key=api_key)
-        self._root = _navigate(self._client, catalog_path)
+        client = from_uri(base_url, api_key=api_key)
+        # Navigate to the existing root container using plain [] indexing.
+        node = client
+        for part in catalog_path.strip("/").split("/"):
+            node = node[part]
+        self._root = node
         self._catalog_path = catalog_path
         logger.info("TiledWriter connected: %s / %s", base_url, catalog_path)
 
@@ -68,10 +72,7 @@ class TiledWriter:
 
     def _scan_container(self, scan_num) -> object:
         """Return (creating if necessary) the container for a given scan."""
-        key = str(scan_num)
-        if key in self._root:
-            return self._root[key]
-        return self._root.create_container(key=key, specs=_SPECS)
+        return _get_or_create(self._root, str(scan_num))
 
     def _write_or_overwrite_array(self, container, key: str, array: np.ndarray, metadata: dict | None = None):
         """Write an array into *container* under *key*, overwriting if it already exists."""
@@ -92,7 +93,7 @@ class TiledWriter:
         """
         try:
             scan = self._scan_container(scan_num)
-            live = _navigate(scan, "live")
+            live = _get_or_create(scan, "live")
             meta = {"scan_num": str(scan_num), "iteration": iteration}
             self._write_or_overwrite_array(live, "probe", probe, metadata=meta)
             self._write_or_overwrite_array(live, "object", obj, metadata=meta)
@@ -111,7 +112,7 @@ class TiledWriter:
         """Write final reconstruction results when a scan completes."""
         try:
             scan = self._scan_container(scan_num)
-            final = _navigate(scan, "final")
+            final = _get_or_create(scan, "final")
             meta = {"scan_num": str(scan_num)}
             self._write_or_overwrite_array(final, "probe", probe, metadata=meta)
             self._write_or_overwrite_array(final, "object", obj, metadata=meta)
@@ -131,7 +132,7 @@ class TiledWriter:
         """Write a ViT inference batch result."""
         try:
             scan = self._scan_container(scan_num)
-            vit = _navigate(scan, "vit")
+            vit = _get_or_create(scan, "vit")
             meta = {"scan_num": str(scan_num), "batch_num": batch_num}
             # Overwrite "latest" arrays for live viewing
             self._write_or_overwrite_array(vit, "pred_latest", pred, metadata=meta)
@@ -139,11 +140,6 @@ class TiledWriter:
             logger.debug("write_vit scan=%s batch=%d", scan_num, batch_num)
         except Exception:
             logger.exception("TiledWriter.write_vit failed")
-
-
-def _npy_fallback_writer() -> "_NpyFallbackWriter":
-    """Return a writer that replicates the old .npy behaviour."""
-    return _NpyFallbackWriter()
 
 
 class _NpyFallbackWriter:
@@ -184,12 +180,25 @@ class _NpyFallbackWriter:
             logger.exception("_NpyFallbackWriter.write_vit failed")
 
 
-def get_writer() -> "TiledWriter | _NpyFallbackWriter":
-    """Construct and return the appropriate writer based on environment variables.
+# Module-level singleton — shared by all callers within the same process.
+_writer_instance: "TiledWriter | _NpyFallbackWriter | None" = None
 
-    If TILED_BASE_URL and TILED_API_KEY are both set, returns a TiledWriter.
-    Otherwise warns and returns an _NpyFallbackWriter.
+
+def get_writer() -> "TiledWriter | _NpyFallbackWriter":
+    """Return the process-wide writer singleton.
+
+    Constructed lazily on first call from environment variables:
+
+    * ``TILED_BASE_URL`` and ``TILED_API_KEY`` both set → :class:`TiledWriter`
+    * Otherwise → :class:`_NpyFallbackWriter` (with a warning)
+
+    Subsequent calls return the same instance without re-reading env vars or
+    re-connecting to Tiled.
     """
+    global _writer_instance
+    if _writer_instance is not None:
+        return _writer_instance
+
     base_url = os.environ.get("TILED_BASE_URL", "").strip()
     api_key = os.environ.get("TILED_API_KEY", "").strip()
     catalog_path = os.environ.get("TILED_CATALOG_PATH", _DEFAULT_CATALOG_PATH).strip()
@@ -205,6 +214,8 @@ def get_writer() -> "TiledWriter | _NpyFallbackWriter":
             "Falling back to writing .npy files under /data/users/Holoscan/.",
             stacklevel=2,
         )
-        return _NpyFallbackWriter()
+        _writer_instance = _NpyFallbackWriter()
+    else:
+        _writer_instance = TiledWriter(base_url=base_url, api_key=api_key, catalog_path=catalog_path)
 
-    return TiledWriter(base_url=base_url, api_key=api_key, catalog_path=catalog_path)
+    return _writer_instance

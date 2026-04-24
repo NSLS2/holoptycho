@@ -29,7 +29,6 @@ def isolated_db(tmp_path, monkeypatch):
 
     s = state_module.state
     s.status = "stopped"
-    s.mode = None
     s.start_time = None
     s.error = None
     s.selected_config = None
@@ -72,21 +71,21 @@ def test_status_reflects_selected_config(client):
 
 def test_run_no_config_returns_400(client):
     with patch("holoptycho.server.runner.start", side_effect=RuntimeError("No config selected")):
-        resp = client.post("/run", json={"mode": "simulate"})
+        resp = client.post("/run")
     assert resp.status_code == 400
     assert "No config selected" in resp.json()["detail"]
 
 
 def test_run_starts_app(client):
     with patch("holoptycho.server.runner.start") as mock_start:
-        resp = client.post("/run", json={"mode": "simulate"})
+        resp = client.post("/run")
     assert resp.status_code == 202
-    mock_start.assert_called_once_with(mode="simulate", state=state_module.state)
+    mock_start.assert_called_once_with(state=state_module.state)
 
 
 def test_run_returns_400_if_already_running(client):
     with patch("holoptycho.server.runner.start", side_effect=RuntimeError("already running")):
-        resp = client.post("/run", json={"mode": "simulate"})
+        resp = client.post("/run")
     assert resp.status_code == 400
 
 
@@ -97,16 +96,16 @@ def test_run_blocked_while_thread_alive(client):
     runner_mod._runner_thread = fake_thread
     try:
         with patch("holoptycho.server.runner.start", side_effect=RuntimeError("shutting down")):
-            resp = client.post("/run", json={"mode": "simulate"})
+            resp = client.post("/run")
         assert resp.status_code == 400
     finally:
         runner_mod._runner_thread = None
 
 
-def test_run_invalid_mode(client):
-    with patch("holoptycho.server.runner.start", side_effect=ValueError("Unknown mode")):
-        resp = client.post("/run", json={"mode": "badmode"})
-    assert resp.status_code == 400
+def test_run_no_body_accepted(client):
+    with patch("holoptycho.server.runner.start") as mock_start:
+        resp = client.post("/run")
+    assert resp.status_code == 202
 
 
 # ---------------------------------------------------------------------------
@@ -132,13 +131,13 @@ def test_stop_when_not_running(client):
 # ---------------------------------------------------------------------------
 
 def test_restart_running_app(client):
-    state_module.state.update(status="running", mode="simulate")
+    state_module.state.update(status="running")
     with patch("holoptycho.server.runner.stop"), \
          patch("holoptycho.server.runner.start") as mock_start, \
          patch("holoptycho.server.runner._runner_thread", None):
         resp = client.post("/restart")
     assert resp.status_code == 202
-    mock_start.assert_called_once_with(mode="simulate", state=state_module.state)
+    mock_start.assert_called_once_with(state=state_module.state)
 
 
 def test_restart_no_previous_run(client):

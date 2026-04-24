@@ -51,15 +51,14 @@ def test_status_command():
 # ---------------------------------------------------------------------------
 
 def test_start_command():
-    with _patch_post({"detail": "Starting in 'simulate' mode"}):
-        result = runner.invoke(app, ["start", "--mode", "simulate"])
+    with _patch_post({"detail": "Pipeline started"}):
+        result = runner.invoke(app, ["start"])
     assert result.exit_code == 0
-    assert "simulate" in result.output
 
 
 def test_start_no_config_error():
     with _patch_post({"detail": "No config selected"}, status_code=400):
-        result = runner.invoke(app, ["start", "--mode", "simulate"])
+        result = runner.invoke(app, ["start"])
     assert result.exit_code == 1
     assert "No config selected" in result.output
 
