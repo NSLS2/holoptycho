@@ -63,7 +63,12 @@ def config_to_ini(content: dict) -> str:
 
 
 def write_config_ini(content: dict, config_dir: str) -> str:
-    """Write a config dict to an INI file and return the file path."""
+    """Write a config dict to an INI file and return the file path.
+
+    This file is required because ``ptycho.utils.parse_config`` (an upstream
+    dependency we don't control) only accepts a file path, not a dict.
+    The JSON config is serialised to INI format here so PtychoApp can read it.
+    """
     path = Path(config_dir) / "config.txt"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(config_to_ini(content))
