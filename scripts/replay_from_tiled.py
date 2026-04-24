@@ -9,10 +9,10 @@ beamline.  It can be run locally or from a remote machine via SSH tunnel.
 
 Usage
 -----
+    tiled login https://tiled.nsls2.bnl.gov
     pixi run -e replay python scripts/replay_from_tiled.py \\
         --scan-num 320045 \\
         --tiled-url https://tiled.nsls2.bnl.gov \\
-        --tiled-api-key <key> \\
         --eiger-endpoint tcp://0.0.0.0:5555 \\
         --panda-endpoint tcp://0.0.0.0:5556 \\
         --rate 200
@@ -207,10 +207,13 @@ def publish_panda(
 
 def load_scan_from_tiled(
     tiled_url: str,
-    api_key: str,
     scan_num: int | str,
+    api_key: str = "",
 ) -> tuple[np.ndarray, list, list]:
     """Load diffraction frames and motor positions for a scan from tiled.
+
+    Authentication is taken from the tiled credential cache (run ``tiled login``
+    before calling this script).  Pass ``api_key`` only if you want to override.
 
     Returns
     -------
@@ -218,7 +221,7 @@ def load_scan_from_tiled(
     positions_x : list of float
     positions_y : list of float
     """
-    client = from_uri(tiled_url, api_key=api_key)
+    client = from_uri(tiled_url, api_key=api_key or None)
 
     # Navigate to the scan — adjust the path to match your catalog structure.
     # This placeholder traversal assumes the raw scan data lives at:
@@ -270,7 +273,7 @@ def parse_args():
     parser.add_argument(
         "--tiled-api-key",
         default=os.environ.get("TILED_API_KEY", ""),
-        help="Tiled API key (or set TILED_API_KEY env var)",
+        help="Tiled API key (optional — uses cached credentials from 'tiled login' if omitted)",
     )
     parser.add_argument(
         "--eiger-endpoint",
@@ -321,9 +324,6 @@ def main():
 
     if not args.tiled_url:
         print("ERROR: --tiled-url or TILED_BASE_URL is required", file=sys.stderr)
-        sys.exit(1)
-    if not args.tiled_api_key:
-        print("ERROR: --tiled-api-key or TILED_API_KEY is required", file=sys.stderr)
         sys.exit(1)
 
     # Validate CurveZMQ keys

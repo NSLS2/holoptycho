@@ -452,10 +452,10 @@ To test end-to-end without a live beamline, use `scripts/replay_from_tiled.py`:
 
 ```bash
 pixi install -e replay
+tiled login https://tiled.nsls2.bnl.gov
 pixi run -e replay python scripts/replay_from_tiled.py \
     --scan-num 320045 \
     --tiled-url https://tiled.nsls2.bnl.gov \
-    --tiled-api-key <key> \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
     --rate 200
