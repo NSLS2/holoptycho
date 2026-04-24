@@ -148,6 +148,19 @@ hp status
 hp logs
 ```
 
+Beamline metadata (energy, scan geometry, pixel size) can be pulled directly from Tiled and piped into `hp start`:
+
+```bash
+tiled login https://tiled.nsls2.bnl.gov
+hp start "$(pixi run -e client config-from-tiled --scan-num 320045)"
+```
+
+Override reconstruction parameters as needed:
+
+```bash
+hp start "$(pixi run -e client config-from-tiled --scan-num 320045 --nx 256 --ny 256 --n-iterations 1000)"
+```
+
 ### Model selection
 
 `hp model list` shows two sections:
@@ -220,53 +233,30 @@ lambda_nm = (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
 
 ## Testing with the replay script
 
-To test holoptycho end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. This reads a real scan from Tiled and publishes it over ZMQ in the exact Eiger and PandA wire formats.
+To test holoptycho end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. It reads a real scan from Tiled and publishes it over ZMQ on the same node as holoptycho, in the exact Eiger and PandA wire formats. Both the replay script and holoptycho must run on the **same machine** — ZMQ traffic stays local.
 
-### Install the replay environment
-
-```bash
-pixi install -e replay
-```
-
-### Run the replay script
-
-First authenticate with Tiled:
+### On the compute node
 
 ```bash
+# 1. Authenticate with Tiled
 tiled login https://tiled.nsls2.bnl.gov
-```
 
-Then run the script:
+# 2. Install the replay environment (once)
+pixi install -e replay
 
-```bash
-pixi run -e replay python scripts/replay_from_tiled.py \
+# 3. Start the replay script — it binds :5555 (Eiger) and :5556 (PandA)
+pixi run -e replay replay \
     --scan-num 320045 \
     --tiled-url https://tiled.nsls2.bnl.gov \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
     --rate 200
+
+# 4. In another terminal, start holoptycho pointing at the local ZMQ ports
+hp start '{"scan_num": "320045", ...}'
 ```
 
-Then start holoptycho pointing at the same ports:
-
-```bash
-SERVER_STREAM_SOURCE=tcp://localhost:5555 \
-PANDA_STREAM_SOURCE=tcp://localhost:5556 \
-hp start
-```
-
-### Running the replay script from a remote machine
-
-If holoptycho is running on a Slurm node, open an SSH tunnel that forwards both ZMQ ports in addition to the API port:
-
-```bash
-ssh -L 8000:localhost:8000 \
-    -L 5555:localhost:5555 \
-    -L 5556:localhost:5556 \
-    <user>@<slurm-login-node>
-```
-
-Then run the replay script locally — it will bind to `tcp://0.0.0.0:5555` and `tcp://0.0.0.0:5556` and the tunnel delivers the traffic to the Slurm node. Point holoptycho at `tcp://localhost:5555` and `tcp://localhost:5556`.
+The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`. Control holoptycho from your local machine as normal via the `8000` SSH tunnel.
 
 ---
 

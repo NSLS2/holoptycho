@@ -348,37 +348,24 @@ lambda_nm = (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
 ## Typical workflow
 
 ```bash
-# 1. Start the pipeline with a config for the first scan
-hp start '{
-  "scan_num": "320045",
-  "working_directory": "/ptycho_gui_holoscan",
-  "shm_name": "ptycho_320045",
-  "nx": "128", "ny": "128",
-  "batch_width": "128", "batch_height": "128",
-  "gpu_batch_size": "256",
-  "xray_energy_kev": "15.093",
-  "lambda_nm": "0.08216037112357172",
-  "ccd_pixel_um": "75.0",
-  "distance": "30.0",
-  "dr_x": "0.02", "dr_y": "0.02",
-  "x_range": "2.0", "y_range": "2.0",
-  "x_direction": "1.0", "y_direction": "-1.0",
-  "alg_flag": "ML_grad", "n_iterations": "500",
-  "gpu_flag": "True", "gpus": "[0]",
-  "sign": "t1"
-}'
+# 1. Pull beamline metadata from Tiled and start the pipeline
+tiled login https://tiled.nsls2.bnl.gov
+hp start "$(pixi run -e client config-from-tiled --scan-num 320045)"
 
-# 2. (Optional) Switch to a different model
+# 2. (Optional) Override reconstruction parameters
+hp start "$(pixi run -e client config-from-tiled --scan-num 320045 --nx 256 --n-iterations 1000)"
+
+# 3. (Optional) Switch to a different model
 hp model set my_vit_model --version 3
 
-# 3. Watch the log
+# 4. Watch the log
 hp logs --lines 200
 
-# 4. Stop when done
+# 5. Stop when done
 hp stop
 
-# 5. For the next scan: restart with a new config
-hp restart '{"scan_num": "320046", ...}'
+# 6. For the next scan: restart with a new config
+hp restart "$(pixi run -e client config-from-tiled --scan-num 320046)"
 ```
 
 ---
@@ -448,12 +435,13 @@ CertificateCredential(
 
 ## Testing with the replay script
 
-To test end-to-end without a live beamline, use `scripts/replay_from_tiled.py`:
+To test end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. The replay script and holoptycho must run on the **same machine** — ZMQ traffic stays local. Run both on the compute node and control holoptycho from your local machine via the `8000` SSH tunnel as normal.
 
 ```bash
-pixi install -e replay
+# On the compute node — authenticate and start the replay script
 tiled login https://tiled.nsls2.bnl.gov
-pixi run -e replay python scripts/replay_from_tiled.py \
+pixi install -e replay
+pixi run -e replay replay \
     --scan-num 320045 \
     --tiled-url https://tiled.nsls2.bnl.gov \
     --eiger-endpoint tcp://0.0.0.0:5555 \
@@ -464,19 +452,10 @@ pixi run -e replay python scripts/replay_from_tiled.py \
 Then start holoptycho with:
 
 ```bash
-SERVER_STREAM_SOURCE=tcp://localhost:5555 \
-PANDA_STREAM_SOURCE=tcp://localhost:5556 \
-hp start
+hp start '{"scan_num": "320045", ...}'
 ```
 
-To run the replay script from a remote machine, extend the SSH tunnel to include the ZMQ ports:
-
-```bash
-ssh -L 8000:localhost:8000 \
-    -L 5555:localhost:5555 \
-    -L 5556:localhost:5556 \
-    <slurm-login-node>
-```
+The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`.
 
 ---
 
