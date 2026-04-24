@@ -15,7 +15,6 @@ CONFIG_DIR = os.environ.get("HOLOPTYCHO_CONFIG_DIR", "configs")
 class AppState:
     # Holoscan app lifecycle
     status: str = "stopped"  # stopped | starting | running | finished | error
-    mode: Optional[str] = None  # live | simulate
     start_time: Optional[float] = None
     error: Optional[str] = None
 
@@ -50,7 +49,6 @@ class AppState:
             )
             return {
                 "status": self.status,
-                "mode": self.mode,
                 "uptime_seconds": uptime,
                 "error": self.error,
                 "selected_config": self.selected_config,

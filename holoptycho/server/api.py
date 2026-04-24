@@ -60,7 +60,7 @@ app = FastAPI(title="holoptycho API", version="0.1.0", lifespan=lifespan)
 # ---------------------------------------------------------------------------
 
 class RunRequest(BaseModel):
-    mode: str  # "live" | "simulate"
+    pass  # reserved for future per-run options
 
 
 class ModelSwapRequest(BaseModel):
@@ -82,13 +82,13 @@ def get_status():
 
 
 @app.post("/run", status_code=202)
-def post_run(req: RunRequest):
+def post_run():
     """Start the Holoscan pipeline using the currently selected config."""
     try:
-        runner.start(mode=req.mode, state=state)
+        runner.start(state=state)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"detail": f"Starting in {req.mode!r} mode"}
+    return {"detail": "Starting pipeline"}
 
 
 @app.post("/stop", status_code=202)
@@ -102,9 +102,8 @@ def post_stop():
 
 @app.post("/restart", status_code=202)
 def post_restart():
-    """Stop the running app and restart it with the same mode."""
+    """Stop the running app and restart it."""
     with state._lock:
-        mode = state.mode
         current_status = state.status
 
     if current_status not in ("starting", "running", "finished", "error"):
@@ -112,8 +111,6 @@ def post_restart():
             status_code=400,
             detail="No previous run to restart. Use POST /run to start.",
         )
-    if mode is None:
-        raise HTTPException(status_code=400, detail="No mode recorded — cannot restart.")
 
     if current_status in ("starting", "running"):
         try:
@@ -132,11 +129,11 @@ def post_restart():
             )
 
     try:
-        runner.start(mode=mode, state=state)
+        runner.start(state=state)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    return {"detail": f"Restarting in {mode!r} mode"}
+    return {"detail": "Restarting pipeline"}
 
 
 # ---------------------------------------------------------------------------

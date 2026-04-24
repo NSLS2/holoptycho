@@ -21,6 +21,10 @@ import time
 import numpy as np
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
+from .tiled_writer import get_writer
+
+# Module-level writer shared with ptycho_holo.py operators.
+_writer = get_writer()
 
 
 class PtychoViTInferenceOp(Operator):
@@ -187,9 +191,9 @@ class SaveViTResult(Operator):
         preds = np.concatenate([np.load(f) for f in sorted(glob('vit_batch_*_pred.npy'))])
     """
 
-    def __init__(self, fragment, *args, save_dir="/data/users/Holoscan", **kwargs):
+    def __init__(self, fragment, *args, scan_num=None, **kwargs):
         super().__init__(fragment, *args, **kwargs)
-        self.save_dir = save_dir
+        self._scan_num = scan_num
         self.batch_num = 0
         self.max_index_seen = -1
 
@@ -198,16 +202,6 @@ class SaveViTResult(Operator):
             IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
         )
 
-    def _clear_old_batches(self):
-        """Remove previous scan's batch files."""
-        import glob as globmod
-        for pattern in ["vit_batch_*_pred.npy", "vit_batch_*_indices.npy"]:
-            for f in globmod.glob(os.path.join(self.save_dir, pattern)):
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-
     def compute(self, op_input, op_output, context):
         try:
             results = op_input.receive("results")
@@ -215,32 +209,21 @@ class SaveViTResult(Operator):
                 return
             pred, indices = results
 
-            os.makedirs(self.save_dir, exist_ok=True)
-
             # Detect new scan: if smallest index in this batch is less than
             # what we've seen, a new scan has started
             min_idx = int(indices.min())
             if min_idx < self.max_index_seen and self.batch_num > 0:
-                self._clear_old_batches()
                 self.batch_num = 0
                 self.max_index_seen = -1
 
             self.max_index_seen = max(self.max_index_seen, int(indices.max()))
 
-            # Save batch files
-            np.save(
-                os.path.join(self.save_dir, f"vit_batch_{self.batch_num:06d}_pred.npy"),
-                pred,
+            _writer.write_vit(
+                scan_num=self._scan_num,
+                batch_num=self.batch_num,
+                pred=pred,
+                indices=indices,
             )
-            np.save(
-                os.path.join(self.save_dir, f"vit_batch_{self.batch_num:06d}_indices.npy"),
-                indices,
-            )
-
-            # Atomic write of latest batch for quick inspection
-            tmp = os.path.join(self.save_dir, "_vit_pred_latest.tmp.npy")
-            np.save(tmp, pred)
-            os.replace(tmp, os.path.join(self.save_dir, "vit_pred_latest.npy"))
 
             self.batch_num += 1
         except Exception:

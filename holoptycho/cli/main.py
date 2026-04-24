@@ -70,13 +70,10 @@ def status(ctx: typer.Context):
 
 
 @app.command()
-def start(
-    ctx: typer.Context,
-    mode: str = typer.Option(..., "--mode", help="'live' or 'simulate'"),
-):
+def start(ctx: typer.Context):
     """Start the Holoscan pipeline using the currently selected config."""
     with _client(_base_url(ctx)) as c:
-        resp = c.post("/run", json={"mode": mode})
+        resp = c.post("/run")
     _handle_error(resp)
     typer.echo(resp.json().get("detail", "Started"))
 

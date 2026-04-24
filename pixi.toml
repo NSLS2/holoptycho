@@ -63,9 +63,20 @@ typer = ">=0.12"
 azure-ai-ml = ">=1.15"
 azure-identity = ">=1.16"
 
+# Lightweight replay environment for scripts/replay_from_tiled.py — no GPU deps
+[feature.replay.dependencies]
+python = ">=3.12"
+numpy = ">=1.20"
+pyzmq = ">=26.0"
+
+[feature.replay.pypi-dependencies]
+tiled = {version = ">=0.1", extras = ["client"]}
+dectris-compression = ">=0.3"
+
 [environments]
 default = { features = ["gpu", "mpi"], solve-group = "default" }
 client = { features = ["client"], solve-group = "client", no-default-feature = true }
+replay = { features = ["replay"], solve-group = "replay", no-default-feature = true }
 ci-py312 = { features = ["py312"], solve-group = "ci-py312" }
 ci-py313 = { features = ["py313"], solve-group = "ci-py313" }
 
@@ -84,6 +95,7 @@ httpx = ">=0.27"
 typer = ">=0.12"
 azure-ai-ml = ">=1.15"
 azure-identity = ">=1.16"
+tiled = {version = ">=0.1", extras = ["client"]}
 
 [activation]
 scripts = ["set-ld-path.sh"]

@@ -48,6 +48,7 @@ from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, Ima
 from .liverecon_utils import parse_scan_header
 from .live_simulation import InitSimul
 from .vit_inference import PtychoViTInferenceOp, SaveViTResult
+from .tiled_writer import get_writer
 
 class InitRecon(Operator):
     def __init__(self, *args, param, batchsize,min_points,scan_header_file, **kwargs):
@@ -263,15 +264,21 @@ class PtychoRecon(Operator):
         sys.stdout.flush()
         sys.stderr.flush()
         
+# Module-level writer — initialized once when the pipeline starts.
+# Uses TiledWriter if TILED_BASE_URL + TILED_API_KEY are set, otherwise
+# falls back to .npy file writes.
+_writer = get_writer()
+
 @create_op(inputs="results")
 def SaveLiveResult(results):
     try:
-        np.save('/data/users/Holoscan/prb_live.npy',results[0])
-        np.save('/data/users/Holoscan/obj_live.npy',results[1])
-        with open('/data/users/Holoscan/iteration','w') as f:
-            f.write('%d\n'%results[2])
-        scan_num = results[3] # For future use
-    except:
+        _writer.write_live(
+            scan_num=results[3],
+            iteration=results[2],
+            probe=results[0],
+            obj=results[1],
+        )
+    except Exception:
         pass
 
 @create_op(inputs="output")
@@ -281,10 +288,16 @@ def SaveResult(output):
     # StreamingPtychoRecon.save_final writes probe.npy + object.npy and
     # returns the directory it wrote to.
     save_dir = engine.save_final(save_dir=None)
-    np.save(save_dir+'/timestamp_iter',np.array(output[1]))
-    np.save(save_dir+'/num_points_recv_iter',np.array(output[2]))
+    timestamps = np.array(output[1])
+    num_points = np.array(output[2])
+    _writer.write_final(
+        scan_num=engine.scan_num,
+        probe=np.load(save_dir + '/probe.npy'),
+        obj=np.load(save_dir + '/object.npy'),
+        timestamps=timestamps,
+        num_points=num_points,
+    )
     print('Saving results done.')
-    return
     
 class PtychoSimulApp(Application):
     def __init__(self, *args, config_path=None, engine_path=None, **kwargs):
@@ -478,7 +491,7 @@ class PtychoApp(Application):
             data_is_shifted=True,
             name="vit_inference",
         )
-        self.vit_save = SaveViTResult(self, name="vit_save")
+        self.vit_save = SaveViTResult(self, scan_num=self.param.scan_num, name="vit_save")
 
         self.add_flow(self.eiger_zmq_rx,self.eiger_decompress,{("image_index_encoding","image_index_encoding")})
         self.add_flow(self.eiger_decompress,self.image_batch,{("decompressed_image","image"),("image_index","image_index")})
