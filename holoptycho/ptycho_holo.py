@@ -267,6 +267,8 @@ class PtychoRecon(Operator):
 # Module-level writer — initialized once when the pipeline starts.
 # Uses TiledWriter if TILED_BASE_URL + TILED_API_KEY are set, otherwise
 # falls back to .npy file writes.
+# NOTE: The .npy fallback is deprecated and will be removed in a future release.
+#       Set TILED_BASE_URL and TILED_API_KEY to use the Tiled backend.
 _writer = get_writer()
 
 @create_op(inputs="results")
@@ -285,17 +287,12 @@ def SaveLiveResult(results):
 def SaveResult(output):
     print('Live recon done! Saving results..')
     engine = output[0]
-    # StreamingPtychoRecon.save_final writes probe.npy + object.npy and
-    # returns the directory it wrote to.
-    save_dir = engine.save_final(save_dir=None)
-    timestamps = np.array(output[1])
-    num_points = np.array(output[2])
     _writer.write_final(
         scan_num=engine.scan_num,
-        probe=np.load(save_dir + '/probe.npy'),
-        obj=np.load(save_dir + '/object.npy'),
-        timestamps=timestamps,
-        num_points=num_points,
+        probe=np.asarray(engine.prb_mode),
+        obj=np.asarray(engine.obj_mode),
+        timestamps=np.array(output[1]),
+        num_points=np.array(output[2]),
     )
     print('Saving results done.')
     
