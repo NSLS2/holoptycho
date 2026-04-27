@@ -239,7 +239,7 @@ lambda_nm = (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
 For persistent operation independent of your SSH session, use the provided sbatch script. The job survives disconnects — only a Slurm job cancellation or walltime expiry will stop it.
 
 ```bash
-sbatch scripts/start_holoptycho.sh
+sbatch scripts/slurm_start_holoptycho.sh
 ```
 
 Once the job is running, check which node it landed on and open an SSH tunnel:
