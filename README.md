@@ -169,11 +169,12 @@ hp start "$(pixi run -e client config-from-tiled --scan-num 320045 --nx 256 --ny
 - **Local cache** — `.engine` files in `ENGINE_CACHE_DIR` (default `/models`), ready to use immediately
 - **Azure ML** — registered models, with a `cached` column showing what's already local
 
-`hp model set` selects the engine for the next `hp start` or `hp restart`. If the engine is not cached locally it is pulled from Azure ML and compiled via `trtexec` first.
+`hp model set` selects the engine for the next `hp start` or `hp restart`. If the engine is not cached locally it is pulled from Azure ML and compiled via the TensorRT Python API first.
 
 ```bash
 hp model list
-hp model set <model-name> --version <version>
+hp model set <model-name>                  # uses latest version
+hp model set <model-name> --version <ver>  # pin to a specific version
 hp model status
 ```
 
@@ -230,6 +231,27 @@ The config is a flat JSON dict passed to `hp start` or `hp restart`. All values 
 ```python
 lambda_nm = (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
 ```
+
+---
+
+## Running on Slurm (sbatch)
+
+For persistent operation independent of your SSH session, use the provided sbatch script. The job survives disconnects — only a Slurm job cancellation or walltime expiry will stop it.
+
+```bash
+sbatch scripts/start_holoptycho.sh
+```
+
+Once the job is running, check which node it landed on and open an SSH tunnel:
+
+```bash
+squeue -u $USER          # note the node name (e.g. mars5)
+ssh -L 8000:localhost:8000 -J <login-node> <compute-node>
+```
+
+The `hp` CLI will now reach the server at `http://localhost:8000` as normal.
+
+> **Note:** The script resolves Azure credentials at job start time using `az` CLI. Make sure you have run `az login` on the cluster before submitting — credentials are stored in `~/.azure/` which is available on compute nodes via the shared home directory.
 
 ---
 
