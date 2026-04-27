@@ -107,9 +107,11 @@ def _pull_onnx(model_name: str, version: str, dest_dir: Path) -> Path:
     local_path = client.models.download(
         name=model_name, version=version, download_path=str(dest_dir)
     )
-    onnx_files = list(Path(local_path).rglob("*.onnx"))
+    # Some SDK versions return None; fall back to the expected download location.
+    search_root = Path(local_path) if local_path is not None else dest_dir
+    onnx_files = list(search_root.rglob("*.onnx"))
     if not onnx_files:
-        raise FileNotFoundError(f"No .onnx file in downloaded model at {local_path}")
+        raise FileNotFoundError(f"No .onnx file in downloaded model at {search_root}")
     return onnx_files[0]
 
 
