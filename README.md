@@ -251,6 +251,28 @@ ssh -L 8000:localhost:8000 -J <login-node> <compute-node>
 
 The `hp` CLI will now reach the server at `http://localhost:8000` as normal.
 
+### Checking running jobs
+
+```bash
+squeue -u $USER          # show your running jobs and their node
+squeue -u $USER -l       # verbose — includes time limit and reason
+```
+
+### Cancelling a job
+
+```bash
+scancel <jobid>
+```
+
+### Updating to the latest container image
+
+The script uses `--pull=always`, so to pick up a new image just cancel the job and resubmit:
+
+```bash
+scancel <jobid>
+sbatch scripts/slurm_start_holoptycho.sh
+```
+
 > **Note:** The script resolves Azure credentials at job start time using `az` CLI. Make sure you have run `az login` on the cluster before submitting — credentials are stored in `~/.azure/` which is available on compute nodes via the shared home directory.
 
 ---
