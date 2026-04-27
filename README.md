@@ -32,14 +32,19 @@ Results are written to Tiled under `hxn/processed/holoptycho/{scan_num}/` (overr
 |---|---|
 | `SERVER_STREAM_SOURCE` | ZMQ endpoint of the Eiger detector, e.g. `tcp://<host>:5555` |
 | `PANDA_STREAM_SOURCE` | ZMQ endpoint of the PandA box, e.g. `tcp://<host>:5556` |
-| `SERVER_PUBLIC_KEY` | CurveZMQ server (Eiger) public key |
-| `CLIENT_PUBLIC_KEY` | CurveZMQ client public key |
-| `CLIENT_SECRET_KEY` | CurveZMQ client secret key |
 | `TILED_BASE_URL` | URL of the Tiled server |
 | `TILED_API_KEY` | Tiled API key (store in Azure Key Vault — see below) |
-| `TILED_CATALOG_PATH` | *(optional)* Tiled catalog path (default: `hxn/processed/holoptycho`) |
 
 The pipeline will refuse to start if `SERVER_STREAM_SOURCE` or `PANDA_STREAM_SOURCE` are not set. If `TILED_BASE_URL` or `TILED_API_KEY` are absent, results fall back to `.npy` files under `/data/users/Holoscan/` with a warning.
+
+## Optional environment variables
+
+| Variable | Description |
+|---|---|
+| `TILED_CATALOG_PATH` | Tiled catalog path (default: `hxn/processed/holoptycho`) |
+| `SERVER_PUBLIC_KEY` | CurveZMQ public key of the [holoscan-proxy](https://github.com/NSLS2/holoscan-proxy). Required only if the proxy is configured with `encrypt: true`. |
+| `CLIENT_PUBLIC_KEY` | CurveZMQ public key of this client. Required if `SERVER_PUBLIC_KEY` is set. |
+| `CLIENT_SECRET_KEY` | CurveZMQ secret key of this client. Required if `SERVER_PUBLIC_KEY` is set. |
 
 ---
 
@@ -74,9 +79,6 @@ docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
   -e TILED_API_KEY="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-tiled-api-key --query value -o tsv)" \
   -e SERVER_STREAM_SOURCE="tcp://<eiger-host>:5555" \
   -e PANDA_STREAM_SOURCE="tcp://<panda-host>:5556" \
-  -e SERVER_PUBLIC_KEY="<eiger-server-public-key>" \
-  -e CLIENT_PUBLIC_KEY="<client-public-key>" \
-  -e CLIENT_SECRET_KEY="<client-secret-key>" \
   genesisdemosacr.azurecr.io/holoptycho:latest
 ```
 
