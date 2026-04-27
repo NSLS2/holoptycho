@@ -40,7 +40,8 @@ nvtx = "==0.2.10"
 [feature.gpu.target.linux-64.pypi-dependencies]
 holoscan = ">=4.0"
 numba-cuda = {version = "*", extras = ["cu12"]}
-tensorrt-cu12 = ">=10.0,<11"
+tensorrt-cu12 = "==10.16.1.11"
+tensorrt-cu12-libs = { url = "https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl" }
 pycuda = "*"
 
 [feature.mpi.target.linux-64.dependencies]
