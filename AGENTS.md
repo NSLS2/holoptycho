@@ -227,6 +227,8 @@ hp model status
 
 # Select a model (downloads + compiles from Azure ML if not cached locally)
 # The new engine takes effect on the NEXT pipeline start, not the current run.
+# --version is optional; omitting it selects the latest version from Azure ML.
+hp model set <azure-model-name>
 hp model set <azure-model-name> --version <version>
 ```
 

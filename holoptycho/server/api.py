@@ -65,7 +65,7 @@ class RunRequest(BaseModel):
 
 class ModelSwapRequest(BaseModel):
     name: str
-    version: str
+    version: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +175,11 @@ def post_model(req: ModelSwapRequest):
         name="model-swap",
     )
     t.start()
-    return {"detail": f"Model swap started: {req.name} v{req.version}"}
+    version_label = req.version if req.version is not None else "latest"
+    return {"detail": f"Model swap started: {req.name} v{version_label}"}
 
 
-def _swap_model_and_persist(name: str, version: str):
+def _swap_model_and_persist(name: str, version: Optional[str]):
     """Run model swap and persist results to DB."""
     model_manager.swap_model(name, version, state)
     if state.model_status == "ready":

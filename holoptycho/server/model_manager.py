@@ -59,6 +59,29 @@ def _get_credential():
     from azure.identity import AzureCliCredential
     return AzureCliCredential()
 
+def _resolve_version(model_name: str, version: str | None) -> str:
+    """Return version as-is, or resolve 'latest' from Azure ML if None."""
+    if version is not None:
+        return version
+    from azure.ai.ml import MLClient
+
+    client = MLClient(
+        _get_credential(),
+        subscription_id=os.environ["AZURE_SUBSCRIPTION_ID"],
+        resource_group_name=os.environ["AZURE_RESOURCE_GROUP"],
+        workspace_name=os.environ["AZURE_ML_WORKSPACE"],
+    )
+    versions = sorted(
+        client.models.list(name=model_name),
+        key=lambda m: int(m.version),
+    )
+    if not versions:
+        raise ValueError(f"No versions found for model {model_name!r} in Azure ML")
+    latest = versions[-1].version
+    logger.info("Resolved latest version of %s → %s", model_name, latest)
+    return latest
+
+
 def _engine_filename(model_name: str, version: str) -> str:
     return f"{model_name}_v{version}.engine"
 
@@ -175,7 +198,7 @@ def list_models() -> dict:
     return {"local": local, "azure": azure, "azure_available": _azure_available()}
 
 
-def swap_model(model_name: str, version: str, state) -> None:
+def swap_model(model_name: str, version: str | None, state) -> None:
     """Select a model engine for the next pipeline run.
 
     If the compiled .engine is already in ENGINE_CACHE_DIR, state is updated
@@ -184,6 +207,7 @@ def swap_model(model_name: str, version: str, state) -> None:
     POST /run or POST /restart.
     """
     try:
+        version = _resolve_version(model_name, version)
         target = _engine_path(model_name, version)
 
         if target.exists():

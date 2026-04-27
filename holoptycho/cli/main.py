@@ -178,11 +178,14 @@ def model_callback(ctx: typer.Context):
 def model_set(
     ctx: typer.Context,
     name: str = typer.Argument(..., help="Model name in Azure ML"),
-    version: str = typer.Option(..., "--version", "-v", help="Model version"),
+    version: Optional[str] = typer.Option(None, "--version", "-v", help="Model version (default: latest)"),
 ):
     """Select a model (downloads and compiles if not cached)."""
+    body: dict = {"name": name}
+    if version is not None:
+        body["version"] = version
     with _client(_base_url(ctx)) as c:
-        resp = c.post("/model", json={"name": name, "version": version})
+        resp = c.post("/model", json=body)
     _handle_error(resp)
     typer.echo(resp.json().get("detail", "Model swap started"))
 
