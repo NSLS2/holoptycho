@@ -26,13 +26,11 @@ Returns a combined list of:
 
 import logging
 import os
-import subprocess
 from pathlib import Path
 
 logger = logging.getLogger("holoptycho.model_manager")
 
 ENGINE_CACHE_DIR = os.environ.get("ENGINE_CACHE_DIR", "/models")
-TRTEXEC = os.environ.get("TRTEXEC", "trtexec")
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +114,7 @@ def _pull_onnx(model_name: str, version: str, dest_dir: Path) -> Path:
 
 
 def _compile_engine(onnx_path: Path, engine_path: Path) -> None:
-    """Compile onnx_path → engine_path via trtexec (skip if up to date)."""
+    """Compile onnx_path → engine_path via TensorRT Python API (skip if up to date)."""
     if (
         engine_path.exists()
         and engine_path.stat().st_mtime >= onnx_path.stat().st_mtime
@@ -125,12 +123,10 @@ def _compile_engine(onnx_path: Path, engine_path: Path) -> None:
         return
 
     logger.info("Compiling %s → %s", onnx_path, engine_path)
-    cmd = [TRTEXEC, f"--onnx={onnx_path}", f"--saveEngine={engine_path}", "--fp16"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"trtexec failed (exit {result.returncode}):\n{result.stderr}"
-        )
+    from ptychoml.trt import build_engine_from_onnx, save_engine
+
+    engine = build_engine_from_onnx(str(onnx_path), fp16=True)
+    save_engine(engine, str(engine_path))
     logger.info("Compilation complete: %s", engine_path)
 
 
