@@ -77,7 +77,7 @@ def publish_eiger(
     client_public_key: str,
     rate_hz: float,
 ):
-    """Publish Eiger frames over an encrypted CurveZMQ PUB socket.
+    """Publish Eiger frames over a ZMQ PUB socket.
 
     Parameters
     ----------
@@ -85,18 +85,34 @@ def publish_eiger(
         Array of shape [N, H, W] — one detector frame per scan point.
     endpoint:
         ZMQ bind address, e.g. ``tcp://0.0.0.0:5555``.
-    server_public_key, server_secret_key:
-        CurveZMQ keypair for this publisher (the "server").
-    client_public_key:
-        Public key of the holoptycho subscriber (the "client").
+    server_public_key, server_secret_key, client_public_key:
+        If all three are provided, enable CurveZMQ for the Eiger publisher.
+        If all are empty, publish over plain ZMQ.
     rate_hz:
         Target frame rate in Hz.
     """
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
-    socket.curve_publickey = server_public_key.encode("ascii")
-    socket.curve_secretkey = server_secret_key.encode("ascii")
-    socket.curve_server = True
+
+    auth_values = {
+        "SERVER_PUBLIC_KEY": server_public_key,
+        "SERVER_SECRET_KEY": server_secret_key,
+        "CLIENT_PUBLIC_KEY": client_public_key,
+    }
+    configured = {name: value for name, value in auth_values.items() if value}
+
+    if configured and len(configured) != len(auth_values):
+        missing = [name for name, value in auth_values.items() if not value]
+        raise RuntimeError(
+            "Incomplete Eiger ZMQ auth configuration; set all of "
+            f"{', '.join(auth_values)} or leave them all unset. Missing: {', '.join(missing)}"
+        )
+
+    if len(configured) == len(auth_values):
+        socket.curve_publickey = server_public_key.encode("ascii")
+        socket.curve_secretkey = server_secret_key.encode("ascii")
+        socket.curve_server = True
+
     socket.bind(endpoint)
 
     # Brief pause to let subscribers connect
@@ -295,17 +311,17 @@ def parse_args():
     parser.add_argument(
         "--eiger-server-public-key",
         default=os.environ.get("SERVER_PUBLIC_KEY", ""),
-        help="CurveZMQ server public key (or set SERVER_PUBLIC_KEY env var)",
+        help="CurveZMQ server public key for encrypted Eiger PUB (optional)",
     )
     parser.add_argument(
         "--eiger-server-secret-key",
         default=os.environ.get("SERVER_SECRET_KEY", ""),
-        help="CurveZMQ server secret key (or set SERVER_SECRET_KEY env var)",
+        help="CurveZMQ server secret key for encrypted Eiger PUB (optional)",
     )
     parser.add_argument(
         "--eiger-client-public-key",
         default=os.environ.get("CLIENT_PUBLIC_KEY", ""),
-        help="CurveZMQ client public key (or set CLIENT_PUBLIC_KEY env var)",
+        help="CurveZMQ client public key for encrypted Eiger PUB (optional)",
     )
     parser.add_argument(
         "--panda-ch1",
@@ -325,21 +341,6 @@ def main():
 
     if not args.tiled_url:
         print("ERROR: --tiled-url or TILED_BASE_URL is required", file=sys.stderr)
-        sys.exit(1)
-
-    # Validate CurveZMQ keys
-    missing_keys = []
-    if not args.eiger_server_public_key:
-        missing_keys.append("--eiger-server-public-key / SERVER_PUBLIC_KEY")
-    if not args.eiger_server_secret_key:
-        missing_keys.append("--eiger-server-secret-key / SERVER_SECRET_KEY")
-    if not args.eiger_client_public_key:
-        missing_keys.append("--eiger-client-public-key / CLIENT_PUBLIC_KEY")
-    if missing_keys:
-        print(
-            "ERROR: CurveZMQ keys required for Eiger socket:\n  " + "\n  ".join(missing_keys),
-            file=sys.stderr,
-        )
         sys.exit(1)
 
     # Load data from tiled

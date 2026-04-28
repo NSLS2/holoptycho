@@ -295,9 +295,12 @@ tiled login https://tiled.nsls2.bnl.gov
 pixi install -e replay
 
 # 3. Start the replay script — it binds :5555 (Eiger) and :5556 (PandA)
+# By default it publishes plain ZMQ. To test CurveZMQ, also pass the full
+# Eiger key set: --eiger-server-public-key, --eiger-server-secret-key,
+# and --eiger-client-public-key.
 pixi run -e replay replay \
     --scan-num 320045 \
-    --tiled-url https://tiled.nsls2.bnl.gov \
+    --tiled-url https://tiled.nsls2.bnl.gov/hxn/raw \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
     --rate 200
@@ -306,7 +309,11 @@ pixi run -e replay replay \
 hp start '{"scan_num": "320045", ...}'
 ```
 
-The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`. Control holoptycho from your local machine as normal via the `8000` SSH tunnel.
+The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`. By default, leave `SERVER_PUBLIC_KEY`, `CLIENT_PUBLIC_KEY`, and `CLIENT_SECRET_KEY` unset so holoptycho subscribes without CurveZMQ. To test CurveZMQ, set all three in the container and pass the matching Eiger publisher keys to `scripts/replay_from_tiled.py`. Partial auth configuration is rejected on both sides. Control holoptycho from your local machine as normal via the `8000` SSH tunnel.
+
+For same-node testing with the replay script, `localhost` only works if the
+container is started with `--network host`. With bridge networking, `localhost`
+inside the container refers to the container itself, not the Slurm node host.
 
 ---
 

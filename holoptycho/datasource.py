@@ -116,20 +116,30 @@ class EigerZmqRxOp(Operator):
 
         self.index = 0
 
-        if True: # Encryption for the zmq socket
-            context = zmq.Context()
-            self.socket = context.socket(zmq.SUB)
-            
-            server_pub = os.environ["SERVER_PUBLIC_KEY"].encode('ascii')
-            client_pub = os.environ["CLIENT_PUBLIC_KEY"].encode('ascii')
-            client_sec = os.environ["CLIENT_SECRET_KEY"].encode('ascii')
+        context = zmq.Context()
+        self.socket = context.socket(zmq.SUB)
 
-            self.socket.setsockopt(zmq.CURVE_PUBLICKEY, client_pub)
-            self.socket.setsockopt(zmq.CURVE_SECRETKEY, client_sec)
-            self.socket.setsockopt(zmq.CURVE_SERVERKEY, server_pub)
-        else:
-            context = zmq.Context()
-            self.socket = context.socket(zmq.SUB)
+        server_pub = os.environ.get("SERVER_PUBLIC_KEY")
+        client_pub = os.environ.get("CLIENT_PUBLIC_KEY")
+        client_sec = os.environ.get("CLIENT_SECRET_KEY")
+        auth_values = {
+            "SERVER_PUBLIC_KEY": server_pub,
+            "CLIENT_PUBLIC_KEY": client_pub,
+            "CLIENT_SECRET_KEY": client_sec,
+        }
+        configured = {name: value for name, value in auth_values.items() if value}
+
+        if configured and len(configured) != len(auth_values):
+            missing = [name for name, value in auth_values.items() if not value]
+            raise RuntimeError(
+                "Incomplete ZMQ auth configuration; set all of "
+                f"{', '.join(auth_values)} or leave them all unset. Missing: {', '.join(missing)}"
+            )
+
+        if len(configured) == len(auth_values):
+            self.socket.setsockopt(zmq.CURVE_PUBLICKEY, client_pub.encode('ascii'))
+            self.socket.setsockopt(zmq.CURVE_SECRETKEY, client_sec.encode('ascii'))
+            self.socket.setsockopt(zmq.CURVE_SERVERKEY, server_pub.encode('ascii'))
 
         # Set receive timeout
         self.socket.setsockopt(zmq.RCVTIMEO, receive_timeout_ms)
@@ -324,4 +334,3 @@ class PositionRxOp(Operator):
             # data = np.array([0, 0]) # placeholder - this should be changed to something that will actually receive the data
         # op_output.emit(data, "point")
         # op_output.emit(index, "point_index")
-

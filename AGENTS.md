@@ -443,13 +443,26 @@ To test end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. 
 # On the compute node — authenticate and start the replay script
 tiled login https://tiled.nsls2.bnl.gov
 pixi install -e replay
+
+# By default the replay script publishes plain ZMQ. To test CurveZMQ, also
+# pass the full Eiger key set: --eiger-server-public-key,
+# --eiger-server-secret-key, and --eiger-client-public-key.
 pixi run -e replay replay \
     --scan-num 320045 \
-    --tiled-url https://tiled.nsls2.bnl.gov \
+    --tiled-url https://tiled.nsls2.bnl.gov/hxn/raw \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
     --rate 200
 ```
+
+`scripts/replay_from_tiled.py` treats `--tiled-url` as the exact Tiled catalog
+path containing scan entries. It does not prepend `raw` internally.
+
+By default, leave `SERVER_PUBLIC_KEY`, `CLIENT_PUBLIC_KEY`, and
+`CLIENT_SECRET_KEY` unset in the holoptycho container so it subscribes without
+CurveZMQ. To test CurveZMQ, set all three in the container and pass the
+matching Eiger publisher keys to `scripts/replay_from_tiled.py`. Partial auth
+configuration is rejected on both sides.
 
 Then start holoptycho with:
 
@@ -458,6 +471,10 @@ hp start '{"scan_num": "320045", ...}'
 ```
 
 The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`.
+
+For same-node testing with the replay script, `localhost` only works if the
+container is started with `--network host`. With bridge networking, `localhost`
+inside the container refers to the container itself, not the Slurm node host.
 
 ---
 
@@ -494,5 +511,3 @@ The following remain in the repo for reference and will be removed in a future r
 - **`PtychoSimulApp`**, **`InitSimul`**, **`live_simulation.py`** — simulate mode that replayed H5 files directly, bypassing ZMQ.
 - **`InitRecon`**, **`liverecon_utils.py`** — scan header file watcher.
 - **`eiger_simulation/`** — bespoke Eiger simulator container. Use `scripts/replay_from_tiled.py` instead.
-
-
