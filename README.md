@@ -305,39 +305,45 @@ PY
 # 2. Install the replay environment (once)
 pixi install -e replay
 
-# 3. Start the replay script — it binds :5555 (Eiger) and :5556 (PandA)
+# 3. If holoptycho has no selected engine yet, choose one before using --hp-start
+hp model set nsls0408_bs1
+hp model status
+
+# 4. Start the replay script — it binds :5555 (Eiger) and :5556 (PandA)
 # By default it publishes plain ZMQ. To test CurveZMQ, also pass the full
 # Eiger key set: --eiger-server-public-key, --eiger-server-secret-key,
 # and --eiger-client-public-key.
 pixi run -e replay replay \
-    --scan-num 320045 \
-    --tiled-url https://tiled.nsls2.bnl.gov/hxn/raw \
+    --uid 67e77251-cbe4-444c-8a8c-36491b0b9100 \
+    --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
     --rate 200
 
-# Or let the replay script build the config from the same scan and start or
-# restart holoptycho before it publishes anything.
+# Or let the replay script build the config from the same run and start or
+# restart holoptycho before it publishes anything. This requires a selected
+# model/engine, so run `hp model set ...` first if needed.
 pixi run -e replay replay \
-    --scan-num 320045 \
-    --tiled-url https://tiled.nsls2.bnl.gov/hxn/raw \
+    --uid 67e77251-cbe4-444c-8a8c-36491b0b9100 \
+    --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \
     --hp-start \
     --hp-url http://localhost:8000 \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
     --rate 200
 
-# 4. If you did not use --hp-start, start holoptycho in another terminal
+# 5. If you did not use --hp-start, start holoptycho in another terminal
 hp start '{"scan_num": "320045", ...}'
 ```
 
 The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`. By default, leave `SERVER_PUBLIC_KEY`, `CLIENT_PUBLIC_KEY`, and `CLIENT_SECRET_KEY` unset so holoptycho subscribes without CurveZMQ. To test CurveZMQ, set all three in the container and pass the matching Eiger publisher keys to `scripts/replay_from_tiled.py`. Partial auth configuration is rejected on both sides. Control holoptycho from your local machine as normal via the `8000` SSH tunnel.
 
-`--tiled-url` may be either the Tiled server root (`https://tiled.nsls2.bnl.gov`) or a catalog path (`https://tiled.nsls2.bnl.gov/hxn/raw`). The replay and config loaders resolve either form.
+`--tiled-url` may be either the Tiled server root (`https://tiled.nsls2.bnl.gov`) or a catalog path (`https://tiled.nsls2.bnl.gov/hxn/migration`). The replay and config loaders resolve either form.
 
 When `--hp-start` is used, the replay script builds the run config from the
-same scan metadata and chooses `/run` or `/restart` automatically based on the
-current holoptycho server state before publishing.
+same run metadata and chooses `/run` or `/restart` automatically based on the
+current holoptycho server state before publishing. If `hp model status` shows
+no selected engine, run `hp model set <model-name>` once first.
 
 For same-node testing with the replay script, `localhost` only works if the
 container is started with `--network host`. With bridge networking, `localhost`

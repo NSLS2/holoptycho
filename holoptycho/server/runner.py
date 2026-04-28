@@ -111,10 +111,23 @@ def start(state: AppState, config: dict | None = None) -> None:
     try:
         from holoptycho.ptycho_holo import PtychoApp
     except ImportError as exc:
-        raise RuntimeError(f"Failed to import Holoscan app: {exc}") from exc
+        message = f"Failed to import Holoscan app: {exc}"
+        state.update(status="error", error=message, start_time=None)
+        logger.exception("Holoscan app import failed")
+        raise RuntimeError(message) from exc
 
     resolved_engine = state.current_engine_path
-    app = PtychoApp(config_path=config_path, engine_path=resolved_engine)
+    try:
+        app = PtychoApp(config_path=config_path, engine_path=resolved_engine)
+    except Exception as exc:
+        message = f"Failed to initialize Holoscan app: {exc}"
+        state.update(status="error", error=message, start_time=None)
+        logger.exception(
+            "Holoscan app initialization failed (config_path=%s, engine_path=%s)",
+            config_path,
+            resolved_engine,
+        )
+        raise RuntimeError(message) from exc
 
     state.update(
         status="starting",

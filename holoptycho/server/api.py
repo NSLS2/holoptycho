@@ -49,6 +49,12 @@ logging.getLogger().setLevel(logging.INFO)
 
 logger = logging.getLogger("holoptycho.api")
 
+
+def _unexpected_startup_error(exc: Exception) -> HTTPException:
+    logger.exception("Unexpected pipeline lifecycle error")
+    detail = str(exc) or exc.__class__.__name__
+    return HTTPException(status_code=500, detail=detail)
+
 # ---------------------------------------------------------------------------
 # FastAPI app + startup
 # ---------------------------------------------------------------------------
@@ -94,6 +100,8 @@ def post_run(req: RunRequest = RunRequest()):
         runner.start(state=state, config=req.config)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise _unexpected_startup_error(exc)
     return {"detail": "Starting pipeline"}
 
 
@@ -138,6 +146,8 @@ def post_restart(req: RunRequest = RunRequest()):
         runner.start(state=state, config=req.config)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise _unexpected_startup_error(exc)
 
     return {"detail": "Restarting pipeline"}
 

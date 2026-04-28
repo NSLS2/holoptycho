@@ -33,6 +33,66 @@ from tiled.client.utils import ClientError
 TILED_URL = "https://tiled.nsls2.bnl.gov"
 CCD_PIXEL_UM = 55.0  # HXN Eiger pixel size (µm) — hard-coded, matches ptycho_gui
 
+LEGACY_PTYCHO_DEFAULTS = {
+    "mode_flag": "False",
+    "multislice_flag": "False",
+    "init_obj_dpc_flag": "False",
+    "prb_center_flag": "False",
+    "mask_prb_flag": "False",
+    "mask_obj_flag": "False",
+    "norm_prb_amp_flag": "False",
+    "mesh_flag": "True",
+    "cal_scan_pattern_flag": "False",
+    "bragg_flag": "False",
+    "pc_flag": "False",
+    "save_tmp_pic_flag": "False",
+    "position_correction_flag": "False",
+    "angle_correction_flag": "False",
+    "sf_flag": "False",
+    "ms_pie_flag": "False",
+    "weak_obj_flag": "False",
+    "preview_flag": "True",
+    "save_config_history": "True",
+    "cal_error_flag": "True",
+    "refine_data_flag": "False",
+    "profiler_flag": "False",
+    "postprocessing_flag": "True",
+    "use_NCCL": "False",
+    "use_CUDA_MPI": "False",
+    "frame_num": "0",
+    "slice_num": "2",
+    "dm_version": "2",
+    "processes": "0",
+    "pc_kernel_n": "32",
+    "position_correction_start": "50",
+    "position_correction_step": "10",
+    "start_update_probe": "0",
+    "start_update_object": "0",
+    "refine_data_start_it": "10",
+    "refine_data_interval": "5",
+    "z_m": "1.0",
+    "amp_max": "1.0",
+    "amp_min": "0.01",
+    "pha_max": "1.0",
+    "pha_min": "-1.0",
+    "slice_spacing_m": "5e-06",
+    "start_ave": "0.8",
+    "sigma2": "5e-05",
+    "bragg_theta": "0.0",
+    "bragg_gamma": "0.0",
+    "bragg_delta": "0.0",
+    "pc_sigma": "2.0",
+    "refine_data_step": "0.05",
+    "prb_filename": "",
+    "prb_dir": "",
+    "obj_filename": "",
+    "obj_dir": "",
+    "obj_path": "",
+    "mpi_file_path": "",
+    "pc_alg": "lucy",
+    "asso_scan_numbers": "[]",
+}
+
 
 def _is_not_found(exc: Exception) -> bool:
     response = getattr(exc, "response", None)
@@ -132,6 +192,12 @@ def _lambda_from_energy(energy_kev: float) -> float:
     return (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
 
 
+def _ratio_from_scale(scale_factor: float | int | None) -> float:
+    if scale_factor in (None, 0):
+        scale_factor = 1.0
+    return -float(scale_factor) / 10000.0
+
+
 def load_config_from_tiled(
     run_uid: str,
     tiled_url: str = TILED_URL,
@@ -161,6 +227,8 @@ def load_config_from_tiled(
     plan_name = start.get("plan_name", "")
     plan_args = start.get("plan_args", {})
     scan_md = start.get("scan", {})
+    x_ratio = _ratio_from_scale(start.get("x_scale_factor"))
+    y_ratio = _ratio_from_scale(start.get("z_scale_factor"))
 
     # --- Energy ---
     try:
@@ -243,6 +311,10 @@ def load_config_from_tiled(
         "x_num": str(x_num),
         "y_num": str(y_num),
         "angle": str(round(angle, 4)),
+        "x_direction": "1.0",
+        "y_direction": "-1.0",
+        "x_ratio": str(round(x_ratio, 8)),
+        "y_ratio": str(round(y_ratio, 8)),
     }
 
     return config
@@ -278,6 +350,7 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     config = load_config_from_tiled(run_uid, tiled_url=tiled_url)
     scan_num = config["scan_num"]
 
+    config.update(LEGACY_PTYCHO_DEFAULTS)
     config.update({
         "working_directory": args.working_directory,
         "shm_name": f"ptycho_{scan_num}",
@@ -291,6 +364,9 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         "det_roiy0": str(args.det_roiy0),
         "gpu_batch_size": str(args.gpu_batch_size),
         "distance": str(args.distance),
+        "nz": str(int(config["x_num"]) * int(config["y_num"])),
+        "x_arr_size": config["x_num"],
+        "y_arr_size": config["y_num"],
         "alg_flag": args.alg_flag,
         "alg2_flag": args.alg_flag,
         "alg_percentage": "0.3",
