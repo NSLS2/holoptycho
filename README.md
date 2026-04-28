@@ -56,16 +56,25 @@ A Docker image is built and pushed to Azure Container Registry on every merge to
 
 ```bash
 az login
+```
+
+### 2. Extra step on slurm.
+
+> ```bash
+> export XDG_RUNTIME_DIR=/tmp/podman-run-$(id -u)
+> mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+> ```
 
 # az acr login normally hands a token to the Docker daemon, but this cluster
 # uses rootless podman (no daemon). --expose-token prints the token instead
 # so we can pass it directly to podman login.
+```bash
 podman login genesisdemosacr.azurecr.io \
   --username 00000000-0000-0000-0000-000000000000 \
   --password "$(az acr login --name genesisdemosacr --expose-token --query accessToken -o tsv)"
 ```
 
-### 2. Run the container
+### 3. Run the container
 
 ```bash
 docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
@@ -84,13 +93,8 @@ docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
 
 The private key is never written to disk. The server binds to `0.0.0.0:8000` inside the container, exposed only on `127.0.0.1:8000` of the host.
 
-> **On Slurm nodes (rootless podman):** run this once per session before the `docker run`:
-> ```bash
-> export XDG_RUNTIME_DIR=/tmp/podman-run-$(id -u)
-> mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-> ```
 
-### 3. Connect via SSH tunnel
+### 4. Connect via SSH tunnel
 
 The API server binds to `127.0.0.1:8000` (localhost only). For remote access, open an SSH tunnel:
 
