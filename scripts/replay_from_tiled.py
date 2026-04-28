@@ -47,8 +47,12 @@ import urllib.request
 
 import numpy as np
 import zmq
-from config_from_tiled import add_reconstruction_arguments, build_full_config
-from tiled.client import from_uri
+from config_from_tiled import (
+    add_reconstruction_arguments,
+    build_full_config,
+    lookup_scan,
+    open_tiled_node,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -244,25 +248,16 @@ def load_scan_from_tiled(
     positions_x : list of float
     positions_y : list of float
     """
-    client = from_uri(tiled_url, api_key=api_key or None)
-
-    # The tiled URL is expected to point directly at the catalog containing scan
-    # entries keyed by scan number, for example:
-    #   https://tiled.nsls2.bnl.gov/hxn/raw
-    # with datasets under:
-    #   <catalog>/<scan_num>/frames       (array [N, H, W])
-    #   <catalog>/<scan_num>/positions_x  (array [N])
-    #   <catalog>/<scan_num>/positions_y  (array [N])
-    scan_key = str(scan_num)
-    try:
-        scan_node = client[scan_key]
-    except KeyError:
+    if api_key:
         print(
-            f"ERROR: scan {scan_key!r} not found in tiled catalog at {tiled_url}.\n"
-            "Pass the catalog path that directly contains the scan entries.",
+            "WARNING: --tiled-api-key is currently ignored when --tiled-url points at a catalog path; "
+            "use 'tiled login' cached credentials instead.",
             file=sys.stderr,
         )
-        sys.exit(1)
+
+    client = open_tiled_node(tiled_url)
+    scan_key = str(scan_num)
+    scan_node = lookup_scan(client, int(scan_num), tiled_url)
 
     print(f"Loading frames for scan {scan_key} from tiled...")
     frames = scan_node["frames"].read()

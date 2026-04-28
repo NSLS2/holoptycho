@@ -25,14 +25,67 @@ import argparse
 import json
 import math
 import sys
+from urllib.parse import urlsplit, urlunsplit
 
 from tiled.client import from_uri
+from tiled.client.utils import ClientError
 
 TILED_URL = "https://tiled.nsls2.bnl.gov"
 CCD_PIXEL_UM = 55.0  # HXN Eiger pixel size (µm) — hard-coded, matches ptycho_gui
 
 
-def _lookup_scan(client, scan_num: int, tiled_url: str):
+def _is_not_found(exc: Exception) -> bool:
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 404
+
+
+def _descend_tiled_path(node, path_parts: list[str], tiled_url: str):
+    for path_part in path_parts:
+        try:
+            node = node[path_part]
+        except KeyError:
+            print(
+                f"ERROR: tiled path {'/'.join(path_parts)!r} not found in catalog at {tiled_url}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    return node
+
+
+def open_tiled_node(tiled_url: str):
+    """Open a Tiled server root or a catalog path URL.
+
+    ``tiled.client.from_uri`` expects a server URL, not necessarily a catalog
+    path like ``https://tiled.nsls2.bnl.gov/hxn/raw``. Try the URL directly
+    first, then peel off trailing path segments until a server root is found and
+    descend into the catalog path manually.
+    """
+    try:
+        return from_uri(tiled_url)
+    except ClientError as exc:
+        if not _is_not_found(exc):
+            raise
+
+    parsed = urlsplit(tiled_url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if not path_parts:
+        raise
+
+    for split_index in range(len(path_parts) - 1, -1, -1):
+        base_path = "/" + "/".join(path_parts[:split_index]) if split_index else ""
+        base_url = urlunsplit((parsed.scheme, parsed.netloc, base_path, parsed.query, parsed.fragment))
+        try:
+            root = from_uri(base_url)
+        except ClientError as exc:
+            if _is_not_found(exc):
+                continue
+            raise
+        return _descend_tiled_path(root, path_parts[split_index:], tiled_url)
+
+    return from_uri(tiled_url)
+
+
+def lookup_scan(client, scan_num: int, tiled_url: str):
     scan_key = str(scan_num)
     try:
         return client[scan_key]
@@ -83,9 +136,9 @@ def load_config_from_tiled(
         Reconstruction parameters (nx, ny, alg_flag, etc.) are not included
         and must be added before passing to ``hp start``.
     """
-    client = from_uri(tiled_url)
+    client = open_tiled_node(tiled_url)
 
-    scan = _lookup_scan(client, scan_num, tiled_url)
+    scan = lookup_scan(client, scan_num, tiled_url)
 
     start = scan.start
     plan_name = start.get("plan_name", "")
