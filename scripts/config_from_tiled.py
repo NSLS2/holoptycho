@@ -32,6 +32,23 @@ TILED_URL = "https://tiled.nsls2.bnl.gov"
 CCD_PIXEL_UM = 55.0  # HXN Eiger pixel size (µm) — hard-coded, matches ptycho_gui
 
 
+def _lookup_scan(client, scan_num: int, tiled_url: str):
+    scan_key = str(scan_num)
+    try:
+        return client[scan_key]
+    except KeyError:
+        pass
+
+    try:
+        return client["hxn"]["raw"][scan_key]
+    except KeyError:
+        print(
+            f"ERROR: scan {scan_num} not found in tiled catalog at {tiled_url}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+
 def _energy_from_dcm_th(dcm_th_deg: float) -> float:
     """Convert DCM angle (degrees) to X-ray energy (keV).
 
@@ -68,14 +85,7 @@ def load_config_from_tiled(
     """
     client = from_uri(tiled_url)
 
-    try:
-        scan = client["hxn"]["raw"][str(scan_num)]
-    except KeyError:
-        print(
-            f"ERROR: scan {scan_num} not found at {tiled_url}/hxn/raw",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    scan = _lookup_scan(client, scan_num, tiled_url)
 
     start = scan.start
     plan_name = start.get("plan_name", "")
@@ -157,25 +167,8 @@ def load_config_from_tiled(
     return config
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Build a holoptycho config JSON from a Tiled HXN scan.",
-        epilog=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    parser.add_argument(
-        "--scan-num",
-        required=True,
-        type=int,
-        help="HXN scan number",
-    )
-    parser.add_argument(
-        "--tiled-url",
-        default=TILED_URL,
-        help=f"Tiled server URL (default: {TILED_URL})",
-    )
-
-    # Reconstruction parameters — optional overrides
+def add_reconstruction_arguments(parser: argparse.ArgumentParser):
+    """Add reconstruction override flags used by hp start configs."""
     recon = parser.add_argument_group(
         "reconstruction parameters",
         "These are not in the scan metadata and must be set explicitly.",
@@ -198,14 +191,14 @@ def main():
     recon.add_argument("--sign", default="t1")
     recon.add_argument("--display-interval", type=int, default=10)
 
-    args = parser.parse_args()
 
-    config = load_config_from_tiled(args.scan_num, tiled_url=args.tiled_url)
+def build_full_config(scan_num: int, tiled_url: str, args: argparse.Namespace) -> dict:
+    """Build a full hp start config from scan metadata plus CLI overrides."""
+    config = load_config_from_tiled(scan_num, tiled_url=tiled_url)
 
-    # Merge in reconstruction parameters
     config.update({
         "working_directory": args.working_directory,
-        "shm_name": f"ptycho_{args.scan_num}",
+        "shm_name": f"ptycho_{scan_num}",
         "nx": str(args.nx),
         "ny": str(args.ny),
         "batch_width": str(args.batch_width),
@@ -235,6 +228,32 @@ def main():
         "sign": args.sign,
         "display_interval": str(args.display_interval),
     })
+
+    return config
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Build a holoptycho config JSON from a Tiled HXN scan.",
+        epilog=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--scan-num",
+        required=True,
+        type=int,
+        help="HXN scan number",
+    )
+    parser.add_argument(
+        "--tiled-url",
+        default=TILED_URL,
+        help=f"Tiled server URL (default: {TILED_URL})",
+    )
+
+    add_reconstruction_arguments(parser)
+
+    args = parser.parse_args()
+    config = build_full_config(args.scan_num, tiled_url=args.tiled_url, args=args)
 
     print(json.dumps(config, indent=2))
 

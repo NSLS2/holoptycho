@@ -17,6 +17,10 @@ Usage
         --panda-endpoint tcp://0.0.0.0:5556 \\
         --rate 200
 
+    To have the replay script configure and start holoptycho before publishing,
+    add --hp-start. It will build the run config from the same scan metadata
+    and POST it to the holoptycho API before replay begins.
+
 SSH tunnel (run on your local machine to expose the ZMQ ports):
     ssh -L 5555:localhost:5555 -L 5556:localhost:5556 <slurm-login-node>
 
@@ -38,9 +42,12 @@ import os
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 
 import numpy as np
 import zmq
+from config_from_tiled import add_reconstruction_arguments, build_full_config
 from tiled.client import from_uri
 
 
@@ -266,6 +273,41 @@ def load_scan_from_tiled(
     return frames, positions_x, positions_y
 
 
+def _json_request(url: str, method: str = "GET", payload: dict | None = None) -> dict:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8")) if resp.readable() else {}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            detail = json.loads(body).get("detail", body)
+        except json.JSONDecodeError:
+            detail = body
+        raise RuntimeError(f"holoptycho API error {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"failed to reach holoptycho API at {url}: {exc.reason}") from exc
+
+
+def start_holoptycho_pipeline(args) -> None:
+    """Start or restart the holoptycho pipeline with config from the same scan."""
+    hp_url = args.hp_url.rstrip("/")
+    config_tiled_url = args.hp_config_tiled_url or args.tiled_url
+    config = build_full_config(int(args.scan_num), tiled_url=config_tiled_url, args=args)
+    status = _json_request(f"{hp_url}/status")
+    endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
+    result = _json_request(f"{hp_url}{endpoint}", method="POST", payload={"config": config})
+    print(f"[holoptycho] {result.get('detail', 'pipeline request submitted')}")
+    if args.hp_startup_wait > 0:
+        time.sleep(args.hp_startup_wait)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -292,6 +334,28 @@ def parse_args():
         default=os.environ.get("TILED_API_KEY", ""),
         help="Tiled API key (optional — uses cached credentials from 'tiled login' if omitted)",
     )
+    parser.add_argument(
+        "--hp-start",
+        action="store_true",
+        help="Start or restart holoptycho via its API using config from the same scan before replaying",
+    )
+    parser.add_argument(
+        "--hp-url",
+        default=os.environ.get("HOLOPTYCHO_URL", "http://localhost:8000"),
+        help="holoptycho API base URL for --hp-start (default: http://localhost:8000)",
+    )
+    parser.add_argument(
+        "--hp-config-tiled-url",
+        default=os.environ.get("HP_CONFIG_TILED_URL", os.environ.get("TILED_CONFIG_BASE_URL", "")),
+        help="Tiled URL used to build the hp config for --hp-start; defaults to --tiled-url",
+    )
+    parser.add_argument(
+        "--hp-startup-wait",
+        type=float,
+        default=2.0,
+        help="Seconds to wait after --hp-start before publishing ZMQ (default: 2.0)",
+    )
+    add_reconstruction_arguments(parser)
     parser.add_argument(
         "--eiger-endpoint",
         default="tcp://0.0.0.0:5555",
@@ -342,6 +406,9 @@ def main():
     if not args.tiled_url:
         print("ERROR: --tiled-url or TILED_BASE_URL is required", file=sys.stderr)
         sys.exit(1)
+
+    if args.hp_start:
+        start_holoptycho_pipeline(args)
 
     # Load data from tiled
     frames, positions_x, positions_y = load_scan_from_tiled(
