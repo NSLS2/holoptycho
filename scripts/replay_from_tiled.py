@@ -12,7 +12,7 @@ Usage
     tiled login https://tiled.nsls2.bnl.gov
     pixi run -e replay python scripts/replay_from_tiled.py \\
         --scan-num 320045 \\
-        --tiled-url https://tiled.nsls2.bnl.gov \\
+        --tiled-url https://tiled.nsls2.bnl.gov/hxn/raw \\
         --eiger-endpoint tcp://0.0.0.0:5555 \\
         --panda-endpoint tcp://0.0.0.0:5556 \\
         --rate 200
@@ -223,19 +223,20 @@ def load_scan_from_tiled(
     """
     client = from_uri(tiled_url, api_key=api_key or None)
 
-    # Navigate to the scan — adjust the path to match your catalog structure.
-    # This placeholder traversal assumes the raw scan data lives at:
-    #   <root>/raw/<scan_num>/frames  (array [N, H, W])
-    #   <root>/raw/<scan_num>/positions_x  (array [N])
-    #   <root>/raw/<scan_num>/positions_y  (array [N])
-    # Update these paths to match your actual tiled catalog layout.
+    # The tiled URL is expected to point directly at the catalog containing scan
+    # entries keyed by scan number, for example:
+    #   https://tiled.nsls2.bnl.gov/hxn/raw
+    # with datasets under:
+    #   <catalog>/<scan_num>/frames       (array [N, H, W])
+    #   <catalog>/<scan_num>/positions_x  (array [N])
+    #   <catalog>/<scan_num>/positions_y  (array [N])
     scan_key = str(scan_num)
     try:
-        scan_node = client["raw"][scan_key]
+        scan_node = client[scan_key]
     except KeyError:
         print(
             f"ERROR: scan {scan_key!r} not found in tiled catalog at {tiled_url}.\n"
-            "Update the path in load_scan_from_tiled() to match your catalog structure.",
+            "Pass the catalog path that directly contains the scan entries.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -268,7 +269,7 @@ def parse_args():
     parser.add_argument(
         "--tiled-url",
         default=os.environ.get("TILED_BASE_URL", ""),
-        help="Tiled server URL (or set TILED_BASE_URL env var)",
+        help="Tiled catalog URL containing scan entries, e.g. https://tiled.nsls2.bnl.gov/hxn/raw",
     )
     parser.add_argument(
         "--tiled-api-key",
