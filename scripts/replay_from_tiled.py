@@ -1,6 +1,6 @@
-"""Replay a ptychography scan from tiled over ZMQ.
+"""Replay a ptychography run from tiled over ZMQ.
 
-Reads diffraction frames and motor positions for a given scan from a Tiled
+Reads diffraction frames and motor positions for a given run UID from a Tiled
 catalog, then publishes them over two ZMQ sockets mimicking the exact wire
 formats of the Eiger detector and PandA box.
 
@@ -11,14 +11,14 @@ Usage
 -----
     tiled login https://tiled.nsls2.bnl.gov
     pixi run -e replay python scripts/replay_from_tiled.py \\
-        --scan-num 320045 \\
-        --tiled-url https://tiled.nsls2.bnl.gov/hxn/raw \\
+        --uid 67e77251-cbe4-444c-8a8c-36491b0b9100 \\
+        --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \\
         --eiger-endpoint tcp://0.0.0.0:5555 \\
         --panda-endpoint tcp://0.0.0.0:5556 \\
         --rate 200
 
     To have the replay script configure and start holoptycho before publishing,
-    add --hp-start. It will build the run config from the same scan metadata
+    add --hp-start. It will build the run config from the same run metadata
     and POST it to the holoptycho API before replay begins.
 
 SSH tunnel (run on your local machine to expose the ZMQ ports):
@@ -31,7 +31,7 @@ Then point holoptycho at:
 Environment variables (alternative to CLI flags):
     TILED_BASE_URL   — Tiled server URL
     TILED_API_KEY    — Tiled API key
-    TILED_SCAN_NUM   — scan number to replay
+    TILED_RUN_UID    — run UID to replay
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ import zmq
 from config_from_tiled import (
     add_reconstruction_arguments,
     build_full_config,
-    lookup_scan,
+    lookup_run,
     open_tiled_node,
 )
 
@@ -234,10 +234,10 @@ def publish_panda(
 
 def load_scan_from_tiled(
     tiled_url: str,
-    scan_num: int | str,
+    run_uid: str,
     api_key: str = "",
 ) -> tuple[np.ndarray, list, list]:
-    """Load diffraction frames and motor positions for a scan from tiled.
+    """Load diffraction frames and motor positions for a run from tiled.
 
     Authentication is taken from the tiled credential cache (run ``tiled login``
     before calling this script).  Pass ``api_key`` only if you want to override.
@@ -256,13 +256,15 @@ def load_scan_from_tiled(
         )
 
     client = open_tiled_node(tiled_url)
-    scan_key = str(scan_num)
-    scan_node = lookup_scan(client, int(scan_num), tiled_url)
+    run = lookup_run(client, run_uid, tiled_url)
+    scan_num = run.metadata.get("start", {}).get("scan_id", run_uid)
 
-    print(f"Loading frames for scan {scan_key} from tiled...")
-    frames = scan_node["frames"].read()
-    positions_x = scan_node["positions_x"].read().tolist()
-    positions_y = scan_node["positions_y"].read().tolist()
+    print(f"Loading frames for scan {scan_num} ({run_uid}) from tiled...")
+    frames = run["primary"]["eiger2_image"].read()
+    if frames.ndim == 4 and frames.shape[0] == 1:
+        frames = frames[0]
+    positions_x = run["primary"]["inenc2_val"].read().tolist()
+    positions_y = run["primary"]["inenc3_val"].read().tolist()
 
     print(f"Loaded {len(frames)} frames, shape={frames.shape}, dtype={frames.dtype}")
     return frames, positions_x, positions_y
@@ -291,10 +293,10 @@ def _json_request(url: str, method: str = "GET", payload: dict | None = None) ->
 
 
 def start_holoptycho_pipeline(args) -> None:
-    """Start or restart the holoptycho pipeline with config from the same scan."""
+    """Start or restart the holoptycho pipeline with config from the same run."""
     hp_url = args.hp_url.rstrip("/")
     config_tiled_url = args.hp_config_tiled_url or args.tiled_url
-    config = build_full_config(int(args.scan_num), tiled_url=config_tiled_url, args=args)
+    config = build_full_config(args.uid, tiled_url=config_tiled_url, args=args)
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
     result = _json_request(f"{hp_url}{endpoint}", method="POST", payload={"config": config})
@@ -314,15 +316,15 @@ def parse_args():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--scan-num",
-        default=os.environ.get("TILED_SCAN_NUM"),
-        required=not os.environ.get("TILED_SCAN_NUM"),
-        help="Scan number to replay (or set TILED_SCAN_NUM env var)",
+        "--uid",
+        default=os.environ.get("TILED_RUN_UID"),
+        required=not os.environ.get("TILED_RUN_UID"),
+        help="Run UID to replay (or set TILED_RUN_UID env var)",
     )
     parser.add_argument(
         "--tiled-url",
         default=os.environ.get("TILED_BASE_URL", ""),
-        help="Tiled catalog URL containing scan entries, e.g. https://tiled.nsls2.bnl.gov/hxn/raw",
+        help="Tiled catalog URL containing run entries, e.g. https://tiled.nsls2.bnl.gov/hxn/migration",
     )
     parser.add_argument(
         "--tiled-api-key",
@@ -332,7 +334,7 @@ def parse_args():
     parser.add_argument(
         "--hp-start",
         action="store_true",
-        help="Start or restart holoptycho via its API using config from the same scan before replaying",
+        help="Start or restart holoptycho via its API using config from the same run before replaying",
     )
     parser.add_argument(
         "--hp-url",
@@ -409,7 +411,7 @@ def main():
     frames, positions_x, positions_y = load_scan_from_tiled(
         tiled_url=args.tiled_url,
         api_key=args.tiled_api_key,
-        scan_num=args.scan_num,
+        run_uid=args.uid,
     )
 
     # Run Eiger and PandA publishers concurrently

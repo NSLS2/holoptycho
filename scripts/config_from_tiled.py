@@ -1,6 +1,6 @@
-"""Build a holoptycho config JSON from a Tiled scan start document.
+"""Build a holoptycho config JSON from a Tiled run document.
 
-Reads the Bluesky start document for a given HXN scan from Tiled and maps
+Reads the Bluesky start document for a given HXN run UID from Tiled and maps
 the beamline metadata to holoptycho config parameters. Reconstruction
 parameters (nx, ny, alg_flag, etc.) must be supplied via CLI flags or
 edited in the output JSON before passing to hp start.
@@ -10,14 +10,14 @@ Usage
     # Authenticate once
     tiled login https://tiled.nsls2.bnl.gov
 
-    # Print config JSON for scan 320045
-    python scripts/config_from_tiled.py --scan-num 320045
+    # Print config JSON for a specific run UID
+    python scripts/config_from_tiled.py --uid 67e77251-cbe4-444c-8a8c-36491b0b9100
 
     # Pipe directly into hp start
-    hp start "$(python scripts/config_from_tiled.py --scan-num 320045)"
+    hp start "$(python scripts/config_from_tiled.py --uid 67e77251-cbe4-444c-8a8c-36491b0b9100)"
 
     # Override reconstruction parameters
-    python scripts/config_from_tiled.py --scan-num 320045 \\
+    python scripts/config_from_tiled.py --uid 67e77251-cbe4-444c-8a8c-36491b0b9100 \\
         --nx 256 --ny 256 --n-iterations 1000 --alg-flag DM
 """
 
@@ -85,21 +85,37 @@ def open_tiled_node(tiled_url: str):
     return from_uri(tiled_url)
 
 
-def lookup_scan(client, scan_num: int, tiled_url: str):
-    scan_key = str(scan_num)
-    try:
-        return client[scan_key]
-    except KeyError:
-        pass
+def lookup_run(client, run_uid: str, tiled_url: str):
+    candidates = [client]
 
-    try:
-        return client["hxn"]["raw"][scan_key]
-    except KeyError:
-        print(
-            f"ERROR: scan {scan_num} not found in tiled catalog at {tiled_url}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+    for path_parts in (("hxn", "migration"), ("hxn", "raw")):
+        node = client
+        try:
+            for path_part in path_parts:
+                node = node[path_part]
+        except KeyError:
+            continue
+        candidates.append(node)
+
+    for candidate in candidates:
+        try:
+            return candidate[run_uid]
+        except KeyError:
+            continue
+
+    print(
+        f"ERROR: run UID {run_uid!r} not found in tiled catalog at {tiled_url}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _run_start(run) -> dict:
+    metadata = getattr(run, "metadata", {})
+    start = metadata.get("start")
+    if start is not None:
+        return start
+    return getattr(run, "start", {})
 
 
 def _energy_from_dcm_th(dcm_th_deg: float) -> float:
@@ -117,15 +133,15 @@ def _lambda_from_energy(energy_kev: float) -> float:
 
 
 def load_config_from_tiled(
-    scan_num: int,
+    run_uid: str,
     tiled_url: str = TILED_URL,
 ) -> dict:
-    """Load scan metadata from Tiled and return a partial holoptycho config dict.
+    """Load run metadata from Tiled and return a partial holoptycho config dict.
 
     Parameters
     ----------
-    scan_num:
-        HXN scan number.
+    run_uid:
+        Bluesky run UID.
     tiled_url:
         Tiled server URL. Uses cached credentials from ``tiled login``.
 
@@ -138,16 +154,18 @@ def load_config_from_tiled(
     """
     client = open_tiled_node(tiled_url)
 
-    scan = lookup_scan(client, scan_num, tiled_url)
+    run = lookup_run(client, run_uid, tiled_url)
 
-    start = scan.start
+    start = _run_start(run)
+    scan_num = start.get("scan_id", run_uid)
     plan_name = start.get("plan_name", "")
     plan_args = start.get("plan_args", {})
+    scan_md = start.get("scan", {})
 
     # --- Energy ---
     try:
-        baseline = scan["baseline"].read()
-        dcm_th = float(baseline["dcm_th"].iloc[0])
+        baseline = run["baseline"]
+        dcm_th = float(baseline["dcm_th"].read()[0])
         energy_kev = _energy_from_dcm_th(dcm_th)
     except Exception as exc:
         print(f"WARNING: could not read DCM angle from baseline: {exc}", file=sys.stderr)
@@ -155,7 +173,17 @@ def load_config_from_tiled(
 
     # --- Scan geometry ---
     try:
-        if plan_name == "FlyPlan2D":
+        if scan_md.get("type") == "2D_FLY_PANDA" and len(scan_md.get("scan_input", [])) >= 6:
+            scan_input = scan_md["scan_input"]
+            x_range = scan_input[1] - scan_input[0]
+            y_range = scan_input[4] - scan_input[3]
+            x_num = int(scan_input[2])
+            y_num = int(scan_input[5])
+            dr_x = x_range / x_num
+            dr_y = y_range / y_num
+            x_range -= dr_x
+            y_range -= dr_y
+        elif plan_name == "FlyPlan2D":
             x_range = plan_args["scan_end1"] - plan_args["scan_start1"]
             y_range = plan_args["scan_end2"] - plan_args["scan_start2"]
             x_num = int(plan_args["num1"])
@@ -191,11 +219,11 @@ def load_config_from_tiled(
     try:
         scan_motors = start.get("motors", [])
         if len(scan_motors) > 1 and scan_motors[1] == "zpssy":
-            angle = float(baseline["zpsth"].iloc[0])
+            angle = float(baseline["zpsth"].read()[0])
         elif len(scan_motors) > 1 and scan_motors[1] == "ssy":
             angle = 0.0
         else:
-            angle = float(baseline["dsth"].iloc[0])
+            angle = float(baseline["dsth"].read()[0])
     except Exception as exc:
         print(f"WARNING: could not read stage angle from baseline: {exc}", file=sys.stderr)
         angle = 0.0
@@ -245,9 +273,10 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument("--display-interval", type=int, default=10)
 
 
-def build_full_config(scan_num: int, tiled_url: str, args: argparse.Namespace) -> dict:
+def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) -> dict:
     """Build a full hp start config from scan metadata plus CLI overrides."""
-    config = load_config_from_tiled(scan_num, tiled_url=tiled_url)
+    config = load_config_from_tiled(run_uid, tiled_url=tiled_url)
+    scan_num = config["scan_num"]
 
     config.update({
         "working_directory": args.working_directory,
@@ -292,10 +321,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--scan-num",
+        "--uid",
         required=True,
-        type=int,
-        help="HXN scan number",
+        help="Bluesky run UID",
     )
     parser.add_argument(
         "--tiled-url",
@@ -306,7 +334,7 @@ def main():
     add_reconstruction_arguments(parser)
 
     args = parser.parse_args()
-    config = build_full_config(args.scan_num, tiled_url=args.tiled_url, args=args)
+    config = build_full_config(args.uid, tiled_url=args.tiled_url, args=args)
 
     print(json.dumps(config, indent=2))
 

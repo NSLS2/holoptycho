@@ -444,6 +444,17 @@ To test end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. 
 tiled login https://tiled.nsls2.bnl.gov
 pixi install -e replay
 
+# If you need the run UID from a scan ID first:
+pixi run -e replay python - <<'PY'
+from tiled.client import from_uri
+from tiled.queries import Eq
+
+catalog = from_uri("https://tiled.nsls2.bnl.gov")["hxn"]["raw"]
+results = catalog.search(Eq("scan_id", 320045))
+uid = next(iter(results))
+print(uid)
+PY
+
 # By default the replay script publishes plain ZMQ. To test CurveZMQ, also
 # pass the full Eiger key set: --eiger-server-public-key,
 # --eiger-server-secret-key, and --eiger-client-public-key.
@@ -453,16 +464,37 @@ pixi run -e replay replay \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
     --rate 200
+
+# Or let the replay script build the config from the same scan and start or
+# restart holoptycho before it begins publishing.
+pixi run -e replay replay \
+    --scan-num 320045 \
+    --tiled-url https://tiled.nsls2.bnl.gov/hxn/raw \
+    --hp-start \
+    --hp-url http://localhost:8000 \
+    --eiger-endpoint tcp://0.0.0.0:5555 \
+    --panda-endpoint tcp://0.0.0.0:5556 \
+    --rate 200
 ```
 
-`scripts/replay_from_tiled.py` treats `--tiled-url` as the exact Tiled catalog
-path containing scan entries. It does not prepend `raw` internally.
+`--tiled-url` may be either the Tiled server root
+(`https://tiled.nsls2.bnl.gov`) or an exact catalog path such as
+`https://tiled.nsls2.bnl.gov/hxn/raw`. The replay/config loaders resolve both
+forms and still fall back to `hxn/raw` when given the server root.
+
+If `--tiled-api-key` is provided together with a catalog-path URL, the current
+implementation still relies on cached `tiled login` credentials for that path
+resolution logic.
 
 By default, leave `SERVER_PUBLIC_KEY`, `CLIENT_PUBLIC_KEY`, and
 `CLIENT_SECRET_KEY` unset in the holoptycho container so it subscribes without
 CurveZMQ. To test CurveZMQ, set all three in the container and pass the
 matching Eiger publisher keys to `scripts/replay_from_tiled.py`. Partial auth
 configuration is rejected on both sides.
+
+When `--hp-start` is used, the replay script builds the run config from the
+same scan metadata and chooses `/run` or `/restart` automatically based on the
+current holoptycho server state before publishing.
 
 Then start holoptycho with:
 

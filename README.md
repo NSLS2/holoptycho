@@ -291,6 +291,17 @@ To test holoptycho end-to-end without a live beamline, use `scripts/replay_from_
 # 1. Authenticate with Tiled
 tiled login https://tiled.nsls2.bnl.gov
 
+# If you need the run UID for a scan ID first:
+pixi run -e replay python - <<'PY'
+from tiled.client import from_uri
+from tiled.queries import Eq
+
+catalog = from_uri("https://tiled.nsls2.bnl.gov")["hxn"]["raw"]
+results = catalog.search(Eq("scan_id", 320045))
+uid = next(iter(results))
+print(uid)
+PY
+
 # 2. Install the replay environment (once)
 pixi install -e replay
 
@@ -305,11 +316,28 @@ pixi run -e replay replay \
     --panda-endpoint tcp://0.0.0.0:5556 \
     --rate 200
 
-# 4. In another terminal, start holoptycho pointing at the local ZMQ ports
+# Or let the replay script build the config from the same scan and start or
+# restart holoptycho before it publishes anything.
+pixi run -e replay replay \
+    --scan-num 320045 \
+    --tiled-url https://tiled.nsls2.bnl.gov/hxn/raw \
+    --hp-start \
+    --hp-url http://localhost:8000 \
+    --eiger-endpoint tcp://0.0.0.0:5555 \
+    --panda-endpoint tcp://0.0.0.0:5556 \
+    --rate 200
+
+# 4. If you did not use --hp-start, start holoptycho in another terminal
 hp start '{"scan_num": "320045", ...}'
 ```
 
 The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`. By default, leave `SERVER_PUBLIC_KEY`, `CLIENT_PUBLIC_KEY`, and `CLIENT_SECRET_KEY` unset so holoptycho subscribes without CurveZMQ. To test CurveZMQ, set all three in the container and pass the matching Eiger publisher keys to `scripts/replay_from_tiled.py`. Partial auth configuration is rejected on both sides. Control holoptycho from your local machine as normal via the `8000` SSH tunnel.
+
+`--tiled-url` may be either the Tiled server root (`https://tiled.nsls2.bnl.gov`) or a catalog path (`https://tiled.nsls2.bnl.gov/hxn/raw`). The replay and config loaders resolve either form.
+
+When `--hp-start` is used, the replay script builds the run config from the
+same scan metadata and chooses `/run` or `/restart` automatically based on the
+current holoptycho server state before publishing.
 
 For same-node testing with the replay script, `localhost` only works if the
 container is started with `--network host`. With bridge networking, `localhost`
