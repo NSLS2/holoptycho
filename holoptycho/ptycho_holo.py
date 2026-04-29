@@ -381,11 +381,14 @@ class PtychoSimulApp(Application):
         self.config_ops(self.param)
 
         # --- PtychoViT inference (parallel to iterative recon) ---
+        # Prefer a second GPU for PyCUDA/TRT when available, but fall back to
+        # the recon GPU on single-GPU nodes instead of hard-failing.
+        vit_gpu = self.param.gpus[1] if len(self.param.gpus) > 1 else self.param.gpus[0]
         # Simulate diffamp path: data is unshifted (DC at corners) — no undo needed
         self.vit = PtychoViTInferenceOp(
             self,
             engine_path=self.engine_path,
-            gpu=1,
+            gpu=vit_gpu,
             data_is_shifted=False,
             name="vit_inference",
         )
@@ -545,11 +548,14 @@ class PtychoApp(Application):
         self.pty.probe_initialized = False
 
         # --- PtychoViT inference (parallel to iterative recon) ---
+        # Prefer a second GPU for PyCUDA/TRT when available, but fall back to
+        # the recon GPU on single-GPU nodes instead of hard-failing.
+        vit_gpu = self.param.gpus[1] if len(self.param.gpus) > 1 else self.param.gpus[0]
         # Live mode: ImagePreprocessorOp applies fftshift — undo it for model
         self.vit = PtychoViTInferenceOp(
             self,
             engine_path=self.engine_path,
-            gpu=1,
+            gpu=vit_gpu,
             data_is_shifted=True,
             name="vit_inference",
         )

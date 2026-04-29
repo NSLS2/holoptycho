@@ -502,6 +502,11 @@ same run metadata and chooses `/run` or `/restart` automatically based on the
 current holoptycho server state before publishing. If `hp model status` shows
 no selected engine, run `hp model set <model-name>` once first.
 
+On single-GPU nodes, older builds may log repeated `pycuda._driver.LogicError:
+cuDeviceGet failed: invalid device ordinal` from `PtychoViTInferenceOp` during
+replay because the ViT branch was hard-coded to `gpu=1`. Fixed builds fall back
+to GPU 0 when only one configured GPU is available.
+
 If replay publishes successfully but `hp status` reports an error like
 `New scan dimensions (...x...) exceed pre-allocated maximum (...x...)`, the
 failure is in `holoptycho.streaming_recon.StreamingPtychoRecon.gpu_setup()`.
