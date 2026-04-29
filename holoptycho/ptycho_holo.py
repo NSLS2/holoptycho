@@ -1,4 +1,5 @@
 import logging
+import ast
 from time import sleep
 import time
 
@@ -27,7 +28,26 @@ from ptycho.utils import parse_config as _ptycho_parse_config
 from .streaming_recon import StreamingPtychoRecon
 
 
-def parse_config(config_path):
+def _coerce_config_value(value):
+    if not isinstance(value, str):
+        return value
+    if value == "":
+        return value
+    try:
+        return ast.literal_eval(value)
+    except (SyntaxError, ValueError):
+        return value
+
+
+def _apply_config_overrides(param, config_overrides):
+    if not config_overrides:
+        return param
+    for key, value in config_overrides.items():
+        setattr(param, key, _coerce_config_value(value))
+    return param
+
+
+def parse_config(config_path, config_overrides=None):
     """Parse a ptycho config file into a SimpleNamespace.
 
     Wraps ``ptycho.utils.parse_config`` (which requires a mutable ``param``
@@ -36,7 +56,8 @@ def parse_config(config_path):
     a single positional argument.
     """
     param = SimpleNamespace(gui=False)
-    return _ptycho_parse_config(config_path, param)
+    param = _ptycho_parse_config(config_path, param)
+    return _apply_config_overrides(param, config_overrides)
 
 from holoscan.core import Application, Operator, OperatorSpec, ConditionType, IOSpec
 from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
@@ -290,11 +311,11 @@ def SaveResult(output):
     print('Saving results done.')
     
 class PtychoSimulApp(Application):
-    def __init__(self, *args, config_path=None, engine_path=None, **kwargs):
+    def __init__(self, *args, config_path=None, config_overrides=None, engine_path=None, **kwargs):
         super().__init__(*args,**kwargs)
 
         self.config_path = config_path
-        self.param = parse_config(self.config_path)
+        self.param = parse_config(self.config_path, config_overrides=config_overrides)
         self.gpu = self.param.gpus[0]
         self.engine_path = engine_path or "/models/ptycho_vit_amp_phase_b64.engine"
 
@@ -390,11 +411,11 @@ class PtychoSimulApp(Application):
 
 
 class PtychoApp(Application):
-    def __init__(self, *args, config_path=None, engine_path=None, **kwargs):
+    def __init__(self, *args, config_path=None, config_overrides=None, engine_path=None, **kwargs):
         super().__init__(*args,**kwargs)
 
         self.config_path = config_path
-        self.param = parse_config(self.config_path)
+        self.param = parse_config(self.config_path, config_overrides=config_overrides)
         self.gpu = self.param.gpus[0]
         self.engine_path = engine_path or "/models/ptycho_vit_amp_phase_b64.engine"
 

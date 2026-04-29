@@ -118,7 +118,11 @@ def start(state: AppState, config: dict | None = None) -> None:
 
     resolved_engine = state.current_engine_path
     try:
-        app = PtychoApp(config_path=config_path, engine_path=resolved_engine)
+        app = PtychoApp(
+            config_path=config_path,
+            config_overrides=config,
+            engine_path=resolved_engine,
+        )
     except Exception as exc:
         message = f"Failed to initialize Holoscan app: {exc}"
         state.update(status="error", error=message, start_time=None)

@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import struct
 import sys
 import threading
 import time
@@ -61,7 +62,26 @@ from config_from_tiled import (
 
 def _compress_bslz4(array: np.ndarray) -> bytes:
     """Compress a 2-D detector frame with bslz4 (bit-shuffle + LZ4)."""
-    from dectris.compression import compress
+    try:
+        from dectris.compression import compress
+    except ImportError:
+        import bitshuffle
+
+        flat = np.ascontiguousarray(array).ravel()
+        block_elems = (flat.size // 8) * 8
+        if block_elems <= 0:
+            raise RuntimeError(
+                "Frame is too small for bslz4 fallback compression; "
+                "need at least 8 elements."
+            )
+        payload = bytes(bitshuffle.compress_lz4(flat, block_size=block_elems))
+        header = struct.pack(
+            ">QI",
+            flat.nbytes,
+            block_elems * flat.dtype.itemsize,
+        )
+        return header + payload
+
     return compress(array.tobytes(), "bslz4", elem_size=array.dtype.itemsize)
 
 

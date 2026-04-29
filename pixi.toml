@@ -87,6 +87,7 @@ pyzmq = ">=26.0"
 [feature.replay.pypi-dependencies]
 tiled = {version = ">=0.1", extras = ["client"]}
 dectris-compression = ">=0.3"
+bitshuffle = "*"
 
 [environments]
 default = { features = ["gpu", "mpi"], solve-group = "default" }
