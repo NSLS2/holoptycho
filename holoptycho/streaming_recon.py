@@ -118,6 +118,28 @@ class StreamingPtychoRecon:
 
         # --- GPU buffers (allocated in gpu_setup) ---
         self.prb_d = None
+
+    def _required_object_shape(self, x_range_um: float, y_range_um: float) -> tuple[int, int]:
+        """Compute the object array shape required for a scan region.
+
+        This uses the same geometry-driven sizing for both preallocation in
+        ``gpu_setup()`` and per-scan validation in ``reset_for_scan()`` so the
+        two paths cannot drift apart.
+        """
+        if self.x_pixel_m <= 0 or self.y_pixel_m <= 0:
+            raise RuntimeError(
+                "Object shape cannot be computed before pixel sizes are initialized."
+            )
+
+        nx_obj = int(
+            self.nx_prb + np.ceil(abs(x_range_um) * 1e-6 / self.x_pixel_m) + self.obj_pad
+        )
+        ny_obj = int(
+            self.ny_prb + np.ceil(abs(y_range_um) * 1e-6 / self.y_pixel_m) + self.obj_pad
+        )
+        nx_obj += nx_obj % 2
+        ny_obj += ny_obj % 2
+        return nx_obj, ny_obj
         self.obj_d = None
         self.diff_d = None
         self.point_info_d = None
@@ -281,12 +303,13 @@ class StreamingPtychoRecon:
         )
 
         # --- Probe + object GPU buffers ---
-        # nx_obj/ny_obj are not yet known; we allocate them generously for
-        # the maximum expected scan range and reshape on reset_for_scan().
-        # For safety, use a large initial size; user's live_num_points_max
-        # and pixel size dictate this. Default: 4x probe size.
-        nx_obj_max = max(nx * 8, 1024)
-        ny_obj_max = max(ny * 8, 1024)
+        # Preallocate for the configured scan geometry so reset_for_scan() can
+        # reuse the same buffers without hitting heuristic size mismatches.
+        x_range_um = float(abs(getattr(self.config, "x_range", 0.0)))
+        y_range_um = float(abs(getattr(self.config, "y_range", 0.0)))
+        nx_obj_req, ny_obj_req = self._required_object_shape(x_range_um, y_range_um)
+        nx_obj_max = max(nx_obj_req, nx * 8, 1024)
+        ny_obj_max = max(ny_obj_req, ny * 8, 1024)
         self.nx_obj = nx_obj_max
         self.ny_obj = ny_obj_max
 
@@ -418,20 +441,13 @@ class StreamingPtychoRecon:
         self.current_it = 0
 
         # --- Compute new obj dimensions (HXN ref: flush_live_recon) ---
-        nx_obj = int(
-            self.nx_prb + np.ceil(self.x_range_um * 1e-6 / self.x_pixel_m) + self.obj_pad
-        )
-        ny_obj = int(
-            self.ny_prb + np.ceil(self.y_range_um * 1e-6 / self.x_pixel_m) + self.obj_pad
-        )
-        nx_obj += nx_obj % 2
-        ny_obj += ny_obj % 2
+        nx_obj, ny_obj = self._required_object_shape(self.x_range_um, self.y_range_um)
 
         if nx_obj > self._mmap_obj_nx_base or ny_obj > self._mmap_obj_ny_base:
             raise RuntimeError(
                 f"New scan dimensions ({nx_obj}x{ny_obj}) exceed pre-allocated "
                 f"maximum ({self._mmap_obj_nx_base}x{self._mmap_obj_ny_base}). "
-                f"Increase num_points_max or probe size in gpu_setup()."
+                "Increase the object preallocation for this scan geometry."
             )
         self.nx_obj = nx_obj
         self.ny_obj = ny_obj

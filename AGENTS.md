@@ -502,6 +502,12 @@ same run metadata and chooses `/run` or `/restart` automatically based on the
 current holoptycho server state before publishing. If `hp model status` shows
 no selected engine, run `hp model set <model-name>` once first.
 
+If replay publishes successfully but `hp status` reports an error like
+`New scan dimensions (...x...) exceed pre-allocated maximum (...x...)`, the
+failure is in `holoptycho.streaming_recon.StreamingPtychoRecon.gpu_setup()`.
+That limit is about reconstruction object-buffer preallocation for the scan
+geometry, not the TensorRT model input size.
+
 Then start holoptycho with:
 
 ```bash
