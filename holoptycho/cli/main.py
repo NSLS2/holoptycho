@@ -8,6 +8,7 @@ Override with --url or the HOLOPTYCHO_URL environment variable.
 
 import json
 import sys
+import time
 from typing import Optional
 
 import httpx
@@ -134,13 +135,56 @@ def restart(
 def logs(
     ctx: typer.Context,
     lines: int = typer.Option(100, "--lines", "-n", help="Number of log lines to show"),
+    follow: bool = typer.Option(
+        False, "--follow", "-f",
+        help="Stream new log lines as they arrive (Ctrl-C to stop).",
+    ),
+    interval: float = typer.Option(
+        1.0, "--interval",
+        help="Poll interval in seconds when --follow is used.",
+    ),
 ):
     """Tail the holoptycho log."""
+    # Window the server returns on each poll while following. Must be larger
+    # than the number of lines the server can append between polls to avoid
+    # gaps; safe default for INFO-level traffic at 1s intervals.
+    follow_window = max(lines, 1000)
+
     with _client(_base_url(ctx)) as c:
         resp = c.get("/logs", params={"lines": lines})
-    _handle_error(resp)
-    for line in resp.json().get("lines", []):
-        typer.echo(line)
+        _handle_error(resp)
+        current = resp.json().get("lines", [])
+        for line in current:
+            typer.echo(line)
+
+        if not follow:
+            return
+
+        last_line = current[-1] if current else None
+        try:
+            while True:
+                time.sleep(interval)
+                resp = c.get("/logs", params={"lines": follow_window})
+                _handle_error(resp)
+                new_lines = resp.json().get("lines", [])
+                # Find the last printed line in the new window and print
+                # everything after it. If we can't find it, the log has rolled
+                # past our anchor — print the whole window to avoid silent
+                # gaps.
+                start_idx = 0
+                if last_line is not None:
+                    for i in range(len(new_lines) - 1, -1, -1):
+                        if new_lines[i] == last_line:
+                            start_idx = i + 1
+                            break
+                    else:
+                        start_idx = 0
+                for line in new_lines[start_idx:]:
+                    typer.echo(line)
+                if new_lines:
+                    last_line = new_lines[-1]
+        except KeyboardInterrupt:
+            pass
 
 
 # ---------------------------------------------------------------------------
