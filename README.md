@@ -42,6 +42,7 @@ The pipeline will refuse to start if `SERVER_STREAM_SOURCE` or `PANDA_STREAM_SOU
 | Variable | Description |
 |---|---|
 | `TILED_CATALOG_PATH` | Tiled catalog path (default: `hxn/processed/holoptycho`) |
+| `HOLOPTYCHO_LOG_LEVEL` | Root log level for the API and pipeline logs (default: `INFO`; set to `DEBUG` for per-write Tiled debug logs) |
 | `SERVER_PUBLIC_KEY` | CurveZMQ public key of the [holoscan-proxy](https://github.com/NSLS2/holoscan-proxy). Required only if the proxy is configured with `encrypt: true`. |
 | `CLIENT_PUBLIC_KEY` | CurveZMQ public key of this client. Required if `SERVER_PUBLIC_KEY` is set. |
 | `CLIENT_SECRET_KEY` | CurveZMQ secret key of this client. Required if `SERVER_PUBLIC_KEY` is set. |
@@ -86,6 +87,7 @@ docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
   -e AZURE_ML_WORKSPACE=genesis-mlw \
   -e TILED_BASE_URL="https://tiled.nsls2.bnl.gov" \
   -e TILED_API_KEY="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-tiled-api-key --query value -o tsv)" \
+  -e HOLOPTYCHO_LOG_LEVEL="DEBUG" \
   -e SERVER_STREAM_SOURCE="tcp://localhost:5555" \
   -e PANDA_STREAM_SOURCE="tcp://localhost:5556" \
   genesisdemosacr.azurecr.io/holoptycho:latest

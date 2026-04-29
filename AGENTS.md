@@ -156,6 +156,7 @@ docker run --pull=always --gpus all -p 127.0.0.1:8000:8000 --shm-size=32g \
   -e AZURE_ML_WORKSPACE=genesis-mlw \
   -e TILED_BASE_URL="https://tiled.nsls2.bnl.gov" \
   -e TILED_API_KEY="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-tiled-api-key --query value -o tsv)" \
+  -e HOLOPTYCHO_LOG_LEVEL="DEBUG" \
   -e SERVER_STREAM_SOURCE="tcp://<eiger-host>:5555" \
   -e PANDA_STREAM_SOURCE="tcp://<panda-host>:5556" \
   -e SERVER_PUBLIC_KEY="<eiger-server-public-key>" \
@@ -388,6 +389,7 @@ hp restart "$(pixi run -e client config-from-tiled --scan-num 320046)"
 | `TILED_BASE_URL` | — | Tiled server URL. If unset, falls back to .npy writes |
 | `TILED_API_KEY` | — | Tiled API key (store in Key Vault as `holoptycho-tiled-api-key`) |
 | `TILED_CATALOG_PATH` | `hxn/processed/holoptycho` | Tiled catalog path for output |
+| `HOLOPTYCHO_LOG_LEVEL` | `INFO` | Root log level for API + pipeline logs. Set to `DEBUG` to surface `TiledWriter.write_live` / `write_vit` debug logs in `hp logs`. |
 | `AZURE_SUBSCRIPTION_ID` | — | Azure subscription (for Azure ML model pull) |
 | `AZURE_RESOURCE_GROUP` | — | Azure resource group |
 | `AZURE_ML_WORKSPACE` | — | Azure ML workspace name |

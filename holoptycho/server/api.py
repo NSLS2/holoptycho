@@ -8,6 +8,7 @@ or:
 
 import logging
 import logging.handlers
+import os
 import threading
 from pathlib import Path
 from typing import Optional
@@ -30,13 +31,27 @@ async def lifespan(app):
         current_model_name=db.get_setting("current_model_name"),
         current_model_version=db.get_setting("current_model_version"),
     )
-    logger.info("holoptycho API started")
+    logger.info(
+        "holoptycho API started (log level=%s)",
+        logging.getLevelName(logging.getLogger().level),
+    )
     yield
 
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+def _resolve_log_level() -> int:
+    level_name = os.environ.get("HOLOPTYCHO_LOG_LEVEL", "INFO").upper()
+    level = logging.getLevelNamesMapping().get(level_name)
+    if isinstance(level, int):
+        return level
+    logging.getLogger(__name__).warning(
+        "Invalid HOLOPTYCHO_LOG_LEVEL=%r; falling back to INFO", level_name
+    )
+    return logging.INFO
+
+
 _log_file = Path(state.log_file)
 _handler = logging.handlers.RotatingFileHandler(
     _log_file, maxBytes=10 * 1024 * 1024, backupCount=3
@@ -45,7 +60,7 @@ _handler.setFormatter(
     logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
 )
 logging.getLogger().addHandler(_handler)
-logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().setLevel(_resolve_log_level())
 
 logger = logging.getLogger("holoptycho.api")
 
