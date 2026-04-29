@@ -186,6 +186,77 @@ ssh -L 8000:localhost:8000 \
 
 ---
 
+## Starting the server natively (without container)
+
+For local development on a host with an NVIDIA GPU, the API server can be run
+directly from the pixi env — no podman/docker required. This is the path used
+when iterating on the pipeline code or testing against `scripts/replay_from_tiled.py`
+on the same machine.
+
+### 1. Build the default pixi env
+
+Requires the system CUDA toolkit (`cuda.h` under `/usr/local/cuda/include`)
+and the NVIDIA driver lib (`libcuda.so`). On WSL2 the driver lib is at
+`/usr/lib/wsl/lib/`; on bare-metal Linux it is under `/usr/lib/x86_64-linux-gnu/`.
+
+Conda-forge ships `libcurand.so.10` without the unversioned dev symlink that
+the linker requires. Create it once:
+
+```bash
+ln -sf libcurand.so.10 .pixi/envs/default/lib/libcurand.so
+```
+
+Then build the env with the toolchain pointed at both the system CUDA headers
+and the driver lib path:
+
+```bash
+CUDA_ROOT=/usr/local/cuda CUDA_HOME=/usr/local/cuda CPATH=/usr/local/cuda/include \
+  LIBRARY_PATH=/usr/lib/wsl/lib:$PWD/.pixi/envs/default/lib \
+  pixi install
+```
+
+Drop `/usr/lib/wsl/lib` from `LIBRARY_PATH` on non-WSL hosts.
+
+### 2. Resolve Azure + Tiled credentials
+
+The API server reads the same env vars as the container. Pull them once per
+shell with `az` (after running `az login`):
+
+```bash
+export AZURE_TENANT_ID="$(az account show --query tenantId -o tsv)"
+export AZURE_CLIENT_ID="$(az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv)"
+export AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+export AZURE_CERTIFICATE_B64="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-sp-cert --query value -o tsv)"
+export AZURE_RESOURCE_GROUP=rg-genesis-demos
+export AZURE_ML_WORKSPACE=genesis-mlw
+
+export TILED_BASE_URL="https://tiled.nsls2.bnl.gov"
+export TILED_API_KEY="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-tiled-api-key --query value -o tsv)"
+```
+
+### 3. Set ZMQ sources and engine cache
+
+```bash
+export SERVER_STREAM_SOURCE="tcp://localhost:5555"
+export PANDA_STREAM_SOURCE="tcp://localhost:5556"
+
+# /models (the container default) is not writable outside the container.
+export ENGINE_CACHE_DIR="$HOME/.cache/holoptycho/models"
+mkdir -p "$ENGINE_CACHE_DIR"
+```
+
+### 4. Start the server
+
+```bash
+pixi run start-api   # listens on 127.0.0.1:8000
+```
+
+Server reads env vars at startup, so changing any of them requires a restart.
+Verify with `hp status` once it is up; the `hp` CLI from the `client` env still
+talks to `http://localhost:8000` as normal.
+
+---
+
 ## CLI reference
 
 ### Pipeline lifecycle
@@ -311,6 +382,9 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `batch_width`, `batch_height` | int (str) | Diffraction pattern tile size |
 | `batch_x0`, `batch_y0` | int (str) | Top-left crop offset in the detector frame |
 | `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
+| `recon_mode` | str | Which reconstruction branches to wire: `iterative`, `vit`, or `both`. Default `both`. Use `iterative` to skip the ViT op entirely (no engine load); use `vit` to skip the iterative DM/ML solver (no `live/`/`final/` Tiled writes). |
+| `raw_uid` | str | (Optional) UID of the raw Bluesky run being reconstructed. Stored as metadata on the per-run Tiled container. The `replay_from_tiled.py` and `config_from_tiled.py` config builders fill it in automatically from `--uid`. |
+| `scan_id` | str | (Optional) Scan id of the raw run. Defaults to `scan_num` if omitted. Stored as metadata on the per-run Tiled container. |
 | `xray_energy_kev` | float (str) | X-ray energy in keV |
 | `lambda_nm` | float (str) | X-ray wavelength in nm (derived from energy) |
 | `ccd_pixel_um` | float (str) | Detector pixel size in µm |
@@ -380,7 +454,7 @@ hp restart "$(pixi run -e client config-from-tiled --scan-num 320046)"
 | `HOLOPTYCHO_URL` | `http://localhost:8000` | API server URL |
 | `HOLOPTYCHO_DB_PATH` | `holoptycho.db` | SQLite DB path (server-side) |
 | `HOLOPTYCHO_CONFIG_DIR` | `configs/` | Directory for generated INI files (server-side) |
-| `ENGINE_CACHE_DIR` | `models/` | Directory for cached `.engine` files (server-side) |
+| `ENGINE_CACHE_DIR` | `/models` | Directory for cached `.engine` files (server-side). Outside the container this default is not writable — point it at a user-writable path before starting the server (e.g. `$HOME/.cache/holoptycho/models`). |
 | `SERVER_STREAM_SOURCE` | — | **Required.** ZMQ endpoint of the Eiger detector |
 | `PANDA_STREAM_SOURCE` | — | **Required.** ZMQ endpoint of the PandA box |
 | `SERVER_PUBLIC_KEY` | — | CurveZMQ server (Eiger) public key |
@@ -515,6 +589,18 @@ failure is in `holoptycho.streaming_recon.StreamingPtychoRecon.gpu_setup()`.
 That limit is about reconstruction object-buffer preallocation for the scan
 geometry, not the TensorRT model input size.
 
+The streaming-pipeline frame batch size is fixed at 64 (in
+`PtychoApp.compose()`). The ViT op reads its engine's compiled batch dim via
+`read_engine_batch_size()` in `_init_session()` and chunks each incoming
+pipeline batch into engine-sized sub-batches before running TRT inference, so
+small-batch engines (e.g. `nsls0408_bs1`) coexist with the throughput-oriented
+streaming batch without backpressuring the pipeline.
+
+If `hp logs` ever shows `ValueError: Batch too large: input X vs engine Y`
+from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
+`engine_batch_size` was set correctly on the op (logged at INFO during
+`ptychoml.PtychoViTInference created`).
+
 Then start holoptycho with:
 
 ```bash
@@ -531,12 +617,16 @@ inside the container refers to the container itself, not the Slurm node host.
 
 ## Tiled output structure
 
-Results are written to the Tiled catalog under `TILED_CATALOG_PATH/{scan_num}/`,
-tagged with the `synaps_project` spec:
+Each pipeline start (`hp start` / `hp restart`) creates a new container under
+`TILED_CATALOG_PATH/{run_uid}/` with a freshly-generated UUID, tagged with the
+`synaps_project` spec. The container's metadata records the raw run that was
+reconstructed, so multiple runs of the same `scan_num` never collide:
 
 ```
 hxn/processed/holoptycho/
-  {scan_num}/
+  {run_uid}/                    ← uuid4 hex; metadata: {run_uid, raw_uid,
+                                                         scan_id, scan_num,
+                                                         started_at, recon_mode}
     live/
       probe      ← overwritten every display_interval iterations
       object     ← overwritten every display_interval iterations
@@ -550,8 +640,19 @@ hxn/processed/holoptycho/
       indices_latest
 ```
 
-If `TILED_BASE_URL` or `TILED_API_KEY` are not set, the pipeline falls back
-to writing `.npy` files under `/data/users/Holoscan/` with a warning.
+`run_uid` is generated in `PtychoApp.compose()` and surfaced via
+`TiledWriter.start_run(run_uid, metadata)`. `raw_uid` and `raw_scan_id` come
+from the run config and are populated automatically by
+`scripts/config_from_tiled.py::build_full_config()` (and therefore by
+`scripts/replay_from_tiled.py --hp-start`).
+
+To list runs for a particular raw scan, query the catalog with
+`tiled.queries.Eq("scan_id", "<scan_id>")` (or `Eq("raw_uid", ...)`).
+
+If `TILED_BASE_URL` or `TILED_API_KEY` are not set, the pipeline falls back to
+writing `.npy` files under `/data/users/Holoscan/{run_uid}/` (one directory per
+run) with a warning. A `metadata.json` sidecar mirrors the Tiled container
+metadata for offline matching.
 
 ---
 

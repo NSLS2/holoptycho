@@ -59,6 +59,7 @@ recon_result/
 *.nsys-rep
 *.sqlite
 *.log
+*.log.*
 
 # model files (GPU-specific, not portable)
 *.engine
@@ -66,3 +67,7 @@ recon_result/
 
 # pixi
 .pixi/
+
+# holoptycho server runtime artifacts (HOLOPTYCHO_CONFIG_DIR, HOLOPTYCHO_DB_PATH defaults)
+configs/
+holoptycho.db

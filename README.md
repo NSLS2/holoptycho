@@ -22,7 +22,7 @@ Holoptycho is a streaming pipeline: it receives diffraction patterns from the Ei
 - **`PtychoRecon`** — iterative DM/ML reconstruction on GPU 0
 - **`PtychoViTInferenceOp`** — parallel neural network inference on GPU 1
 
-Results are written to Tiled under `hxn/processed/holoptycho/{scan_num}/` (overrideable via `TILED_CATALOG_PATH`), tagged with the `synaps_project` spec.
+Each pipeline run produces a fresh container under `hxn/processed/holoptycho/{run_uid}/` (a per-run UUID; the catalog root is overrideable via `TILED_CATALOG_PATH`), tagged with the `synaps_project` spec. Container metadata records the raw scan it was reconstructed from (`raw_uid`, `scan_id`, `scan_num`, `started_at`, `recon_mode`).
 
 ---
 
@@ -203,6 +203,9 @@ The config is a flat JSON dict passed to `hp start` or `hp restart`. All values 
 | `batch_x0`, `batch_y0` | int (str) | Top-left crop offset in the detector frame |
 | `det_roix0`, `det_roiy0` | int (str) | Detector ROI origin (pixels) |
 | `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
+| `recon_mode` | str | Which reconstruction branches to run: `iterative`, `vit`, or `both`. Default `both`. |
+| `raw_uid` | str | (Optional) UID of the raw Bluesky run this reconstruction came from; stored on the per-run Tiled container as metadata. |
+| `scan_id` | str | (Optional) Scan id of the raw run; stored on the per-run Tiled container as metadata. Defaults to `scan_num` if omitted. |
 | `xray_energy_kev` | float (str) | X-ray energy in keV |
 | `lambda_nm` | float (str) | X-ray wavelength in nm — derive from energy (see below) |
 | `ccd_pixel_um` | float (str) | Detector pixel size in µm |
@@ -355,15 +358,66 @@ inside the container refers to the container itself, not the Slurm node host.
 
 ## Local development
 
-Requires Linux (x86_64), an NVIDIA GPU, and [pixi](https://pixi.sh).
+Requires Linux (x86_64), an NVIDIA GPU, the system CUDA toolkit (for `cuda.h` and the matching driver lib), and [pixi](https://pixi.sh).
 
 ```bash
 git clone git@github.com:NSLS2/holoptycho.git
 cd holoptycho
 pixi install
 pixi run test
-pixi run start-api   # starts the API server locally on port 8000
 ```
+
+### Building the default (GPU) env
+
+The default pixi env builds `pycuda` from source against the system CUDA toolkit. If `pixi install` fails with `cuda.h: No such file or directory` or `cannot find -lcuda` / `-lcurand`, you need to:
+
+1. Make sure `cuda.h` is reachable via `/usr/local/cuda/include` (system CUDA toolkit, e.g. installed via the NVIDIA `.run` installer or `nvidia-cuda-toolkit` apt package).
+2. Make sure `libcuda.so` is reachable. On WSL2 it lives at `/usr/lib/wsl/lib/libcuda.so` (provided by the Windows NVIDIA driver). On bare-metal Linux the driver places it under `/usr/lib/x86_64-linux-gnu/`.
+3. Conda-forge ships `libcurand.so.10` without the unversioned dev symlink that the linker needs. Create it once:
+
+   ```bash
+   ln -sf libcurand.so.10 .pixi/envs/default/lib/libcurand.so
+   ```
+
+Then run `pixi install` with the toolchain pointed at both the system CUDA headers and the WSL/driver lib path:
+
+```bash
+CUDA_ROOT=/usr/local/cuda CUDA_HOME=/usr/local/cuda CPATH=/usr/local/cuda/include \
+  LIBRARY_PATH=/usr/lib/wsl/lib:$PWD/.pixi/envs/default/lib \
+  pixi install
+```
+
+Drop `/usr/lib/wsl/lib` from `LIBRARY_PATH` on non-WSL hosts.
+
+### Running the API server natively
+
+The API server reads the same environment variables as the container. Pull them from Azure once per shell, then start the server:
+
+```bash
+az login   # one time
+
+export AZURE_TENANT_ID="$(az account show --query tenantId -o tsv)"
+export AZURE_CLIENT_ID="$(az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv)"
+export AZURE_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+export AZURE_CERTIFICATE_B64="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-sp-cert --query value -o tsv)"
+export AZURE_RESOURCE_GROUP=rg-genesis-demos
+export AZURE_ML_WORKSPACE=genesis-mlw
+
+export TILED_BASE_URL="https://tiled.nsls2.bnl.gov"
+export TILED_API_KEY="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-tiled-api-key --query value -o tsv)"
+
+export SERVER_STREAM_SOURCE="tcp://localhost:5555"
+export PANDA_STREAM_SOURCE="tcp://localhost:5556"
+
+# ENGINE_CACHE_DIR defaults to /models, which is not writable outside the container.
+# Point it at a user-writable path before starting the server.
+export ENGINE_CACHE_DIR="$HOME/.cache/holoptycho/models"
+mkdir -p "$ENGINE_CACHE_DIR"
+
+pixi run start-api   # listens on 127.0.0.1:8000
+```
+
+`SERVER_STREAM_SOURCE` and `PANDA_STREAM_SOURCE` are required — the pipeline refuses to start without them. Use `tcp://localhost:5555` / `tcp://localhost:5556` when pairing with `scripts/replay_from_tiled.py` on the same host.
 
 ---
 

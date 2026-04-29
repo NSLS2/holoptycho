@@ -1,5 +1,6 @@
 import logging
 import ast
+import uuid
 from time import sleep
 import time
 
@@ -177,6 +178,9 @@ class PtychoRecon(Operator):
         self.timestamp_iter = []
         self.num_points_recv_iter = []
 
+        self._logger = logging.getLogger("PtychoRecon")
+        self._iteration_started_logged = False
+
     def flush(self,param):
 
         print(f'flush ptycho recon {str(param[0])}')
@@ -185,6 +189,7 @@ class PtychoRecon(Operator):
         self.pos_ready_num = 0
         self.frame_ready_num = 0
         self.probe_initialized = False
+        self._iteration_started_logged = False
 
         # Reset the engine for a new scan region. This combines what the
         # HXN_development code called ``new_obj()`` + ``flush_live_recon()``:
@@ -252,6 +257,14 @@ class PtychoRecon(Operator):
                     self.recon.propagate_probe()
                 self.probe_initialized = True
 
+            if not self._iteration_started_logged:
+                self._logger.info(
+                    "Iterative recon started: num_points_recon=%d (threshold=%d)",
+                    int(self.recon.num_points_recon),
+                    int(self.num_points_min),
+                )
+                self._iteration_started_logged = True
+
             self.timestamp_iter.append(time.time())
             self.num_points_recv_iter.append(self.recon.num_points_recon)
             self.recon.iter_once(self.it)
@@ -289,7 +302,6 @@ _writer = get_writer()
 def SaveLiveResult(results):
     try:
         _writer.write_live(
-            scan_num=results[3],
             iteration=results[2],
             probe=results[0],
             obj=results[1],
@@ -302,7 +314,6 @@ def SaveResult(output):
     print('Live recon done! Saving results..')
     engine = output[0]
     _writer.write_final(
-        scan_num=engine.scan_num,
         probe=np.asarray(engine.prb_mode),
         obj=np.asarray(engine.obj_mode),
         timestamps=np.array(output[1]),
@@ -467,8 +478,34 @@ class PtychoApp(Application):
 
         self.param.live_recon_flag = True
 
+        # Streaming-pipeline frame batch size. Decoupled from the ViT engine
+        # batch dim — PtychoViTInferenceOp chunks each batch into engine-sized
+        # sub-batches internally so this value can stay tuned for throughput.
         self.batchsize = 64
         self.min_points = 256
+
+        # Which branches to wire. "iterative" runs only PtychoRecon, "vit" runs
+        # only PtychoViTInferenceOp, "both" runs them in parallel (default).
+        recon_mode = str(getattr(self.param, "recon_mode", "both")).lower()
+        if recon_mode not in ("iterative", "vit", "both"):
+            raise ValueError(
+                f"recon_mode must be one of iterative/vit/both, got: {recon_mode!r}"
+            )
+        self.recon_mode = recon_mode
+
+        # Each pipeline run gets a fresh container in Tiled keyed by its own uid.
+        # Metadata captures the raw scan it was reconstructed from.
+        self.run_uid = uuid.uuid4().hex
+        run_metadata = {
+            "scan_num": str(self.param.scan_num),
+            "raw_uid": str(getattr(self.param, "raw_uid", "") or ""),
+            "scan_id": str(
+                getattr(self.param, "scan_id", self.param.scan_num)
+            ),
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "recon_mode": recon_mode,
+        }
+        _writer.start_run(self.run_uid, metadata=run_metadata)
 
         self.flip_image = True  # According to detector settings
 
@@ -559,7 +596,7 @@ class PtychoApp(Application):
             data_is_shifted=True,
             name="vit_inference",
         )
-        self.vit_save = SaveViTResult(self, scan_num=self.param.scan_num, name="vit_save")
+        self.vit_save = SaveViTResult(self, name="vit_save")
 
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
@@ -569,15 +606,16 @@ class PtychoApp(Application):
         self.add_flow(self.pos_rx, self.point_proc, {("pointRx_out", "pointOp_in")})
         self.add_flow(self.image_send, self.point_proc, {("image_indices_out", "pointOp_in")})
 
-        self.add_flow(self.image_send, self.pty, {("frame_ready_num", "frame_ready_num")})
-        self.add_flow(self.point_proc, self.pty, {("pos_ready_num", "pos_ready_num")})
+        if self.recon_mode in ("iterative", "both"):
+            self.add_flow(self.image_send, self.pty, {("frame_ready_num", "frame_ready_num")})
+            self.add_flow(self.point_proc, self.pty, {("pos_ready_num", "pos_ready_num")})
+            self.add_flow(self.pty, self.live_result, {("save_live_result", "results")})
+            self.add_flow(self.pty, self.o, {("output", "output")})
 
-        self.add_flow(self.pty, self.live_result, {("save_live_result", "results")})
-        self.add_flow(self.pty, self.o, {("output", "output")})
-
-        # ViT: branch off ImagePreprocessorOp's diff_amp (fan-out, parallel to image_send)
-        self.add_flow(self.image_proc, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
-        self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
+        if self.recon_mode in ("vit", "both"):
+            # ViT: branch off ImagePreprocessorOp's diff_amp (fan-out, parallel to image_send)
+            self.add_flow(self.image_proc, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
+            self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
 
 
 def main():

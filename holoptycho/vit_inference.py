@@ -27,6 +27,28 @@ from .tiled_writer import get_writer
 _writer = get_writer()
 
 
+def read_engine_batch_size(engine_path: str) -> int:
+    """Return the batch dim of the input tensor for a TensorRT .engine file.
+
+    Used by the pipeline composer to size frame batches to match the model,
+    so the streaming pipeline never feeds the engine more frames than it was
+    compiled for.
+    """
+    import tensorrt as trt
+
+    runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
+    with open(engine_path, "rb") as f:
+        engine = runtime.deserialize_cuda_engine(f.read())
+    if engine is None:
+        raise RuntimeError(f"Failed to deserialize TRT engine: {engine_path}")
+    input_name = next(
+        engine.get_tensor_name(i)
+        for i in range(engine.num_io_tensors)
+        if engine.get_tensor_mode(engine.get_tensor_name(i)) == trt.TensorIOMode.INPUT
+    )
+    return int(engine.get_tensor_shape(input_name)[0])
+
+
 class PtychoViTInferenceOp(Operator):
     """Holoscan operator that runs PtychoViT TRT inference on diffraction batches.
 
@@ -89,10 +111,12 @@ class PtychoViTInferenceOp(Operator):
             gpu=self.gpu,
             data_is_shifted=self._data_is_shifted,
         )
+        self.engine_batch_size = read_engine_batch_size(self.engine_path)
         self._logger.info(
-            "ptychoml.PtychoViTInference created: engine=%s gpu=%d",
+            "ptychoml.PtychoViTInference created: engine=%s gpu=%d engine_batch=%d",
             self.engine_path,
             self.gpu,
+            self.engine_batch_size,
         )
 
     def setup(self, spec: OperatorSpec):
@@ -148,8 +172,21 @@ class PtychoViTInferenceOp(Operator):
                 self._logger.warning("Engine reload failed: %s", e)
 
         # --- Run inference via ptychoml (handles fftshift, padding, TRT) ---
+        # If the streaming pipeline batch is larger than the engine's compiled
+        # batch dim, split into engine-sized sub-batches and concatenate results.
+        # ptychoml.PtychoViTInference handles a final partial sub-batch via
+        # internal padding.
+        ebs = self.engine_batch_size
+        n = diff_amp.shape[0]
         t0 = time.perf_counter()
-        pred, _ = self._session.predict(diff_amp)
+        if n <= ebs:
+            pred, _ = self._session.predict(diff_amp)
+        else:
+            preds = []
+            for start in range(0, n, ebs):
+                sub_pred, _ = self._session.predict(diff_amp[start:start + ebs])
+                preds.append(sub_pred)
+            pred = np.concatenate(preds, axis=0)
         dt = time.perf_counter() - t0
 
         # --- Stats ---
@@ -191,9 +228,8 @@ class SaveViTResult(Operator):
         preds = np.concatenate([np.load(f) for f in sorted(glob('vit_batch_*_pred.npy'))])
     """
 
-    def __init__(self, fragment, *args, scan_num=None, **kwargs):
+    def __init__(self, fragment, *args, **kwargs):
         super().__init__(fragment, *args, **kwargs)
-        self._scan_num = scan_num
         self.batch_num = 0
         self.max_index_seen = -1
 
@@ -219,7 +255,6 @@ class SaveViTResult(Operator):
             self.max_index_seen = max(self.max_index_seen, int(indices.max()))
 
             _writer.write_vit(
-                scan_num=self._scan_num,
                 batch_num=self.batch_num,
                 pred=pred,
                 indices=indices,

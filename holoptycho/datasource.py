@@ -156,6 +156,7 @@ class EigerZmqRxOp(Operator):
         logging.basicConfig(level=logging.INFO)
 
         self.frame_id_last = -1
+        self._first_frame_logged = False
 
     def setup(self, spec: OperatorSpec):
         spec.input("flush").condition(ConditionType.NONE)
@@ -180,6 +181,13 @@ class EigerZmqRxOp(Operator):
                     if "frame" in msg:
                         break
                 frame_id = msg["frame"]
+                if not self._first_frame_logged:
+                    self.logger.info(
+                        "First Eiger frame received: frame_id=%d from %s",
+                        frame_id,
+                        self.endpoint,
+                    )
+                    self._first_frame_logged = True
                 self.frame_id_last = frame_id
                 # encoding info
                 encoding_msg = self.socket.recv()
@@ -283,6 +291,8 @@ class PositionRxOp(Operator):
         socket.setsockopt(zmq.RCVTIMEO, receive_timeout_ms)
         self.socket = socket
 
+        self._first_message_logged = False
+
     def flush(self,param):
         self.data_x_str = param[0]
         self.data_y_str = param[1]
@@ -295,6 +305,13 @@ class PositionRxOp(Operator):
             msg = self.socket.recv_json()
             if msg["msg_type"] == "data":
                 frame_number = msg["frame_number"]
+                if not self._first_message_logged:
+                    self.logger.info(
+                        "First PandA data message received: frame_number=%d from %s",
+                        frame_number,
+                        self.endpoint,
+                    )
+                    self._first_message_logged = True
                 
                 x = msg["datasets"][self.data_x_str]["data"]
                 y = msg["datasets"][self.data_y_str]["data"]

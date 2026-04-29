@@ -30,13 +30,17 @@ logger = logging.getLogger("holoptycho.tiled_writer")
 
 _DEFAULT_CATALOG_PATH = "hxn/processed/holoptycho"
 _SPECS = ["synaps_project"]
+# Access tags gate which API keys can read/write this node. The holoptycho API
+# key is scoped to {'synaps_project', 'hxn_beamline', 'public'}, so every
+# container/array we create must carry one of these tags or Tiled returns 403.
+_ACCESS_TAGS = ["synaps_project"]
 
 
 def _get_or_create(container, key: str):
     """Return a sub-container by key, creating it if it doesn't exist."""
     if key in container:
         return container[key]
-    return container.create_container(key=key, specs=_SPECS)
+    return container.create_container(key=key, specs=_SPECS, access_tags=_ACCESS_TAGS)
 
 
 class TiledWriter:
@@ -64,15 +68,36 @@ class TiledWriter:
             node = node[part]
         self._root = node
         self._catalog_path = catalog_path
+        # Per-run container created lazily by start_run().
+        self._run = None
+        self._run_uid: str | None = None
         logger.info("TiledWriter connected: %s / %s", base_url, catalog_path)
+
+    # ------------------------------------------------------------------
+    # Run lifecycle
+    # ------------------------------------------------------------------
+
+    def start_run(self, run_uid: str, metadata: dict | None = None) -> None:
+        """Create a fresh per-run container under the catalog root.
+
+        Each pipeline start gets its own container keyed by ``run_uid`` so
+        repeated runs of the same scan don't collide. ``metadata`` is stored
+        on the container and should include the raw run's uid and scan_id.
+        """
+        meta = dict(metadata or {})
+        meta.setdefault("run_uid", run_uid)
+        self._run = self._root.create_container(
+            key=run_uid,
+            metadata=meta,
+            specs=_SPECS,
+            access_tags=_ACCESS_TAGS,
+        )
+        self._run_uid = run_uid
+        logger.info("TiledWriter.start_run uid=%s metadata=%s", run_uid, meta)
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _scan_container(self, scan_num) -> object:
-        """Return (creating if necessary) the container for a given scan."""
-        return _get_or_create(self._root, str(scan_num))
 
     def _write_or_overwrite_array(self, container, key: str, array: np.ndarray, metadata: dict | None = None):
         """Write an array into *container* under *key*, overwriting if it already exists."""
@@ -80,102 +105,131 @@ class TiledWriter:
         if key in container:
             container[key].write(arr)
         else:
-            container.write_array(arr, key=key, metadata=metadata or {}, specs=_SPECS)
+            container.write_array(
+                arr,
+                key=key,
+                metadata=metadata or {},
+                specs=_SPECS,
+                access_tags=_ACCESS_TAGS,
+            )
 
     # ------------------------------------------------------------------
-    # Public write methods
+    # Public write methods — all require start_run() to have been called.
     # ------------------------------------------------------------------
 
-    def write_live(self, scan_num, iteration: int, probe: np.ndarray, obj: np.ndarray) -> None:
-        """Overwrite the live probe/object snapshots for the current scan.
+    def write_live(self, iteration: int, probe: np.ndarray, obj: np.ndarray) -> None:
+        """Overwrite the live probe/object snapshots for the current run.
 
         Called every ``display_interval`` iterations.
         """
+        if self._run is None:
+            logger.warning("write_live called before start_run; skipping")
+            return
         try:
-            scan = self._scan_container(scan_num)
-            live = _get_or_create(scan, "live")
-            meta = {"scan_num": str(scan_num), "iteration": iteration}
+            live = _get_or_create(self._run, "live")
+            meta = {"iteration": iteration}
             self._write_or_overwrite_array(live, "probe", probe, metadata=meta)
             self._write_or_overwrite_array(live, "object", obj, metadata=meta)
-            logger.debug("write_live scan=%s iter=%d", scan_num, iteration)
+            logger.debug("write_live run=%s iter=%d", self._run_uid, iteration)
         except Exception:
             logger.exception("TiledWriter.write_live failed")
 
     def write_final(
         self,
-        scan_num,
         probe: np.ndarray,
         obj: np.ndarray,
         timestamps: np.ndarray,
         num_points: np.ndarray,
     ) -> None:
         """Write final reconstruction results when a scan completes."""
+        if self._run is None:
+            logger.warning("write_final called before start_run; skipping")
+            return
         try:
-            scan = self._scan_container(scan_num)
-            final = _get_or_create(scan, "final")
-            meta = {"scan_num": str(scan_num)}
-            self._write_or_overwrite_array(final, "probe", probe, metadata=meta)
-            self._write_or_overwrite_array(final, "object", obj, metadata=meta)
-            self._write_or_overwrite_array(final, "timestamps", timestamps, metadata=meta)
-            self._write_or_overwrite_array(final, "num_points", num_points, metadata=meta)
-            logger.info("write_final scan=%s", scan_num)
+            final = _get_or_create(self._run, "final")
+            self._write_or_overwrite_array(final, "probe", probe)
+            self._write_or_overwrite_array(final, "object", obj)
+            self._write_or_overwrite_array(final, "timestamps", timestamps)
+            self._write_or_overwrite_array(final, "num_points", num_points)
+            logger.info("write_final run=%s", self._run_uid)
         except Exception:
             logger.exception("TiledWriter.write_final failed")
 
     def write_vit(
         self,
-        scan_num,
         batch_num: int,
         pred: np.ndarray,
         indices: np.ndarray,
     ) -> None:
         """Write a ViT inference batch result."""
+        if self._run is None:
+            logger.warning("write_vit called before start_run; skipping")
+            return
         try:
-            scan = self._scan_container(scan_num)
-            vit = _get_or_create(scan, "vit")
-            meta = {"scan_num": str(scan_num), "batch_num": batch_num}
+            vit = _get_or_create(self._run, "vit")
+            meta = {"batch_num": batch_num}
             # Overwrite "latest" arrays for live viewing
             self._write_or_overwrite_array(vit, "pred_latest", pred, metadata=meta)
             self._write_or_overwrite_array(vit, "indices_latest", indices, metadata=meta)
-            logger.debug("write_vit scan=%s batch=%d", scan_num, batch_num)
+            logger.debug("write_vit run=%s batch=%d", self._run_uid, batch_num)
         except Exception:
             logger.exception("TiledWriter.write_vit failed")
 
 
 class _NpyFallbackWriter:
-    """Writes results to .npy files under /data/users/Holoscan/ — matches the
-    behaviour before tiled integration was added."""
+    """Writes results to .npy files under /data/users/Holoscan/<run_uid>/ —
+    matches the behaviour before tiled integration was added, but per-run."""
 
     _BASE = "/data/users/Holoscan"
 
-    def write_live(self, scan_num, iteration: int, probe: np.ndarray, obj: np.ndarray) -> None:
+    def __init__(self):
+        self._run_dir: str | None = None
+
+    def start_run(self, run_uid: str, metadata: dict | None = None) -> None:
+        self._run_dir = f"{self._BASE}/{run_uid}"
+        os.makedirs(self._run_dir, exist_ok=True)
+        if metadata:
+            try:
+                import json
+                with open(f"{self._run_dir}/metadata.json", "w") as f:
+                    json.dump(metadata, f, indent=2, default=str)
+            except Exception:
+                logger.exception("_NpyFallbackWriter: failed to write metadata.json")
+
+    def write_live(self, iteration: int, probe: np.ndarray, obj: np.ndarray) -> None:
+        if self._run_dir is None:
+            logger.warning("write_live called before start_run; skipping")
+            return
         try:
-            np.save(f"{self._BASE}/prb_live.npy", probe)
-            np.save(f"{self._BASE}/obj_live.npy", obj)
-            with open(f"{self._BASE}/iteration", "w") as f:
+            np.save(f"{self._run_dir}/prb_live.npy", probe)
+            np.save(f"{self._run_dir}/obj_live.npy", obj)
+            with open(f"{self._run_dir}/iteration", "w") as f:
                 f.write("%d\n" % iteration)
         except Exception:
             logger.exception("_NpyFallbackWriter.write_live failed")
 
-    def write_final(self, scan_num, probe, obj, timestamps, num_points) -> None:
+    def write_final(self, probe, obj, timestamps, num_points) -> None:
+        if self._run_dir is None:
+            logger.warning("write_final called before start_run; skipping")
+            return
         try:
-            save_dir = f"{self._BASE}/recon_{scan_num}"
-            os.makedirs(save_dir, exist_ok=True)
-            np.save(f"{save_dir}/probe.npy", probe)
-            np.save(f"{save_dir}/object.npy", obj)
-            np.save(f"{save_dir}/timestamp_iter.npy", timestamps)
-            np.save(f"{save_dir}/num_points_recv_iter.npy", num_points)
+            np.save(f"{self._run_dir}/probe.npy", probe)
+            np.save(f"{self._run_dir}/object.npy", obj)
+            np.save(f"{self._run_dir}/timestamp_iter.npy", timestamps)
+            np.save(f"{self._run_dir}/num_points_recv_iter.npy", num_points)
         except Exception:
             logger.exception("_NpyFallbackWriter.write_final failed")
 
-    def write_vit(self, scan_num, batch_num: int, pred: np.ndarray, indices: np.ndarray) -> None:
+    def write_vit(self, batch_num: int, pred: np.ndarray, indices: np.ndarray) -> None:
+        if self._run_dir is None:
+            logger.warning("write_vit called before start_run; skipping")
+            return
         try:
-            save_dir = self._BASE
-            np.save(f"{save_dir}/vit_batch_{batch_num:06d}_pred.npy", pred)
-            np.save(f"{save_dir}/vit_batch_{batch_num:06d}_indices.npy", indices)
-            tmp = f"{save_dir}/_vit_pred_latest.tmp.npy"
+            np.save(f"{self._run_dir}/vit_batch_{batch_num:06d}_pred.npy", pred)
+            np.save(f"{self._run_dir}/vit_batch_{batch_num:06d}_indices.npy", indices)
+            tmp = f"{self._run_dir}/_vit_pred_latest.tmp.npy"
             np.save(tmp, pred)
-            os.replace(tmp, f"{save_dir}/vit_pred_latest.npy")
+            os.replace(tmp, f"{self._run_dir}/vit_pred_latest.npy")
         except Exception:
             logger.exception("_NpyFallbackWriter.write_vit failed")
 
