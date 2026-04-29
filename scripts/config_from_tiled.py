@@ -352,6 +352,9 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
 
     config.update(LEGACY_PTYCHO_DEFAULTS)
     config.update({
+        # Provenance for the per-run Tiled container metadata.
+        "raw_uid": run_uid,
+        "scan_id": str(scan_num),
         "working_directory": args.working_directory,
         "shm_name": f"ptycho_{scan_num}",
         "nx": str(args.nx),

@@ -153,7 +153,7 @@ def publish_eiger(
     n_frames, h, w = frames.shape
     dtype = frames.dtype
 
-    print(f"[eiger] publishing {n_frames} frames at {rate_hz} Hz on {endpoint}")
+    print(f"[eiger] publishing {n_frames} frames at {rate_hz} Hz on {endpoint}", flush=True)
 
     for frame_id, frame in enumerate(frames):
         header = json.dumps({"frame": frame_id, "series": 1}).encode()
@@ -166,7 +166,7 @@ def publish_eiger(
 
         time.sleep(interval)
 
-    print("[eiger] done")
+    print("[eiger] done", flush=True)
     socket.close()
     context.term()
 
@@ -214,7 +214,7 @@ def publish_panda(
         "hw_time_offset_ns": None,
     })
 
-    print(f"[panda]  publishing {n_points} positions at {rate_hz} Hz on {endpoint}")
+    print(f"[panda]  publishing {n_points} positions at {rate_hz} Hz on {endpoint}", flush=True)
 
     frame_number = 0
     for i in range(0, n_points, points_per_message):
@@ -243,7 +243,7 @@ def publish_panda(
         time.sleep(interval)
 
     socket.send_json({"msg_type": "stop", "emitted_frames": frame_number})
-    print("[panda]  done")
+    print("[panda]  done", flush=True)
     socket.close()
     context.term()
 
@@ -279,14 +279,14 @@ def load_scan_from_tiled(
     run = lookup_run(client, run_uid, tiled_url)
     scan_num = run.metadata.get("start", {}).get("scan_id", run_uid)
 
-    print(f"Loading frames for scan {scan_num} ({run_uid}) from tiled...")
+    print(f"Loading frames for scan {scan_num} ({run_uid}) from tiled...", flush=True)
     frames = run["primary"]["eiger2_image"].read()
     if frames.ndim == 4 and frames.shape[0] == 1:
         frames = frames[0]
     positions_x = run["primary"]["inenc2_val"].read().tolist()
     positions_y = run["primary"]["inenc3_val"].read().tolist()
 
-    print(f"Loaded {len(frames)} frames, shape={frames.shape}, dtype={frames.dtype}")
+    print(f"Loaded {len(frames)} frames, shape={frames.shape}, dtype={frames.dtype}", flush=True)
     return frames, positions_x, positions_y
 
 
@@ -320,7 +320,7 @@ def start_holoptycho_pipeline(args) -> None:
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
     result = _json_request(f"{hp_url}{endpoint}", method="POST", payload={"config": config})
-    print(f"[holoptycho] {result.get('detail', 'pipeline request submitted')}")
+    print(f"[holoptycho] {result.get('detail', 'pipeline request submitted')}", flush=True)
     if args.hp_startup_wait > 0:
         time.sleep(args.hp_startup_wait)
 
@@ -466,7 +466,7 @@ def main():
     eiger_thread.join()
     panda_thread.join()
 
-    print("Replay complete.")
+    print("Replay complete.", flush=True)
 
 
 if __name__ == "__main__":
