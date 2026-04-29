@@ -221,9 +221,32 @@ def test_logs_returns_last_n_lines(client, tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_model_swap_accepted(client):
-    with patch("holoptycho.server.model_manager.swap_model"):
+    with patch("holoptycho.server.api.threading.Thread") as mock_thread:
         resp = client.post("/model", json={"name": "ptycho_vit", "version": "3"})
     assert resp.status_code == 202
+    mock_thread.assert_called_once()
+    mock_thread.return_value.start.assert_called_once_with()
+
+
+def test_model_swap_persists_after_explicit_db_init(client):
+    from holoptycho.server.api import _swap_model_and_persist
+
+    with patch("holoptycho.server.api.model_manager.swap_model") as mock_swap, \
+         patch("holoptycho.server.api.db.init_db") as mock_init_db, \
+         patch("holoptycho.server.api.db.set_setting") as mock_set_setting:
+        mock_swap.side_effect = lambda *_args: state_module.state.update(
+            model_status="ready",
+            current_engine_path="/tmp/model.engine",
+            current_model_name="ptycho_vit",
+            current_model_version="3",
+        )
+
+        _swap_model_and_persist("ptycho_vit", "3")
+
+    mock_init_db.assert_called_once_with()
+    mock_set_setting.assert_any_call("current_engine_path", "/tmp/model.engine")
+    mock_set_setting.assert_any_call("current_model_name", "ptycho_vit")
+    mock_set_setting.assert_any_call("current_model_version", "3")
 
 
 def test_model_swap_conflict(client):

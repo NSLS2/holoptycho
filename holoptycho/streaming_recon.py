@@ -118,28 +118,6 @@ class StreamingPtychoRecon:
 
         # --- GPU buffers (allocated in gpu_setup) ---
         self.prb_d = None
-
-    def _required_object_shape(self, x_range_um: float, y_range_um: float) -> tuple[int, int]:
-        """Compute the object array shape required for a scan region.
-
-        This uses the same geometry-driven sizing for both preallocation in
-        ``gpu_setup()`` and per-scan validation in ``reset_for_scan()`` so the
-        two paths cannot drift apart.
-        """
-        if self.x_pixel_m <= 0 or self.y_pixel_m <= 0:
-            raise RuntimeError(
-                "Object shape cannot be computed before pixel sizes are initialized."
-            )
-
-        nx_obj = int(
-            self.nx_prb + np.ceil(abs(x_range_um) * 1e-6 / self.x_pixel_m) + self.obj_pad
-        )
-        ny_obj = int(
-            self.ny_prb + np.ceil(abs(y_range_um) * 1e-6 / self.y_pixel_m) + self.obj_pad
-        )
-        nx_obj += nx_obj % 2
-        ny_obj += ny_obj % 2
-        return nx_obj, ny_obj
         self.obj_d = None
         self.diff_d = None
         self.point_info_d = None
@@ -179,6 +157,8 @@ class StreamingPtychoRecon:
         # reads them in-process via SaveLiveResult). ---
         self.mmap_prb = None
         self.mmap_obj = None
+        self._mmap_obj_nx_base = 0
+        self._mmap_obj_ny_base = 0
 
         # --- cuFFT plans ---
         self.cufft_plan = None
@@ -192,6 +172,28 @@ class StreamingPtychoRecon:
         self.kernel_dm_update_mode_amp2 = None
         self.kernel_accumulate_obj_mode = None
         self.kernel_accumulate_prb_mode = None
+
+    def _required_object_shape(self, x_range_um: float, y_range_um: float) -> tuple[int, int]:
+        """Compute the object array shape required for a scan region.
+
+        This uses the same geometry-driven sizing for both preallocation in
+        ``gpu_setup()`` and per-scan validation in ``reset_for_scan()`` so the
+        two paths cannot drift apart.
+        """
+        if self.x_pixel_m <= 0 or self.y_pixel_m <= 0:
+            raise RuntimeError(
+                "Object shape cannot be computed before pixel sizes are initialized."
+            )
+
+        nx_obj = int(
+            self.nx_prb + np.ceil(abs(x_range_um) * 1e-6 / self.x_pixel_m) + self.obj_pad
+        )
+        ny_obj = int(
+            self.ny_prb + np.ceil(abs(y_range_um) * 1e-6 / self.y_pixel_m) + self.obj_pad
+        )
+        nx_obj += nx_obj % 2
+        ny_obj += ny_obj % 2
+        return nx_obj, ny_obj
 
     # ------------------------------------------------------------------
     # Setup / teardown

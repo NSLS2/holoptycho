@@ -193,6 +193,7 @@ def _swap_model_and_persist(name: str, version: Optional[str]):
     """Run model swap and persist results to DB."""
     model_manager.swap_model(name, version, state)
     if state.model_status == "ready":
+        db.init_db()
         db.set_setting("current_engine_path", state.current_engine_path)
         db.set_setting("current_model_name", state.current_model_name)
         db.set_setting("current_model_version", state.current_model_version)
