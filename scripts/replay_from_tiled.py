@@ -324,7 +324,18 @@ def start_holoptycho_pipeline(args) -> None:
     config = build_full_config(args.uid, tiled_url=config_tiled_url, args=args)
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
-    result = _json_request(f"{hp_url}{endpoint}", method="POST", payload={"config": config})
+    # Retry-with-backoff for the brief window where a prior runner thread is
+    # still finalizing — /status flips to "stopped" before the thread is fully
+    # joined, so /run or /restart can race and return 400.
+    for attempt in range(6):
+        try:
+            result = _json_request(f"{hp_url}{endpoint}", method="POST", payload={"config": config})
+            break
+        except RuntimeError as exc:
+            if "still shutting down" in str(exc) and attempt < 5:
+                time.sleep(2.0)
+                continue
+            raise
     print(f"[holoptycho] {result.get('detail', 'pipeline request submitted')}", flush=True)
     if args.hp_startup_wait > 0:
         time.sleep(args.hp_startup_wait)

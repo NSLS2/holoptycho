@@ -69,11 +69,15 @@ def start(state: AppState, config: dict | None = None) -> None:
             )
 
     # Guard against the race where stop() has been called but the thread
-    # hasn't exited yet.
+    # hasn't exited yet. Wait briefly for the prior thread before rejecting,
+    # so back-to-back stop+start works without an external retry loop.
     if _runner_thread is not None and _runner_thread.is_alive():
-        raise RuntimeError(
-            "Previous runner thread is still shutting down. Try again in a moment."
-        )
+        _runner_thread.join(timeout=30)
+        if _runner_thread.is_alive():
+            raise RuntimeError(
+                "Previous runner thread is still shutting down after 30 s. "
+                "Try again in a moment."
+            )
 
     # Validate required ZMQ env vars before doing anything else.
     missing = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v)]
@@ -149,10 +153,20 @@ def start(state: AppState, config: dict | None = None) -> None:
 
 
 def stop(state: AppState) -> None:
-    """Request the running Holoscan app to stop."""
+    """Request the running Holoscan app to flush, save final results, and stop.
+
+    Holoscan's synchronous Application.run() has no public interrupt hook, so
+    we ask the pipeline to terminate gracefully via PtychoRecon's natural
+    termination path: it sets _finish_event, PtychoRecon.compute() trips the
+    iteration-cap branch on the next tick, SaveResult fires write_final, and
+    the iteration loop goes quiescent. The runner thread does not exit (a
+    fresh /run will need to wait for it), but no more GPU work is queued.
+    """
     with state._lock:
         if state.status not in ("starting", "running"):
             raise RuntimeError(f"App is not running (status={state.status!r})")
 
+    from holoptycho import ptycho_holo
+    ptycho_holo._finish_event.set()
     state.update(status="stopped")
-    logger.info("Stop requested — pipeline will finish current iteration")
+    logger.info("Stop requested — flushing pipeline and saving final results")

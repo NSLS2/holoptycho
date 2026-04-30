@@ -1,11 +1,19 @@
 import logging
 import ast
+import threading
 import uuid
 from time import sleep
 import time
 
 import sys
 import os
+
+
+# Set by runner.stop() to ask the running pipeline to flush, save final
+# results, and stop iterating. PtychoRecon.compute() checks this on each tick
+# and trips the natural-termination path. Cleared by PtychoRecon.flush() at
+# the start of each new run.
+_finish_event = threading.Event()
 
 import numpy as np
 import cupy as cp
@@ -172,6 +180,7 @@ class PtychoRecon(Operator):
         self.it = 0
         self.it_last_update = np.inf
         self.it_ends_after = 30
+        self.n_iterations = int(getattr(param, "n_iterations", 500))
         self.pos_ready_num = 0
         self.frame_ready_num = 0
         self.points_total = 0
@@ -192,6 +201,7 @@ class PtychoRecon(Operator):
         self.probe_initialized = False
         self._iteration_started_logged = False
         self._last_recv_state = (-1, -1)
+        _finish_event.clear()
 
         # Reset the engine for a new scan region. This combines what the
         # HXN_development code called ``new_obj()`` + ``flush_live_recon()``:
@@ -222,6 +232,13 @@ class PtychoRecon(Operator):
         spec.output("output").condition(ConditionType.NONE)
 
     def compute(self,op_input,op_output,context):
+
+        # External stop request: trip the natural-termination path so SaveResult
+        # fires on this tick (write_final lands in Tiled), then go quiescent.
+        if _finish_event.is_set() and self.num_points_min < np.inf:
+            self.n_iterations = self.it
+            self._logger.info("Finish requested — flushing and saving final results")
+            _finish_event.clear()
 
         pos_ready_num = op_input.receive("pos_ready_num")
         
@@ -301,7 +318,19 @@ class PtychoRecon(Operator):
             #     np.save('diff_d.npy',self.recon.diff_d.get())
             #     np.save('point_info_d.npy',self.recon.point_info_d.get())
         
-        if self.it - self.it_last_update >= self.it_ends_after and self.num_points_min<np.inf:
+        # Terminate when we've either (a) finished collecting data and run
+        # `it_ends_after` more iterations, or (b) hit the configured iteration
+        # cap. Both gated on `num_points_min < inf` so we only fire once.
+        finished_collecting = (
+            self.it - self.it_last_update >= self.it_ends_after
+        )
+        hit_iteration_cap = self.it >= self.n_iterations
+        if (finished_collecting or hit_iteration_cap) and self.num_points_min < np.inf:
+            reason = "iteration cap" if hit_iteration_cap else "data collection complete"
+            self._logger.info(
+                "Iterative recon finishing (%s, it=%d, n_iterations=%d)",
+                reason, self.it, self.n_iterations,
+            )
             self.num_points_min = np.inf
             op_output.emit((self.recon,self.timestamp_iter,self.num_points_recv_iter),"output")
         sys.stdout.flush()
