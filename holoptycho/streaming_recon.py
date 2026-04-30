@@ -437,7 +437,11 @@ class StreamingPtychoRecon:
         self.x_range_um = float(abs(x_range_um))
         self.y_range_um = float(abs(y_range_um))
         self.num_points = int(num_points_max)
-        self.num_points_l = int(num_points_max)
+        # Note: do NOT mutate self.num_points_l here. It is the dimension of the
+        # GPU buffers (product_d, prb_obj_d, etc.) that were allocated once in
+        # gpu_setup() and intentionally not reallocated per scan. Shrinking it
+        # here desyncs the reshape calls in _recon_dm_batch from the actual
+        # buffer size and triggers a ValueError on the first iteration.
         self.num_points_recon = 0
         self.last = self.num_points_recon % self.gpu_batch_size
         self.current_it = 0

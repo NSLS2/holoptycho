@@ -285,6 +285,10 @@ class PtychoRecon(Operator):
             if self.it % 10 == 0:
                 prb_snap, obj_snap, it_num, scan_num = self.recon.snapshot()
                 op_output.emit((prb_snap, obj_snap, it_num, scan_num), "save_live_result")
+                self._logger.info(
+                    "Iteration %d (num_points_recon=%d)",
+                    self.it, int(self.recon.num_points_recon),
+                )
 
             self.it += 1
 

@@ -62,6 +62,12 @@ _handler.setFormatter(
 logging.getLogger().addHandler(_handler)
 logging.getLogger().setLevel(_resolve_log_level())
 
+# Silence chatty third-party loggers so the holoptycho log stays readable.
+# httpx in particular emits one INFO line per Tiled HTTP request (~6 per
+# iteration write), which buries our own INFO milestones.
+for _noisy in ("httpx", "httpcore", "tiled.client", "numba"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 logger = logging.getLogger("holoptycho.api")
 
 
