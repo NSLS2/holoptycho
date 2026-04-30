@@ -1,10 +1,35 @@
 from __future__ import annotations
 
-"""Runs the Holoscan application (PtychoApp) in a background thread and
-keeps AppState in sync with its lifecycle."""
+"""Runs the Holoscan application (PtychoApp) in a subprocess and keeps
+AppState in sync with its lifecycle.
 
+Why subprocess (not a thread or asyncio task in the API process)?
+
+Holoscan's GXF runtime, CUDA contexts, TensorRT engines, and CuPy memory
+pools don't fully release between back-to-back ``Application`` instances in
+the same Python process — confirmed by the Holoscan docs and by empirical
+testing (``cudaErrorIllegalAddress`` on the second ``run_async``). The SDK
+expects one application per process. Spawning a fresh subprocess per
+``/run`` gives us a guaranteed-clean CUDA context every time, and lets
+``/stop`` use OS signals (SIGUSR1 for graceful, SIGTERM/SIGKILL as escalation)
+which the OS guarantees to deliver — no SDK cooperation needed.
+
+Stop semantics (three-stage):
+
+1. SIGUSR1 — child sets ``_finish_event``, ``PtychoRecon.compute()`` trips
+   the iteration-cap branch on its next tick, ``SaveResult`` writes
+   ``final/`` to Tiled, ``fragment.stop_execution()`` releases the run loop,
+   the subprocess exits 0 cleanly. Preserves ``write_final``.
+2. SIGTERM — fallback if soft signal didn't drain within the grace window.
+3. SIGKILL — last resort if the subprocess is wedged in C++ code.
+"""
+
+import json
 import logging
 import os
+import signal
+import subprocess
+import sys
 import threading
 import time
 
@@ -13,12 +38,24 @@ from . import db
 
 logger = logging.getLogger("holoptycho.runner")
 
-# Module-level reference to the runner thread so we can check is_alive().
-_runner_thread: threading.Thread | None = None
+# Module-level handle to the running pipeline subprocess.
+_proc: subprocess.Popen | None = None
+_stop_requested: bool = False
+_state_lock = threading.Lock()
+
+# Soft stop window. Long enough for PtychoRecon to trip the iteration-cap
+# branch and for SaveResult to write_final to Tiled.
+_SOFT_STOP_TIMEOUT = 10.0
+# SIGTERM window. The Python signal handler runs at the next bytecode
+# boundary, but if compute() is in C code (CUDA, TensorRT) we wait for it.
+_SIGTERM_TIMEOUT = 10.0
+# SIGKILL is unconditional after this. The OS reclaims the CUDA context.
+_SIGKILL_TIMEOUT = 5.0
+# Race window in start() for any lingering subprocess from a prior /stop.
+_STARTUP_RACE_TIMEOUT = 30.0
 
 _REQUIRED_ENV_VARS = ("SERVER_STREAM_SOURCE", "PANDA_STREAM_SOURCE")
 
-# Config fields that must be present — no sensible default exists for these.
 _REQUIRED_CONFIG_FIELDS = (
     "scan_num",
     "nx", "ny",
@@ -32,35 +69,45 @@ _REQUIRED_CONFIG_FIELDS = (
 )
 
 
-def _run_app(app, state: AppState):
-    """Target function for the runner thread."""
-    try:
-        state.update(status="running", start_time=time.time(), error=None)
-        logger.info("Holoscan app starting")
-        app.run()
-        state.update(status="finished")
-        logger.info("Holoscan app finished normally")
-    except Exception as exc:
-        state.update(status="error", error=str(exc))
-        logger.exception("Holoscan app raised an exception")
+def _monitor(state: AppState, proc: subprocess.Popen):
+    """Wait on subprocess exit and translate returncode into state.status."""
+    rc = proc.wait()
+    with _state_lock:
+        stopped = _stop_requested
+    if rc == 0:
+        if stopped:
+            state.update(status="stopped")
+            logger.info("Pipeline subprocess stopped on request (rc=0)")
+        else:
+            state.update(status="finished")
+            logger.info("Pipeline subprocess finished normally (rc=0)")
+    elif stopped and rc < 0:
+        # Negative rc on POSIX = killed by signal; expected on hard stop.
+        state.update(status="stopped")
+        logger.info("Pipeline subprocess killed on stop request (signal=%d)", -rc)
+    else:
+        state.update(status="error", error=f"pipeline subprocess exited rc={rc}")
+        logger.error("Pipeline subprocess exited with error (rc=%d)", rc)
+    with _state_lock:
+        _clear_pipeline_state()
+
+
+def _clear_pipeline_state():
+    """Reset module-level handles. Caller must hold _state_lock."""
+    global _proc, _stop_requested
+    _proc = None
+    _stop_requested = False
 
 
 def start(state: AppState, config: dict | None = None) -> None:
-    """Start the Holoscan application in a daemon background thread.
+    """Start the Holoscan application as a subprocess.
 
-    Parameters
-    ----------
-    state:
-        Shared application state.
-    config:
-        Config dict to use for this run.  If None, the last config stored in
-        the DB is used.  Raises RuntimeError if neither is available.
-
-    Raises RuntimeError if an app is already running, if a previous runner
-    thread is still alive, if no config is available, or if required ZMQ
-    environment variables are not set.
+    Returns once the subprocess has been spawned and the config has been
+    delivered on its stdin. Raises ``RuntimeError`` if a previous subprocess
+    is still alive, if no config is available, or if required ZMQ env vars
+    are missing.
     """
-    global _runner_thread
+    global _proc, _stop_requested
 
     with state._lock:
         if state.status in ("starting", "running"):
@@ -68,15 +115,17 @@ def start(state: AppState, config: dict | None = None) -> None:
                 f"App is already {state.status}. Stop it first."
             )
 
-    # Guard against the race where stop() has been called but the thread
-    # hasn't exited yet. Wait briefly for the prior thread before rejecting,
-    # so back-to-back stop+start works without an external retry loop.
-    if _runner_thread is not None and _runner_thread.is_alive():
-        _runner_thread.join(timeout=30)
-        if _runner_thread.is_alive():
+    # Race-guard: if a previous subprocess hasn't exited yet (e.g. /stop was
+    # called but cleanup is in flight), wait briefly for it before rejecting.
+    with _state_lock:
+        prior = _proc
+    if prior is not None and prior.poll() is None:
+        try:
+            prior.wait(timeout=_STARTUP_RACE_TIMEOUT)
+        except subprocess.TimeoutExpired:
             raise RuntimeError(
-                "Previous runner thread is still shutting down after 30 s. "
-                "Try again in a moment."
+                f"Previous pipeline is still shutting down after "
+                f"{_STARTUP_RACE_TIMEOUT:.0f} s. Try again in a moment."
             )
 
     # Validate required ZMQ env vars before doing anything else.
@@ -88,7 +137,7 @@ def start(state: AppState, config: dict | None = None) -> None:
             "endpoints of the Eiger detector and PandA box respectively."
         )
 
-    # Resolve config: use provided config, fall back to last persisted config.
+    # Resolve config: use provided config, fall back to last persisted.
     if config is not None:
         db.set_last_config(config)
         state.update(last_config=config)
@@ -104,69 +153,151 @@ def start(state: AppState, config: dict | None = None) -> None:
     config_path = db.write_config_ini(config, CONFIG_DIR)
     logger.info("Config written to %s", config_path)
 
-    # Validate required config fields before importing heavy deps.
+    # Validate required config fields.
     missing_fields = [f for f in _REQUIRED_CONFIG_FIELDS if f not in config]
     if missing_fields:
         raise RuntimeError(
             f"Config is missing required field(s): {', '.join(missing_fields)}."
         )
 
-    # Import heavy GPU deps here so the FastAPI server can start without them.
-    try:
-        from holoptycho.ptycho_holo import PtychoApp
-    except ImportError as exc:
-        message = f"Failed to import Holoscan app: {exc}"
-        state.update(status="error", error=message, start_time=None)
-        logger.exception("Holoscan app import failed")
-        raise RuntimeError(message) from exc
+    # Build the subprocess env. Inherit everything (so SERVER_STREAM_SOURCE,
+    # PANDA_STREAM_SOURCE, AZURE_*, TILED_*, etc. all flow through), and add
+    # the path-knob env vars the entry-point script reads.
+    child_env = dict(os.environ)
+    child_env["HOLOPTYCHO_LOG_FILE"] = state.log_file
+    child_env["HOLOPTYCHO_CONFIG_PATH"] = str(config_path)
+    if state.current_engine_path:
+        child_env["HOLOPTYCHO_ENGINE_PATH"] = state.current_engine_path
 
-    resolved_engine = state.current_engine_path
+    # Reset stop bookkeeping before spawning.
+    with _state_lock:
+        _stop_requested = False
+
+    state.update(start_time=time.time(), error=None)
+
     try:
-        app = PtychoApp(
-            config_path=config_path,
-            config_overrides=config,
-            engine_path=resolved_engine,
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "holoptycho.server._pipeline_subprocess"],
+            stdin=subprocess.PIPE,
+            env=child_env,
+            # No need to capture stdout/stderr — the child writes to the
+            # shared log file via its own RotatingFileHandler.
         )
     except Exception as exc:
-        message = f"Failed to initialize Holoscan app: {exc}"
+        message = f"Failed to spawn pipeline subprocess: {exc}"
         state.update(status="error", error=message, start_time=None)
-        logger.exception(
-            "Holoscan app initialization failed (config_path=%s, engine_path=%s)",
-            config_path,
-            resolved_engine,
-        )
+        logger.exception("Popen failed")
         raise RuntimeError(message) from exc
 
-    state.update(
-        status="starting",
-        error=None,
-    )
+    try:
+        proc.stdin.write(json.dumps(config).encode())
+        proc.stdin.close()
+    except Exception as exc:
+        # If config delivery failed, kill the orphan and bail.
+        proc.kill()
+        proc.wait(timeout=5)
+        message = f"Failed to deliver config to pipeline subprocess: {exc}"
+        state.update(status="error", error=message, start_time=None)
+        raise RuntimeError(message) from exc
 
-    _runner_thread = threading.Thread(
-        target=_run_app,
-        args=(app, state),
+    with _state_lock:
+        _proc = proc
+
+    state.update(status="running")
+    logger.info("Pipeline subprocess started (pid=%d)", proc.pid)
+
+    monitor = threading.Thread(
+        target=_monitor,
+        args=(state, proc),
         daemon=True,
-        name="holoscan-runner",
+        name="holoscan-monitor",
     )
-    _runner_thread.start()
-    logger.info("Runner thread started")
+    monitor.start()
 
 
 def stop(state: AppState) -> None:
-    """Request the running Holoscan app to flush, save final results, and stop.
+    """Stop the running pipeline subprocess: SIGUSR1 → SIGTERM → SIGKILL.
 
-    Holoscan's synchronous Application.run() has no public interrupt hook, so
-    we ask the pipeline to terminate gracefully via PtychoRecon's natural
-    termination path: it sets _finish_event, PtychoRecon.compute() trips the
-    iteration-cap branch on the next tick, SaveResult fires write_final, and
-    the iteration loop goes quiescent. The runner thread does not exit (a
-    fresh /run will need to wait for it), but no more GPU work is queued.
+    Blocks until the subprocess has exited and ``state.status`` has reached
+    a terminal value. Raises ``RuntimeError`` if the pipeline is not running.
     """
+    global _stop_requested
+
     with state._lock:
         if state.status not in ("starting", "running"):
             raise RuntimeError(f"App is not running (status={state.status!r})")
 
-    from holoptycho import ptycho_holo
-    ptycho_holo._finish_event.set()
-    state.update(status="stopped")
-    logger.info("Stop requested — flushing pipeline and saving final results")
+    with _state_lock:
+        proc = _proc
+        _stop_requested = True
+
+    if proc is None:
+        # Status was "running" but we have no proc handle; defensively flip.
+        state.update(status="stopped")
+        return
+
+    # Stage 1: SIGUSR1 — graceful, preserves write_final.
+    logger.info("Stop requested — sending SIGUSR1 (graceful) to pid=%d", proc.pid)
+    try:
+        proc.send_signal(signal.SIGUSR1)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=_SOFT_STOP_TIMEOUT)
+        _await_status_terminal(state)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    # Stage 2: SIGTERM.
+    logger.warning(
+        "SIGUSR1 grace expired (%.1f s) — sending SIGTERM to pid=%d",
+        _SOFT_STOP_TIMEOUT, proc.pid,
+    )
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=_SIGTERM_TIMEOUT)
+        _await_status_terminal(state)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+
+    # Stage 3: SIGKILL.
+    logger.error(
+        "SIGTERM grace expired (%.1f s) — sending SIGKILL to pid=%d",
+        _SIGTERM_TIMEOUT, proc.pid,
+    )
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=_SIGKILL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        # OS-level SIGKILL not delivered — extremely unusual. Best we can
+        # do is raise; the next /run will hit the race-guard and fail until
+        # the kernel reaps the zombie.
+        raise RuntimeError(
+            f"Pipeline subprocess (pid={proc.pid}) did not exit after SIGKILL "
+            f"within {_SIGKILL_TIMEOUT:.0f} s. Kernel-level reap pending."
+        )
+
+    _await_status_terminal(state)
+
+
+def _await_status_terminal(state: AppState, timeout: float = 2.0) -> None:
+    """Wait briefly for the monitor thread to publish a terminal status.
+
+    The monitor thread runs after proc.wait() returns, so there's a small
+    window where stop() returns before status has flipped. Spin briefly so
+    callers see a consistent state on return.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with state._lock:
+            if state.status in ("stopped", "finished", "error"):
+                return
+        time.sleep(0.05)

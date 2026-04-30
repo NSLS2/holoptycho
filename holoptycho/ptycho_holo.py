@@ -190,6 +190,7 @@ class PtychoRecon(Operator):
         self._logger = logging.getLogger("PtychoRecon")
         self._iteration_started_logged = False
         self._last_recv_state = (-1, -1)
+        self._stop_execution_called = False
 
     def flush(self,param):
 
@@ -201,6 +202,7 @@ class PtychoRecon(Operator):
         self.probe_initialized = False
         self._iteration_started_logged = False
         self._last_recv_state = (-1, -1)
+        self._stop_execution_called = False
         _finish_event.clear()
 
         # Reset the engine for a new scan region. This combines what the
@@ -239,6 +241,19 @@ class PtychoRecon(Operator):
             self.n_iterations = self.it
             self._logger.info("Finish requested — flushing and saving final results")
             _finish_event.clear()
+
+        # If termination was emitted on a previous tick, SaveResult has had
+        # at least one full tick to run (its message is queued; the scheduler
+        # ticks downstream ops between our compute() calls). Now ask Holoscan
+        # to exit the run loop so app.run_async() Future resolves and the
+        # API status flips to "finished".
+        if self.num_points_min == np.inf and not self._stop_execution_called:
+            self._logger.info("Calling fragment.stop_execution() to release run_async")
+            try:
+                self.fragment.stop_execution()
+            except Exception:
+                self._logger.exception("stop_execution() raised")
+            self._stop_execution_called = True
 
         pos_ready_num = op_input.receive("pos_ready_num")
         
