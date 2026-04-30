@@ -7,6 +7,7 @@ Holoscan app never actually launches.
 import json
 import os
 import threading
+from concurrent.futures import Future
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -127,17 +128,22 @@ def test_run_returns_400_if_already_running(client):
     assert resp.status_code == 400
 
 
-def test_run_blocked_while_thread_alive(client):
+def test_run_blocked_while_pipeline_active(client):
+    """A prior pipeline whose Future hasn't resolved should block a new /run."""
     import holoptycho.server.runner as runner_mod
-    fake_thread = MagicMock(spec=threading.Thread)
-    fake_thread.is_alive.return_value = True
-    runner_mod._runner_thread = fake_thread
+    fake_future = MagicMock(spec=Future)
+    fake_future.done.return_value = False
+    runner_mod._app_future = fake_future
     try:
-        with patch("holoptycho.server.runner.start", side_effect=RuntimeError("shutting down")):
+        with patch(
+            "holoptycho.server.runner.start",
+            side_effect=RuntimeError("Previous pipeline is still shutting down"),
+        ):
             resp = client.post("/run", json={"config": _VALID_CONFIG})
         assert resp.status_code == 400
+        assert "shutting down" in resp.json()["detail"]
     finally:
-        runner_mod._runner_thread = None
+        runner_mod._app_future = None
 
 
 def test_run_no_body_uses_last_config(client):
@@ -172,8 +178,7 @@ def test_stop_when_not_running(client):
 def test_restart_running_app(client):
     state_module.state.update(status="running", last_config=_VALID_CONFIG)
     with patch("holoptycho.server.runner.stop"), \
-         patch("holoptycho.server.runner.start") as mock_start, \
-         patch("holoptycho.server.runner._runner_thread", None):
+         patch("holoptycho.server.runner.start") as mock_start:
         resp = client.post("/restart")
     assert resp.status_code == 202
     mock_start.assert_called_once_with(state=state_module.state, config=None)
@@ -183,8 +188,7 @@ def test_restart_with_new_config(client):
     state_module.state.update(status="running", last_config=_VALID_CONFIG)
     new_config = {**_VALID_CONFIG, "scan_num": "320046"}
     with patch("holoptycho.server.runner.stop"), \
-         patch("holoptycho.server.runner.start") as mock_start, \
-         patch("holoptycho.server.runner._runner_thread", None):
+         patch("holoptycho.server.runner.start") as mock_start:
         resp = client.post("/restart", json={"config": new_config})
     assert resp.status_code == 202
     mock_start.assert_called_once_with(state=state_module.state, config=new_config)

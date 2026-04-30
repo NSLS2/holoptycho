@@ -36,6 +36,15 @@ async def lifespan(app):
         logging.getLevelName(logging.getLogger().level),
     )
     yield
+    # On container/uvicorn shutdown, drain any in-flight pipeline so
+    # write_final lands and the GPU/runtime is cleanly released. Soft+hard
+    # stop is bounded at ~20 s, well under k8s terminationGracePeriodSeconds=30.
+    if runner._app_future is not None and not runner._app_future.done():
+        logger.info("API shutting down — stopping in-flight pipeline")
+        try:
+            runner.stop(state=state)
+        except Exception:
+            logger.exception("Pipeline stop failed during API shutdown")
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +146,12 @@ def post_stop():
 
 @app.post("/restart", status_code=202)
 def post_restart(req: RunRequest = RunRequest()):
-    """Stop the running app and restart it, optionally with a new config."""
+    """Stop the running app and restart it, optionally with a new config.
+
+    runner.stop() blocks until the pipeline has fully exited (soft+hard stop
+    sequence handles all cases internally), so /restart is just stop+start
+    with no extra bookkeeping required.
+    """
     with state._lock:
         current_status = state.status
 
@@ -152,16 +166,6 @@ def post_restart(req: RunRequest = RunRequest()):
             runner.stop(state=state)
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
-
-    import holoptycho.server.runner as runner_mod
-    thread = runner_mod._runner_thread
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=30)
-        if thread.is_alive():
-            raise HTTPException(
-                status_code=500,
-                detail="Runner thread did not exit within 30 s — cannot restart safely.",
-            )
 
     try:
         runner.start(state=state, config=req.config)
