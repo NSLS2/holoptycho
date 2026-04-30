@@ -67,9 +67,43 @@ def _install_finish_handler() -> None:
     signal.signal(signal.SIGUSR1, _handler)
 
 
+def _write_work_complete_sentinel() -> None:
+    """Drop a sentinel file when the natural-termination path completes.
+
+    Holoscan's TensorRT/CUDA destructors abort with SIGABRT during operator
+    teardown in dual-mode runs, even after the work has fully completed
+    (write_final landed, ``fragment.stop_execution()`` returned). A Python
+    signal handler can't catch this — ``abort()`` runs Python's flag-setting
+    C handler then re-raises with SIG_DFL before Python's main thread reaches
+    a bytecode to dispatch the Python-level handler.
+
+    Workaround: have ``ptycho_holo`` set ``_work_complete`` after
+    ``fragment.stop_execution()``, and a background thread here writes a
+    sentinel file the parent reads after ``proc.wait()``. If the sentinel
+    exists and rc < 0, the parent classifies the run as ``finished`` instead
+    of ``error``.
+    """
+    sentinel = os.environ.get("HOLOPTYCHO_COMPLETE_SENTINEL")
+    if not sentinel:
+        return
+
+    def _watcher():
+        from holoptycho import ptycho_holo
+        ptycho_holo._work_complete.wait()
+        try:
+            Path(sentinel).touch()
+        except OSError:
+            logger.exception("Failed to write work-complete sentinel")
+
+    import threading
+    t = threading.Thread(target=_watcher, daemon=True, name="work-complete-watcher")
+    t.start()
+
+
 def main() -> int:
     _configure_logging()
     _install_finish_handler()
+    _write_work_complete_sentinel()
 
     raw = sys.stdin.read()
     if not raw.strip():
@@ -117,4 +151,10 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # Skip the Python interpreter's normal shutdown. Holoscan's TensorRT/CUDA
+    # destructors can SIGABRT during interpreter teardown even after a clean
+    # app.run() return — observed in dual-mode (vit + iterative) runs. The OS
+    # reclaims all process resources, so there is nothing left to clean up.
+    logging.shutdown()
+    os._exit(rc)

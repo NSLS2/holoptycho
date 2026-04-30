@@ -33,6 +33,8 @@ import sys
 import threading
 import time
 
+from pathlib import Path
+
 from .state import AppState, CONFIG_DIR
 from . import db
 
@@ -42,6 +44,12 @@ logger = logging.getLogger("holoptycho.runner")
 _proc: subprocess.Popen | None = None
 _stop_requested: bool = False
 _state_lock = threading.Lock()
+
+# Sentinel file the subprocess touches after fragment.stop_execution() returns.
+# We classify rc<0 + sentinel-present as "finished" instead of "error" because
+# Holoscan's TensorRT/CUDA destructors can SIGABRT during operator teardown
+# even after the work fully completed.
+_WORK_COMPLETE_SENTINEL = Path("/tmp/holoptycho_work_complete")
 
 # Soft stop window. Long enough for PtychoRecon to trip the iteration-cap
 # branch and for SaveResult to write_final to Tiled.
@@ -74,6 +82,7 @@ def _monitor(state: AppState, proc: subprocess.Popen):
     rc = proc.wait()
     with _state_lock:
         stopped = _stop_requested
+    work_complete = _WORK_COMPLETE_SENTINEL.exists()
     if rc == 0:
         if stopped:
             state.update(status="stopped")
@@ -85,6 +94,14 @@ def _monitor(state: AppState, proc: subprocess.Popen):
         # Negative rc on POSIX = killed by signal; expected on hard stop.
         state.update(status="stopped")
         logger.info("Pipeline subprocess killed on stop request (signal=%d)", -rc)
+    elif work_complete:
+        # Holoscan teardown abort after work was fully completed (write_final
+        # landed, stop_execution returned). Treat as a normal finish.
+        state.update(status="finished")
+        logger.warning(
+            "Pipeline subprocess crashed during teardown (rc=%d) but work "
+            "completed; classifying as finished", rc,
+        )
     else:
         state.update(status="error", error=f"pipeline subprocess exited rc={rc}")
         logger.error("Pipeline subprocess exited with error (rc=%d)", rc)
@@ -166,8 +183,12 @@ def start(state: AppState, config: dict | None = None) -> None:
     child_env = dict(os.environ)
     child_env["HOLOPTYCHO_LOG_FILE"] = state.log_file
     child_env["HOLOPTYCHO_CONFIG_PATH"] = str(config_path)
+    child_env["HOLOPTYCHO_COMPLETE_SENTINEL"] = str(_WORK_COMPLETE_SENTINEL)
     if state.current_engine_path:
         child_env["HOLOPTYCHO_ENGINE_PATH"] = state.current_engine_path
+
+    # Clear stale sentinel from any prior run.
+    _WORK_COMPLETE_SENTINEL.unlink(missing_ok=True)
 
     # Reset stop bookkeeping before spawning.
     with _state_lock:

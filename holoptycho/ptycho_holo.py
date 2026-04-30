@@ -15,6 +15,12 @@ import os
 # the start of each new run.
 _finish_event = threading.Event()
 
+# Set by PtychoRecon.compute() right after fragment.stop_execution() returns,
+# meaning the natural-termination path completed (write_final landed, scheduler
+# winding down). The subprocess SIGABRT handler reads this to convert a
+# Holoscan teardown crash into rc=0.
+_work_complete = threading.Event()
+
 import numpy as np
 import cupy as cp
 from numba import cuda
@@ -204,6 +210,7 @@ class PtychoRecon(Operator):
         self._last_recv_state = (-1, -1)
         self._stop_execution_called = False
         _finish_event.clear()
+        _work_complete.clear()
 
         # Reset the engine for a new scan region. This combines what the
         # HXN_development code called ``new_obj()`` + ``flush_live_recon()``:
@@ -254,6 +261,7 @@ class PtychoRecon(Operator):
             except Exception:
                 self._logger.exception("stop_execution() raised")
             self._stop_execution_called = True
+            _work_complete.set()
 
         pos_ready_num = op_input.receive("pos_ready_num")
         
