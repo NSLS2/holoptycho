@@ -36,10 +36,11 @@ async def lifespan(app):
         logging.getLevelName(logging.getLogger().level),
     )
     yield
-    # On container/uvicorn shutdown, drain any in-flight pipeline so
-    # write_final lands and the GPU/runtime is cleanly released. Soft+hard
-    # stop is bounded at ~20 s, well under k8s terminationGracePeriodSeconds=30.
-    if runner._app_future is not None and not runner._app_future.done():
+    # On container/uvicorn shutdown, drain any in-flight pipeline subprocess
+    # so write_final lands and the GPU is cleanly released. The three-stage
+    # SIGUSR1/SIGTERM/SIGKILL sequence is bounded at ~25 s, under k8s
+    # terminationGracePeriodSeconds=30.
+    if runner._proc is not None and runner._proc.poll() is None:
         logger.info("API shutting down — stopping in-flight pipeline")
         try:
             runner.stop(state=state)

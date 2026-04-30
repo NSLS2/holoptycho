@@ -7,7 +7,6 @@ Holoscan app never actually launches.
 import json
 import os
 import threading
-from concurrent.futures import Future
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -129,11 +128,11 @@ def test_run_returns_400_if_already_running(client):
 
 
 def test_run_blocked_while_pipeline_active(client):
-    """A prior pipeline whose Future hasn't resolved should block a new /run."""
+    """A prior pipeline subprocess that hasn't exited should block a new /run."""
     import holoptycho.server.runner as runner_mod
-    fake_future = MagicMock(spec=Future)
-    fake_future.done.return_value = False
-    runner_mod._app_future = fake_future
+    fake_proc = MagicMock()
+    fake_proc.poll.return_value = None
+    runner_mod._proc = fake_proc
     try:
         with patch(
             "holoptycho.server.runner.start",
@@ -143,7 +142,7 @@ def test_run_blocked_while_pipeline_active(client):
         assert resp.status_code == 400
         assert "shutting down" in resp.json()["detail"]
     finally:
-        runner_mod._app_future = None
+        runner_mod._proc = None
 
 
 def test_run_no_body_uses_last_config(client):
