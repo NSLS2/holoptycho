@@ -112,16 +112,24 @@ def _descend_tiled_path(node, path_parts: list[str], tiled_url: str):
     return node
 
 
-def open_tiled_node(tiled_url: str):
+def open_tiled_node(tiled_url: str, *, timeout_s: float = 300.0):
     """Open a Tiled server root or a catalog path URL.
 
     ``tiled.client.from_uri`` expects a server URL, not necessarily a catalog
     path like ``https://tiled.nsls2.bnl.gov/hxn/raw``. Try the URL directly
     first, then peel off trailing path segments until a server root is found and
     descend into the catalog path manually.
+
+    ``timeout_s`` controls the httpx read timeout. The migration server is
+    sometimes very slow for HXN raw eiger frames, so we default well above
+    the httpx 30s default to avoid spurious ReadTimeout failures.
     """
+    import httpx
+
+    timeout = httpx.Timeout(connect=10.0, read=timeout_s, write=10.0, pool=10.0)
+
     try:
-        return from_uri(tiled_url)
+        return from_uri(tiled_url, timeout=timeout)
     except ClientError as exc:
         if not _is_not_found(exc):
             raise
@@ -135,7 +143,7 @@ def open_tiled_node(tiled_url: str):
         base_path = "/" + "/".join(path_parts[:split_index]) if split_index else ""
         base_url = urlunsplit((parsed.scheme, parsed.netloc, base_path, parsed.query, parsed.fragment))
         try:
-            root = from_uri(base_url)
+            root = from_uri(base_url, timeout=timeout)
         except ClientError as exc:
             if _is_not_found(exc):
                 continue
@@ -145,23 +153,77 @@ def open_tiled_node(tiled_url: str):
     return from_uri(tiled_url)
 
 
+def _has_streams(run) -> bool:
+    """Check whether a run exposes both primary and baseline streams.
+
+    HXN tiled has three known layouts:
+    * legacy migration: ``run/primary`` and ``run/baseline``
+    * newer migration:  ``run/streams/primary`` and ``run/streams/baseline``
+    * newer raw:        ``run/primary/data`` and ``run/baseline/data``
+
+    Stub entries (e.g. migration redirect placeholders) only have a subset of
+    these and 404 on actual reads.
+    """
+    try:
+        keys = set(list(run))
+    except Exception:
+        return False
+    if {"primary", "baseline"}.issubset(keys):
+        return True
+    if "streams" in keys:
+        try:
+            sub = set(list(run["streams"]))
+        except Exception:
+            return False
+        return {"primary", "baseline"}.issubset(sub)
+    return False
+
+
+def get_stream(run, stream_name: str):
+    """Return the array-level node for a stream, handling all known layouts."""
+    keys = list(run)
+    node = run["streams"][stream_name] if "streams" in keys else run[stream_name]
+    return node["data"] if "data" in list(node) else node
+
+
 def lookup_run(client, run_uid: str, tiled_url: str):
     candidates = [client]
 
-    for path_parts in (("hxn", "migration"), ("hxn", "raw")):
-        node = client
-        try:
-            for path_part in path_parts:
-                node = node[path_part]
-        except KeyError:
-            continue
-        candidates.append(node)
+    # Also try descending from the tiled root, so a user passing
+    # --tiled-url .../hxn/migration can still find runs that only live in raw.
+    parsed = urlsplit(tiled_url)
+    root_url = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    try:
+        candidates.append(from_uri(root_url))
+    except Exception:
+        pass
 
+    for candidate in list(candidates):
+        for path_parts in (("hxn", "migration"), ("hxn", "raw")):
+            node = candidate
+            try:
+                for path_part in path_parts:
+                    node = node[path_part]
+            except KeyError:
+                continue
+            candidates.append(node)
+
+    # Prefer entries that actually expose primary + baseline data (any layout).
+    # Stub entries are deferred to fallback so we still return something usable
+    # if no fully-populated entry exists.
+    fallback = None
     for candidate in candidates:
         try:
-            return candidate[run_uid]
+            run = candidate[run_uid]
         except KeyError:
             continue
+        if _has_streams(run):
+            return run
+        if fallback is None:
+            fallback = run
+
+    if fallback is not None:
+        return fallback
 
     print(
         f"ERROR: run UID {run_uid!r} not found in tiled catalog at {tiled_url}",
@@ -230,9 +292,10 @@ def load_config_from_tiled(
     x_ratio = _ratio_from_scale(start.get("x_scale_factor"))
     y_ratio = _ratio_from_scale(start.get("z_scale_factor"))
 
+    baseline = get_stream(run, "baseline")
+
     # --- Energy ---
     try:
-        baseline = run["baseline"]
         dcm_th = float(baseline["dcm_th"].read()[0])
         energy_kev = _energy_from_dcm_th(dcm_th)
     except Exception as exc:

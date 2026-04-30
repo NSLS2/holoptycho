@@ -50,7 +50,18 @@ def _configure_logging() -> None:
     root.setLevel(getattr(logging, level_name, logging.INFO))
 
     # Same third-party silencing the API does, for symmetry.
-    for noisy in ("httpx", "httpcore", "tiled.client", "numba"):
+    for noisy in (
+        "httpx",
+        "httpcore",
+        "tiled.client",
+        "numba",
+        "azure",
+        "azure.core",
+        "azure.identity",
+        "azure.ai.ml",
+        "msal",
+        "urllib3",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 

@@ -51,6 +51,7 @@ import zmq
 from config_from_tiled import (
     add_reconstruction_arguments,
     build_full_config,
+    get_stream,
     lookup_run,
     open_tiled_node,
 )
@@ -256,6 +257,7 @@ def load_scan_from_tiled(
     tiled_url: str,
     run_uid: str,
     api_key: str = "",
+    max_frames: int | None = None,
 ) -> tuple[np.ndarray, list, list]:
     """Load diffraction frames and motor positions for a run from tiled.
 
@@ -279,12 +281,61 @@ def load_scan_from_tiled(
     run = lookup_run(client, run_uid, tiled_url)
     scan_num = run.metadata.get("start", {}).get("scan_id", run_uid)
 
-    print(f"Loading frames for scan {scan_num} ({run_uid}) from tiled...", flush=True)
-    frames = run["primary"]["eiger2_image"].read()
+    stream = get_stream(run, "primary")
+
+    # Detector name varies by scan: eiger2 used the explicit "_image" suffix,
+    # eiger1 puts the image array under the bare detector name.
+    detector_candidates = ("eiger2_image", "eiger1_image", "eiger2", "eiger1")
+    detector_key = next((k for k in detector_candidates if k in list(stream)), None)
+    if detector_key is None:
+        raise KeyError(
+            f"No known eiger detector found in stream. Tried: {detector_candidates}. "
+            f"Available keys: {list(stream)[:30]}"
+        )
+
+    # Motor encoder channels also differ between scans.
+    x_candidates = ("inenc2_val", "zpssx")
+    y_candidates = ("inenc3_val", "zpssy")
+    x_key = next((k for k in x_candidates if k in list(stream)), None)
+    y_key = next((k for k in y_candidates if k in list(stream)), None)
+    if x_key is None or y_key is None:
+        raise KeyError(
+            f"No known motor encoders found. Tried x={x_candidates} y={y_candidates}. "
+            f"Available keys: {list(stream)[:30]}"
+        )
+
+    slice_msg = f", first {max_frames}" if max_frames else ""
+    print(
+        f"Loading frames for scan {scan_num} ({run_uid}) from tiled "
+        f"[detector={detector_key}, x={x_key}, y={y_key}{slice_msg}]...",
+        flush=True,
+    )
+    frames_node = stream[detector_key]
+    n_total = frames_node.shape[0]
+    n_frames = min(max_frames, n_total) if max_frames is not None else n_total
+
+    # HXN tiled stores per-frame chunks (chunks=(1,1,1,...) along axis 0). One
+    # big slice expands into thousands of tiny per-chunk HTTP requests and the
+    # server times some of them out. Read in larger batches so each HTTP
+    # request returns ~hundreds of MB and concatenate.
+    batch_size = 500
+    parts = []
+    for start in range(0, n_frames, batch_size):
+        stop = min(start + batch_size, n_frames)
+        parts.append(np.asarray(frames_node[start:stop]))
+        print(f"  ... read {stop}/{n_frames} frames", flush=True)
+    frames = np.concatenate(parts, axis=0)
+
     if frames.ndim == 4 and frames.shape[0] == 1:
         frames = frames[0]
-    positions_x = run["primary"]["inenc2_val"].read().tolist()
-    positions_y = run["primary"]["inenc3_val"].read().tolist()
+    elif frames.ndim == 4 and frames.shape[1] == 1:
+        # (N, 1, H, W) layout used by some eiger1 scans — squeeze the spurious axis.
+        frames = frames[:, 0]
+    positions_x = stream[x_key].read().tolist()
+    positions_y = stream[y_key].read().tolist()
+    if max_frames is not None:
+        positions_x = positions_x[:max_frames]
+        positions_y = positions_y[:max_frames]
 
     print(f"Loaded {len(frames)} frames, shape={frames.shape}, dtype={frames.dtype}", flush=True)
     return frames, positions_x, positions_y
@@ -430,6 +481,12 @@ def parse_args():
         default="/INENC3.VAL.Value",
         help="PandA y-axis channel name (default: /INENC3.VAL.Value)",
     )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=None,
+        help="Truncate the scan to the first N frames (handy for quick tests on big scans)",
+    )
     return parser.parse_args()
 
 
@@ -448,6 +505,7 @@ def main():
         tiled_url=args.tiled_url,
         api_key=args.tiled_api_key,
         run_uid=args.uid,
+        max_frames=args.max_frames,
     )
 
     # Run Eiger and PandA publishers concurrently
