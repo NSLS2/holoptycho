@@ -357,6 +357,28 @@ For same-node testing with the replay script, `localhost` only works if the
 container is started with `--network host`. With bridge networking, `localhost`
 inside the container refers to the container itself, not the Slurm node host.
 
+### Useful replay flags
+
+These flags only take effect when `--hp-start` is used (they're written into
+the config the replay script POSTs to holoptycho):
+
+- **`--recon-mode {iterative,vit,both}`** — which reconstruction branches the
+  pipeline wires up. `iterative` runs only the DM/ML solver, `vit` runs only
+  the ViT inference network, and `both` (default) runs them in parallel.
+  Useful for isolating GPU-contention issues on single-GPU nodes or for
+  comparing the two outputs side by side in Tiled (`live/` + `final/` come
+  from iterative; `vit/` comes from the ViT branch).
+- **`--n-iterations N`** — caps the iterative solver at `N` ticks
+  (default 500). Once the iteration counter hits the cap, holoptycho trips
+  the natural-termination path: `SaveResult` writes the final
+  probe/object/timestamps to Tiled, then `fragment.stop_execution()`
+  releases the run loop and the pipeline subprocess exits. Use a small
+  value (50–100) for end-to-end smoke tests; use the production value
+  (~500) for real reconstructions.
+- **`--max-frames N`** — only publishes the first `N` frames of the scan,
+  trimming positions to match. Handy for quick tests on big scans where
+  downloading and replaying every frame would take too long.
+
 ---
 
 ## Local development
