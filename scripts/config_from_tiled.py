@@ -31,7 +31,18 @@ from tiled.client import from_uri
 from tiled.client.utils import ClientError
 
 TILED_URL = "https://tiled.nsls2.bnl.gov"
-CCD_PIXEL_UM = 55.0  # HXN Eiger pixel size (µm) — hard-coded, matches ptycho_gui
+
+# Per-detector pixel size (µm). Dectris Eigers are 75 µm; Merlin/Maxipix are
+# 55 µm. The legacy ptycho_gui defaulted to 55 µm regardless, which was
+# silently wrong for eiger2/eiger1 scans — fix that by looking up by detector.
+DETECTOR_PIXEL_UM = {
+    "eiger1": 75.0,
+    "eiger2": 75.0,
+    "merlin": 55.0,
+    "merlin1": 55.0,
+    "maxipix": 55.0,
+}
+DEFAULT_CCD_PIXEL_UM = 75.0  # HXN's primary detectors are eigers
 
 LEGACY_PTYCHO_DEFAULTS = {
     "mode_flag": "False",
@@ -250,8 +261,12 @@ def _energy_from_dcm_th(dcm_th_deg: float) -> float:
 
 
 def _lambda_from_energy(energy_kev: float) -> float:
-    """Convert energy (keV) to wavelength (nm)."""
-    return (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
+    """Convert energy (keV) to wavelength (nm) using the legacy ptycho_gui
+    convention ``λ = 1.2398 / E``.  This matches the value
+    ``streaming_recon.gpu_setup`` falls back to when ``lambda_nm`` is missing
+    from the config, so the two stay in lockstep.
+    """
+    return 1.2398 / energy_kev
 
 
 def _ratio_from_scale(scale_factor: float | int | None) -> float:
@@ -289,10 +304,15 @@ def load_config_from_tiled(
     plan_name = start.get("plan_name", "")
     plan_args = start.get("plan_args", {})
     scan_md = start.get("scan", {})
+    # Encoder counts → microns. The scale factors are positive but the legacy
+    # ptycho code stores them as a negative ratio.
+    x_scale = float(start.get("x_scale_factor") or 0.0)
+    y_scale = float(start.get("z_scale_factor") or 0.0)
     x_ratio = _ratio_from_scale(start.get("x_scale_factor"))
     y_ratio = _ratio_from_scale(start.get("z_scale_factor"))
 
     baseline = get_stream(run, "baseline")
+    primary_keys = list(get_stream(run, "primary"))
 
     # --- Energy ---
     try:
@@ -303,6 +323,13 @@ def load_config_from_tiled(
         energy_kev = 0.0
 
     # --- Scan geometry ---
+    # The legacy ptycho_gui config records:
+    #   * x_range / y_range as the *raw* span between scan endpoints
+    #   * dr_x / dr_y as the per-step distance scaled by the encoder
+    #     calibration (scale_factor) so they reflect the physical motor step
+    #     in microns
+    # The 2D_FLY_PANDA branch was previously subtracting one dr from the range
+    # and storing the *unscaled* dr — both wrong relative to ptycho_gui output.
     try:
         if scan_md.get("type") == "2D_FLY_PANDA" and len(scan_md.get("scan_input", [])) >= 6:
             scan_input = scan_md["scan_input"]
@@ -310,10 +337,8 @@ def load_config_from_tiled(
             y_range = scan_input[4] - scan_input[3]
             x_num = int(scan_input[2])
             y_num = int(scan_input[5])
-            dr_x = x_range / x_num
-            dr_y = y_range / y_num
-            x_range -= dr_x
-            y_range -= dr_y
+            dr_x = (x_range / x_num) * (x_scale or 1.0)
+            dr_y = (y_range / y_num) * (y_scale or 1.0)
         elif plan_name == "FlyPlan2D":
             x_range = plan_args["scan_end1"] - plan_args["scan_start1"]
             y_range = plan_args["scan_end2"] - plan_args["scan_start2"]
@@ -361,12 +386,32 @@ def load_config_from_tiled(
 
     lambda_nm = _lambda_from_energy(energy_kev) if energy_kev > 0 else 0.0
 
+    # --- Detector kind + pixel size ---
+    # The image stream key in primary tells us which detector recorded the
+    # diffraction frames. Fall back to ``scan["detectors"]`` for older runs
+    # that store the array under a non-standard key.
+    detector_keys = ("eiger2_image", "eiger1_image", "eiger2", "eiger1")
+    detectorkind = next((k for k in detector_keys if k in primary_keys), "")
+    if not detectorkind:
+        for d in scan_md.get("detectors") or []:
+            if d.startswith(("eiger", "merlin", "maxipix")):
+                detectorkind = f"{d}_image"
+                break
+    detector_base = detectorkind.replace("_image", "") if detectorkind else ""
+    ccd_pixel_um = DETECTOR_PIXEL_UM.get(detector_base, DEFAULT_CCD_PIXEL_UM)
+
+    # --- Sample-to-detector distance ---
+    # 2D_FLY_PANDA scans record this in ``scan["detector_distance"]`` (in m).
+    # Older scans don't expose it; the LEGACY_PTYCHO_DEFAULTS z_m=1.0 fallback
+    # remains in build_full_config() for those.
+    z_m = scan_md.get("detector_distance")
+
     config = {
         "scan_num": str(scan_num),
         "scan_type": plan_name,
         "xray_energy_kev": str(round(energy_kev, 6)),
         "lambda_nm": str(round(lambda_nm, 12)),
-        "ccd_pixel_um": str(CCD_PIXEL_UM),
+        "ccd_pixel_um": str(ccd_pixel_um),
         "dr_x": str(round(dr_x, 6)),
         "dr_y": str(round(dr_y, 6)),
         "x_range": str(round(x_range, 6)),
@@ -374,11 +419,17 @@ def load_config_from_tiled(
         "x_num": str(x_num),
         "y_num": str(y_num),
         "angle": str(round(angle, 4)),
-        "x_direction": "1.0",
+        # streaming_recon defaults both to -1.0; matches legacy ptycho_gui
+        # output for HXN scans.
+        "x_direction": "-1.0",
         "y_direction": "-1.0",
         "x_ratio": str(round(x_ratio, 8)),
         "y_ratio": str(round(y_ratio, 8)),
     }
+    if detectorkind:
+        config["detectorkind"] = detectorkind
+    if z_m is not None:
+        config["z_m"] = str(z_m)
 
     return config
 
