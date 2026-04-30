@@ -181,6 +181,31 @@ def get_logs(lines: int = 100):
     return {"lines": [l.rstrip("\n") for l in all_lines[-lines:]]}
 
 
+@app.post("/logs/clear", status_code=200)
+def clear_logs():
+    """Truncate the active log file and remove rotated backups."""
+    log_path = Path(state.log_file)
+    removed = []
+    # Truncate the active file via the open handler stream so the running
+    # RotatingFileHandler keeps writing to the same fd without losing data.
+    if _handler.stream is not None:
+        _handler.acquire()
+        try:
+            _handler.stream.seek(0)
+            _handler.stream.truncate()
+        finally:
+            _handler.release()
+    # Sweep rotated backups (holoptycho.log.1, .2, .3 by default).
+    for sibling in log_path.parent.glob(log_path.name + ".*"):
+        try:
+            sibling.unlink()
+            removed.append(sibling.name)
+        except OSError:
+            pass
+    logger.info("Logs cleared (removed rotated: %s)", ", ".join(removed) or "none")
+    return {"detail": "Logs cleared", "removed_rotated": removed}
+
+
 # ---------------------------------------------------------------------------
 # Model management
 # ---------------------------------------------------------------------------

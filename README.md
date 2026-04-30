@@ -167,6 +167,9 @@ Override reconstruction parameters as needed:
 
 ```bash
 hp start "$(pixi run -e client config-from-tiled --scan-num 320045 --nx 256 --ny 256 --n-iterations 1000)"
+
+# Run only the iterative solver or only the ViT branch (default is both):
+hp start "$(pixi run -e client config-from-tiled --scan-num 320045 --recon-mode iterative)"
 ```
 
 ### Model selection

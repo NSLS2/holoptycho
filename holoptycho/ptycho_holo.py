@@ -180,6 +180,7 @@ class PtychoRecon(Operator):
 
         self._logger = logging.getLogger("PtychoRecon")
         self._iteration_started_logged = False
+        self._last_recv_state = (-1, -1)
 
     def flush(self,param):
 
@@ -190,6 +191,7 @@ class PtychoRecon(Operator):
         self.frame_ready_num = 0
         self.probe_initialized = False
         self._iteration_started_logged = False
+        self._last_recv_state = (-1, -1)
 
         # Reset the engine for a new scan region. This combines what the
         # HXN_development code called ``new_obj()`` + ``flush_live_recon()``:
@@ -232,8 +234,15 @@ class PtychoRecon(Operator):
         if frame_ready_num:
             self.frame_ready_num = int(frame_ready_num)
 
-        if self.it - self.it_last_update < self.it_ends_after and self.points_total>0:
-            print(f"Recv pos {self.pos_ready_num} frame {self.frame_ready_num} / {self.points_total} {self.num_points_min}")
+        if self.it - self.it_last_update < self.it_ends_after and self.points_total > 0:
+            state = (self.pos_ready_num, self.frame_ready_num)
+            if state != self._last_recv_state:
+                self._logger.info(
+                    "Recv pos %d frame %d / %d (threshold %d)",
+                    self.pos_ready_num, self.frame_ready_num,
+                    self.points_total, self.num_points_min,
+                )
+                self._last_recv_state = state
 
         ready_num = np.minimum(self.pos_ready_num,self.frame_ready_num)
 
@@ -250,20 +259,23 @@ class PtychoRecon(Operator):
             if ready_num > np.minimum(self.recon.num_points_l,self.points_total)*0.97:
                 self.it_last_update = self.it
 
-        if self.recon.num_points_recon > self.num_points_min:
-            if not self.probe_initialized:
-                self.recon.initial_probe(self.recon.num_points_recon)
-                if self.recon.prb_prop_dist_um != 0:
-                    self.recon.propagate_probe()
-                self.probe_initialized = True
-
+        if self.recon.num_points_recon >= self.num_points_min:
             if not self._iteration_started_logged:
                 self._logger.info(
-                    "Iterative recon started: num_points_recon=%d (threshold=%d)",
+                    "Iterative recon threshold crossed: num_points_recon=%d (threshold=%d)",
                     int(self.recon.num_points_recon),
                     int(self.num_points_min),
                 )
                 self._iteration_started_logged = True
+
+            if not self.probe_initialized:
+                self._logger.info("Initializing probe (num_points=%d)", int(self.recon.num_points_recon))
+                self.recon.initial_probe(self.recon.num_points_recon)
+                if self.recon.prb_prop_dist_um != 0:
+                    self._logger.info("Propagating probe (prop_dist_um=%g)", float(self.recon.prb_prop_dist_um))
+                    self.recon.propagate_probe()
+                self.probe_initialized = True
+                self._logger.info("Probe initialized; entering iteration loop")
 
             self.timestamp_iter.append(time.time())
             self.num_points_recv_iter.append(self.recon.num_points_recon)

@@ -432,6 +432,9 @@ hp start "$(pixi run -e client config-from-tiled --scan-num 320045)"
 # 2. (Optional) Override reconstruction parameters
 hp start "$(pixi run -e client config-from-tiled --scan-num 320045 --nx 256 --n-iterations 1000)"
 
+# 2b. (Optional) Pick which reconstruction branches to run
+hp start "$(pixi run -e client config-from-tiled --scan-num 320045 --recon-mode iterative)"  # or vit | both (default)
+
 # 3. (Optional) Switch to a different model
 hp model set my_vit_model --version 3
 

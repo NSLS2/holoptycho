@@ -130,7 +130,7 @@ class TiledWriter:
             meta = {"iteration": iteration}
             self._write_or_overwrite_array(live, "probe", probe, metadata=meta)
             self._write_or_overwrite_array(live, "object", obj, metadata=meta)
-            logger.debug("write_live run=%s iter=%d", self._run_uid, iteration)
+            logger.info("write_live run=%s iter=%d", self._run_uid, iteration)
         except Exception:
             logger.exception("TiledWriter.write_live failed")
 
@@ -171,7 +171,7 @@ class TiledWriter:
             # Overwrite "latest" arrays for live viewing
             self._write_or_overwrite_array(vit, "pred_latest", pred, metadata=meta)
             self._write_or_overwrite_array(vit, "indices_latest", indices, metadata=meta)
-            logger.debug("write_vit run=%s batch=%d", self._run_uid, batch_num)
+            logger.info("write_vit run=%s batch=%d", self._run_uid, batch_num)
         except Exception:
             logger.exception("TiledWriter.write_vit failed")
 

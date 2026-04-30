@@ -315,6 +315,11 @@ def _json_request(url: str, method: str = "GET", payload: dict | None = None) ->
 def start_holoptycho_pipeline(args) -> None:
     """Start or restart the holoptycho pipeline with config from the same run."""
     hp_url = args.hp_url.rstrip("/")
+    try:
+        _json_request(f"{hp_url}/logs/clear", method="POST")
+        print("[holoptycho] logs cleared", flush=True)
+    except RuntimeError as exc:
+        print(f"[holoptycho] WARNING: failed to clear logs: {exc}", flush=True)
     config_tiled_url = args.hp_config_tiled_url or args.tiled_url
     config = build_full_config(args.uid, tiled_url=config_tiled_url, args=args)
     status = _json_request(f"{hp_url}/status")

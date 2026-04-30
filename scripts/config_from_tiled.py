@@ -343,6 +343,17 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument("--gpus", default="[0]")
     recon.add_argument("--sign", default="t1")
     recon.add_argument("--display-interval", type=int, default=10)
+    recon.add_argument(
+        "--recon-mode",
+        choices=["iterative", "vit", "both"],
+        default="both",
+        help=(
+            "Which reconstruction branches to wire in the pipeline. "
+            "'iterative' = DM/ML solver only, 'vit' = ViT inference only, "
+            "'both' = parallel (default). Useful for isolating GPU-contention "
+            "issues on single-GPU nodes."
+        ),
+    )
 
 
 def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) -> dict:
@@ -388,6 +399,7 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         "nth": "5",
         "sign": args.sign,
         "display_interval": str(args.display_interval),
+        "recon_mode": args.recon_mode,
     })
 
     return config

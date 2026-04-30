@@ -236,11 +236,12 @@ class EigerZmqRxOp(Operator):
             #     std_err_print(traceback.format_exc())
                 
         except zmq.error.Again:
-            # Timeout occurred
-            self.logger.debug("No message received within timeout period")
+            # ZMQ poll timeout — no frame this tick. Holoscan ops can't block in
+            # compute(), so RCVTIMEO is set and Again fires every empty poll.
+            pass
         except Exception as e:
             self.logger.error(f"Error receiving message: {e}")
-            
+
     def __del__(self):
         """Cleanup socket on deletion"""
         if hasattr(self, 'socket'):
@@ -329,8 +330,8 @@ class PositionRxOp(Operator):
                 # std_err_print(f"{index[:10]=}")
                 op_output.emit((frame_number,np.array([x, y])), "pointRx_out")
         except zmq.error.Again:
-        # Timeout occurred
-            self.logger.debug("No message received within timeout period")
+            # ZMQ poll timeout — no message this tick. See note in EigerZmqRxOp.
+            pass
         except Exception as e:
             self.logger.error(f"Error receiving message: {e}")
 

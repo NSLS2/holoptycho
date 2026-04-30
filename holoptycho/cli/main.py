@@ -19,8 +19,10 @@ from rich.table import Table
 app = typer.Typer(help="holoptycho control CLI", no_args_is_help=True)
 model_app = typer.Typer(help="Model management commands", no_args_is_help=True)
 config_app = typer.Typer(help="Config commands", no_args_is_help=True)
+logs_app = typer.Typer(help="Log commands (tail, clear)", invoke_without_command=True)
 app.add_typer(model_app, name="model")
 app.add_typer(config_app, name="config")
+app.add_typer(logs_app, name="logs")
 
 _DEFAULT_URL = "http://localhost:8000"
 
@@ -131,7 +133,7 @@ def restart(
     typer.echo(resp.json().get("detail", "Restarting"))
 
 
-@app.command()
+@logs_app.callback()
 def logs(
     ctx: typer.Context,
     lines: int = typer.Option(100, "--lines", "-n", help="Number of log lines to show"),
@@ -145,6 +147,11 @@ def logs(
     ),
 ):
     """Tail the holoptycho log."""
+    ctx.ensure_object(dict)
+    if ctx.parent and ctx.parent.obj:
+        ctx.obj.update(ctx.parent.obj)
+    if ctx.invoked_subcommand is not None:
+        return
     # Window the server returns on each poll while following. Must be larger
     # than the number of lines the server can append between polls to avoid
     # gaps; safe default for INFO-level traffic at 1s intervals.
@@ -185,6 +192,19 @@ def logs(
                     last_line = new_lines[-1]
         except KeyboardInterrupt:
             pass
+
+
+@logs_app.command("clear")
+def logs_clear(ctx: typer.Context):
+    """Truncate the active log file and remove rotated backups."""
+    with _client(_base_url(ctx)) as c:
+        resp = c.post("/logs/clear")
+    _handle_error(resp)
+    data = resp.json()
+    typer.echo(data.get("detail", "Logs cleared"))
+    removed = data.get("removed_rotated") or []
+    if removed:
+        typer.echo(f"Removed rotated: {', '.join(removed)}")
 
 
 # ---------------------------------------------------------------------------
