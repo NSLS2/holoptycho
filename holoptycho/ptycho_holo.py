@@ -561,20 +561,6 @@ class PtychoApp(Application):
             )
         self.recon_mode = recon_mode
 
-        # Each pipeline run gets a fresh container in Tiled keyed by its own uid.
-        # Metadata captures the raw scan it was reconstructed from.
-        self.run_uid = uuid.uuid4().hex
-        run_metadata = {
-            "scan_num": str(self.param.scan_num),
-            "raw_uid": str(getattr(self.param, "raw_uid", "") or ""),
-            "scan_id": str(
-                getattr(self.param, "scan_id", self.param.scan_num)
-            ),
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "recon_mode": recon_mode,
-        }
-        _writer.start_run(self.run_uid, metadata=run_metadata)
-
         self.flip_image = True  # According to detector settings
 
         # Derive scan-size parameters from config.
@@ -651,6 +637,31 @@ class PtychoApp(Application):
         if self.pty.num_points_min < self.pty.recon.gpu_batch_size:
             self.pty.num_points_min = self.pty.recon.gpu_batch_size
         self.pty.probe_initialized = False
+
+        # Each pipeline run gets a fresh container in Tiled keyed by its own uid.
+        # Metadata captures the raw scan being reconstructed plus the scan-grid
+        # geometry that downstream consumers (synaps-dash) need to stitch
+        # per-frame ViT predictions into a global mosaic. Done after
+        # reset_for_scan so x_pixel_m is populated from the engine.
+        self.run_uid = uuid.uuid4().hex
+        run_metadata = {
+            "scan_num": str(self.param.scan_num),
+            "raw_uid": str(getattr(self.param, "raw_uid", "") or ""),
+            "scan_id": str(
+                getattr(self.param, "scan_id", self.param.scan_num)
+            ),
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "recon_mode": recon_mode,
+            "x_pixel_m": float(self.pty.recon.x_pixel_m),
+            "y_pixel_m": float(self.pty.recon.y_pixel_m),
+            "x_num": int(self.param.x_num),
+            "y_num": int(self.param.y_num),
+            "x_range_um": float(np.abs(self.param.x_range)),
+            "y_range_um": float(np.abs(self.param.y_range)),
+            "x_direction": float(self.param.x_direction),
+            "y_direction": float(self.param.y_direction),
+        }
+        _writer.start_run(self.run_uid, metadata=run_metadata)
 
         # --- PtychoViT inference (parallel to iterative recon) ---
         # Prefer a second GPU for PyCUDA/TRT when available, but fall back to

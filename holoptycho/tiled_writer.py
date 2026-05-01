@@ -174,16 +174,32 @@ class TiledWriter:
         pred: np.ndarray,
         indices: np.ndarray,
     ) -> None:
-        """Write a ViT inference batch result."""
+        """Write a ViT inference batch result.
+
+        Writes both:
+
+        * ``vit/pred_latest`` and ``vit/indices_latest`` — overwritten each batch
+          for cheap live polling (single small fetch).
+        * ``vit/batches/{batch_num:06d}/{pred,indices}`` — append-only per-batch
+          history. Required so downstream consumers (synaps-dash, offline
+          analysis) can stitch the per-frame ViT predictions across all scan
+          positions, mirroring how ``live_compare_viewer.py`` walks
+          ``vit_batch_NNNNNN_pred.npy`` files in the npy fallback backend.
+        """
         if self._run is None:
             logger.warning("write_vit called before start_run; skipping")
             return
         try:
             vit = _get_or_create(self._run, "vit")
             meta = {"batch_num": batch_num}
-            # Overwrite "latest" arrays for live viewing
+            # Live-polling mirrors (overwritten each batch).
             self._write_or_overwrite_array(vit, "pred_latest", pred, metadata=meta)
             self._write_or_overwrite_array(vit, "indices_latest", indices, metadata=meta)
+            # Per-batch history (append-only, matches npy fallback layout).
+            batches = _get_or_create(vit, "batches")
+            batch_container = _get_or_create(batches, f"{batch_num:06d}")
+            self._write_or_overwrite_array(batch_container, "pred", pred, metadata=meta)
+            self._write_or_overwrite_array(batch_container, "indices", indices, metadata=meta)
             logger.info("write_vit run=%s batch=%d", self._run_uid, batch_num)
         except Exception:
             logger.exception("TiledWriter.write_vit failed")
