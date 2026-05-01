@@ -533,8 +533,10 @@ class SaveViTResult(Operator):
             # Write positions BEFORE the per-batch container so any WebSocket
             # subscriber that wakes on the new batch sees an already-fresh
             # positions_um and can stitch with the real per-frame positions.
+            t_pos_start = time.perf_counter()
             if positions is not None:
                 _writer.write_positions(positions)
+            t_pos_end = time.perf_counter()
 
             # Per-batch pred + indices export is opt-in (config field
             # vit_batch_writes). When enabled, hand off to BatchWriterOp via a
@@ -550,15 +552,22 @@ class SaveViTResult(Operator):
             # input is capacity=1 + QueuePolicy.POP, so if the writer is mid-
             # tiled-PUT this snapshot replaces any stale one queued behind
             # it. We never block this thread on the tiled write.
+            t_stitch_start = time.perf_counter()
             snap = self._stitch_batch(pred, indices)
+            t_stitch_end = time.perf_counter()
             if snap is not None:
                 snap = (*snap, total_batches, chunk_size)
                 op_output.emit(snap, "mosaic_snapshot")
+            t_emit_end = time.perf_counter()
 
             self._logger.info(
-                "SaveViTResult: chunk %d/%d (%d frames) processed in %.1f ms",
+                "SaveViTResult: chunk %d/%d (%d frames) "
+                "write_pos=%.1f ms stitch=%.1f ms emit=%.1f ms total=%.1f ms",
                 self.batch_num + 1, total_batches, chunk_size,
-                (time.perf_counter() - t0) * 1000,
+                (t_pos_end - t_pos_start) * 1000,
+                (t_stitch_end - t_stitch_start) * 1000,
+                (t_emit_end - t_stitch_end) * 1000,
+                (t_emit_end - t0) * 1000,
             )
             self.batch_num += 1
         except Exception:
