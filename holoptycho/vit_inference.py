@@ -476,6 +476,7 @@ class SaveViTResult(Operator):
                 self._reset_mosaic()
 
             self.max_index_seen = max(self.max_index_seen, int(indices.max()))
+            t0 = time.perf_counter()
 
             # Write positions BEFORE the per-batch container so any WebSocket
             # subscriber that wakes on the new batch sees an already-fresh
@@ -500,6 +501,10 @@ class SaveViTResult(Operator):
             if snap is not None:
                 op_output.emit(snap, "mosaic_snapshot")
 
+            self._logger.info(
+                "SaveViTResult: batch=%d processed in %.1f ms",
+                self.batch_num, (time.perf_counter() - t0) * 1000,
+            )
             self.batch_num += 1
         except Exception:
             pass
@@ -548,6 +553,7 @@ class MosaicWriterOp(Operator):
             return
         try:
             mosaic, counts, batch_num, pixel_size_m, canvas_origin_um = snap
+            t0 = time.perf_counter()
             # Threshold counts at 0.5 (not 0) to suppress FFT-leakage tails
             # from the Fourier-shift placement, which deposit tiny non-zero
             # counts well outside the patch footprints. Fill unfilled
@@ -561,11 +567,17 @@ class MosaicWriterOp(Operator):
                 normalised = np.where(valid, avg, fill).astype(np.float32)
             else:
                 normalised = np.zeros_like(mosaic, dtype=np.float32)
+            t_norm = time.perf_counter()
             _writer.write_vit_mosaic(
                 normalised,
                 batch_num=batch_num,
                 pixel_size_m=pixel_size_m,
                 canvas_origin_um=canvas_origin_um,
+            )
+            t_done = time.perf_counter()
+            self._logger.info(
+                "MosaicWriterOp: batch=%d normalize=%.0f ms write=%.0f ms",
+                batch_num, (t_norm - t0) * 1000, (t_done - t_norm) * 1000,
             )
         except Exception:
             self._logger.exception("MosaicWriterOp.compute failed")
@@ -607,6 +619,11 @@ class BatchWriterOp(Operator):
             return
         try:
             batch_num, pred, indices = msg
+            t0 = time.perf_counter()
             _writer.write_vit(batch_num=batch_num, pred=pred, indices=indices)
+            self._logger.info(
+                "BatchWriterOp: batch=%d wrote in %.0f ms",
+                batch_num, (time.perf_counter() - t0) * 1000,
+            )
         except Exception:
             self._logger.exception("BatchWriterOp.compute failed")
