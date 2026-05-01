@@ -410,7 +410,7 @@ class PtychoSimulApp(Application):
         self.scheduler(MultiThreadScheduler(
             self,
             worker_thread_number=11,
-            check_recession_period_ms=0.001,
+            check_recession_period_ms=1.0,
             stop_on_deadlock=True,
             stop_on_deadlock_timeout=500,
             name="multithread_scheduler",
@@ -552,7 +552,7 @@ class PtychoApp(Application):
         self.scheduler(MultiThreadScheduler(
             self,
             worker_thread_number=11,
-            check_recession_period_ms=0.001,
+            check_recession_period_ms=1.0,
             stop_on_deadlock=True,
             stop_on_deadlock_timeout=500,
             name="multithread_scheduler",
