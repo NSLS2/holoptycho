@@ -21,6 +21,7 @@ import time
 import numpy as np
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
+from .mosaic_stitch import stitch_batch_into
 from .tiled_writer import get_writer
 
 # Module-level writer shared with ptycho_holo.py operators.
@@ -214,21 +215,38 @@ class PtychoViTInferenceOp(Operator):
 
 
 class SaveViTResult(Operator):
-    """Save VIT predictions to disk as per-batch files (O(1) per batch).
+    """Save VIT predictions and the running phase mosaic to tiled.
 
-    Keeps state in memory (no counter file). Detects new scans by watching
-    for frame indices that reset to 0, then clears old batch files.
+    Per batch:
 
-    Writes:
-        vit_batch_000000_pred.npy    — predictions for this batch [B, 2, H, W]
-        vit_batch_000000_indices.npy — frame indices for this batch [B]
-        vit_pred_latest.npy          — most recent batch (atomic write)
+    * Publishes the raw ``(pred, indices)`` to ``<run>/vit/batches/NNNNNN``
+      (and the convenience ``vit/pred_latest`` mirror) so an offline analyst
+      can re-stitch with any algorithm.
+    * Accumulates the phase channel into a Fourier-shift stitched mosaic at
+      ``<run>/vit/mosaic`` (counts-normalised average), pre-allocated from
+      the commanded scan extent. The dashboard reads ``vit/mosaic`` directly
+      via the same path used for the iterative live object — no client-side
+      stitching.
 
-    Concatenate after scan:
-        preds = np.concatenate([np.load(f) for f in sorted(glob('vit_batch_*_pred.npy'))])
+    A new scan is detected by the smallest frame index in the new batch
+    being less than the largest seen so far; on that signal both the batch
+    counter and the mosaic state are reset so the next run starts fresh.
     """
 
-    def __init__(self, fragment, *args, positions_provider=None, **kwargs):
+    def __init__(
+        self,
+        fragment,
+        *args,
+        positions_provider=None,
+        pixel_size_m: float | None = None,
+        x_range_um: float | None = None,
+        y_range_um: float | None = None,
+        inner_crop: int = 64,
+        canvas_pad: int = 64,
+        fourier_pad: int = 32,
+        phase_channel_index: int = 1,
+        **kwargs,
+    ):
         super().__init__(fragment, *args, **kwargs)
         self.batch_num = 0
         self.max_index_seen = -1
@@ -237,6 +255,140 @@ class SaveViTResult(Operator):
         # supplied, the snapshot is published alongside each ViT batch so
         # downstream consumers can stitch using real positions.
         self._positions_provider = positions_provider
+
+        self._pixel_size_m = pixel_size_m
+        self._x_range_um = x_range_um
+        self._y_range_um = y_range_um
+        self._inner_crop = inner_crop
+        self._canvas_pad = canvas_pad
+        self._fourier_pad = fourier_pad
+        self._phase_channel_index = phase_channel_index
+
+        # Lazy state — built on first batch once we know the model's patch
+        # size (``pred.shape[-1]``). Reset on each new scan.
+        self._mosaic: np.ndarray | None = None
+        self._counts: np.ndarray | None = None
+        self._canvas_origin_um: tuple[float, float] | None = None
+        # Whether stitching is even possible (requires scan-grid params and a
+        # positions provider). If not, we still write the per-batch arrays
+        # so an offline analyst has the raw data.
+        self._stitch_enabled = (
+            positions_provider is not None
+            and pixel_size_m is not None
+            and pixel_size_m > 0
+            and x_range_um is not None
+            and y_range_um is not None
+        )
+
+        self._logger = logging.getLogger("holoptycho.SaveViTResult")
+        if not self._stitch_enabled:
+            self._logger.info(
+                "ViT mosaic stitching disabled (missing pixel/range/positions); "
+                "per-batch publishing still active"
+            )
+
+    def _reset_mosaic(self) -> None:
+        self._mosaic = None
+        self._counts = None
+        self._canvas_origin_um = None
+
+    def _ensure_canvas(self, patch_h: int, patch_w: int, positions_um: np.ndarray) -> bool:
+        """Allocate canvas + counts on first batch. Returns True if ready."""
+        if self._mosaic is not None:
+            return True
+        finite = np.isfinite(positions_um).all(axis=1)
+        if not finite.any():
+            # No finite positions yet — defer until PandA catches up.
+            return False
+        ps = self._pixel_size_m
+        cropped_h = patch_h - 2 * self._inner_crop
+        cropped_w = patch_w - 2 * self._inner_crop
+        if cropped_h <= 0 or cropped_w <= 0:
+            self._logger.error(
+                "inner_crop=%d too large for patch %dx%d; disabling stitching",
+                self._inner_crop, patch_h, patch_w,
+            )
+            self._stitch_enabled = False
+            return False
+
+        # Canvas covers commanded extent + one cropped half-patch on each
+        # side + canvas_pad. Origin anchored at the most-negative finite
+        # position seen so far minus the same buffer. Later overshoot
+        # outside this canvas is silently truncated by the placement kernel.
+        half_h = cropped_h // 2
+        half_w = cropped_w // 2
+        canvas_h = (
+            int(np.ceil(self._y_range_um * 1e-6 / ps))
+            + 2 * half_h + 2 + 2 * self._canvas_pad
+        )
+        canvas_w = (
+            int(np.ceil(self._x_range_um * 1e-6 / ps))
+            + 2 * half_w + 2 + 2 * self._canvas_pad
+        )
+        x_min_um = float(np.nanmin(positions_um[finite, 0]))
+        y_min_um = float(np.nanmin(positions_um[finite, 1]))
+        # Origin is the um-coordinate that maps to canvas pixel (0, 0).
+        origin_x_um = x_min_um - (half_w + 1 + self._canvas_pad) * ps * 1e6
+        origin_y_um = y_min_um - (half_h + 1 + self._canvas_pad) * ps * 1e6
+
+        self._mosaic = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+        self._counts = np.zeros_like(self._mosaic)
+        self._canvas_origin_um = (origin_y_um, origin_x_um)
+        self._logger.info(
+            "ViT mosaic canvas allocated: %dx%d px (%.2f x %.2f um), origin=(%.3f, %.3f) um, "
+            "cropped patch=%dx%d",
+            canvas_h, canvas_w,
+            canvas_h * ps * 1e6, canvas_w * ps * 1e6,
+            origin_y_um, origin_x_um,
+            cropped_h, cropped_w,
+        )
+        return True
+
+    def _stitch_batch(self, pred: np.ndarray, indices: np.ndarray) -> None:
+        if not self._stitch_enabled:
+            return
+        positions_um = self._positions_provider()
+        if positions_um is None:
+            return
+        if not self._ensure_canvas(pred.shape[-1], pred.shape[-1], positions_um):
+            return
+
+        phase = pred[:, self._phase_channel_index].astype(np.float32, copy=False)
+        if self._inner_crop > 0:
+            c = self._inner_crop
+            phase = phase[:, c:-c, c:-c]
+
+        # Map per-frame um → canvas px. positions_um columns: 0=x, 1=y.
+        sub = positions_um[indices]
+        finite = np.isfinite(sub).all(axis=1)
+        if not finite.any():
+            return
+        ps = self._pixel_size_m
+        oy_um, ox_um = self._canvas_origin_um
+        positions_px = np.empty((finite.sum(), 2), dtype=np.float64)
+        positions_px[:, 0] = (sub[finite, 1] - oy_um) * 1e-6 / ps   # y
+        positions_px[:, 1] = (sub[finite, 0] - ox_um) * 1e-6 / ps   # x
+        batch = phase[finite]
+
+        try:
+            self._mosaic, self._counts = stitch_batch_into(
+                self._mosaic,
+                self._counts,
+                batch,
+                positions_px,
+                pad=self._fourier_pad,
+            )
+        except Exception:
+            self._logger.exception("stitch_batch_into failed (skipping batch)")
+            return
+
+        normalised = self._mosaic / np.maximum(self._counts, 1.0)
+        _writer.write_vit_mosaic(
+            normalised,
+            batch_num=self.batch_num,
+            pixel_size_m=self._pixel_size_m,
+            canvas_origin_um=self._canvas_origin_um,
+        )
 
     def setup(self, spec: OperatorSpec):
         spec.input("results").connector(
@@ -256,6 +408,7 @@ class SaveViTResult(Operator):
             if min_idx < self.max_index_seen and self.batch_num > 0:
                 self.batch_num = 0
                 self.max_index_seen = -1
+                self._reset_mosaic()
 
             self.max_index_seen = max(self.max_index_seen, int(indices.max()))
 
@@ -272,6 +425,11 @@ class SaveViTResult(Operator):
                 pred=pred,
                 indices=indices,
             )
+
+            # Accumulate this batch's phase into the running mosaic and
+            # publish the normalised result. On error this is logged but
+            # does not stop the per-batch publish above.
+            self._stitch_batch(pred, indices)
 
             self.batch_num += 1
         except Exception:

@@ -227,6 +227,34 @@ class TiledWriter:
         except Exception:
             logger.exception("TiledWriter.write_vit failed")
 
+    def write_vit_mosaic(
+        self,
+        mosaic: np.ndarray,
+        *,
+        batch_num: int,
+        pixel_size_m: float,
+        canvas_origin_um: tuple[float, float],
+    ) -> None:
+        """Overwrite the server-side ViT mosaic for the current run.
+
+        Written under ``<run>/vit/mosaic`` so the dashboard can render it with
+        the same TiledImageTile path used for the iterative live object,
+        rather than re-stitching per-batch in the browser.
+        """
+        if self._run is None:
+            logger.warning("write_vit_mosaic called before start_run; skipping")
+            return
+        try:
+            vit = _get_or_create(self._run, "vit")
+            meta = {
+                "batch_num": batch_num,
+                "pixel_size_m": float(pixel_size_m),
+                "canvas_origin_um": [float(canvas_origin_um[0]), float(canvas_origin_um[1])],
+            }
+            self._write_or_overwrite_array(vit, "mosaic", mosaic, metadata=meta)
+        except Exception:
+            logger.exception("TiledWriter.write_vit_mosaic failed")
+
 
 class _NpyFallbackWriter:
     """Writes results to .npy files under /data/users/Holoscan/<run_uid>/ —
@@ -302,6 +330,24 @@ class _NpyFallbackWriter:
             os.replace(tmp, f"{self._run_dir}/positions_um.npy")
         except Exception:
             logger.exception("_NpyFallbackWriter.write_positions failed")
+
+    def write_vit_mosaic(
+        self,
+        mosaic: np.ndarray,
+        *,
+        batch_num: int,
+        pixel_size_m: float,
+        canvas_origin_um: tuple[float, float],
+    ) -> None:
+        if self._run_dir is None:
+            logger.warning("write_vit_mosaic called before start_run; skipping")
+            return
+        try:
+            tmp = f"{self._run_dir}/_vit_mosaic.tmp.npy"
+            np.save(tmp, mosaic)
+            os.replace(tmp, f"{self._run_dir}/vit_mosaic.npy")
+        except Exception:
+            logger.exception("_NpyFallbackWriter.write_vit_mosaic failed")
 
 
 # Module-level singleton — shared by all callers within the same process.

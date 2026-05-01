@@ -475,6 +475,9 @@ class PtychoSimulApp(Application):
         self.vit_save = SaveViTResult(
             self,
             positions_provider=lambda: self.point_proc.positions_um,
+            pixel_size_m=float(self.pty.recon.x_pixel_m),
+            x_range_um=float(self.pty.recon.x_range_um),
+            y_range_um=float(self.pty.recon.y_range_um),
             name="vit_save",
         )
 
@@ -692,11 +695,15 @@ class PtychoApp(Application):
             data_is_shifted=True,
             name="vit_inference",
         )
-        # SaveViTResult publishes positions_um alongside each batch so the
-        # dashboard stitcher uses real positions, not a deterministic raster.
+        # SaveViTResult publishes positions_um alongside each batch and
+        # accumulates the running phase mosaic at <run>/vit/mosaic. The
+        # dashboard renders that array directly — no client-side stitching.
         self.vit_save = SaveViTResult(
             self,
             positions_provider=lambda: self.point_proc.positions_um,
+            pixel_size_m=float(self.pty.recon.x_pixel_m),
+            x_range_um=float(self.pty.recon.x_range_um),
+            y_range_um=float(self.pty.recon.y_range_um),
             name="vit_save",
         )
 
