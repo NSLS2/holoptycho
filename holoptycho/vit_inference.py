@@ -520,16 +520,21 @@ class SaveViTResult(Operator):
             t0 = time.perf_counter()
 
             # Compute progress info (chunk N / M, frames per chunk) for the
-            # per-op timing logs. ``positions_um`` length is the configured
-            # n_frames for the scan; with batch size pred.shape[0] (= 64
-            # currently) we get the total number of chunks.
+            # per-op timing logs. ``positions_um`` is allocated at the
+            # configured grid size (x_num * y_num) but only positions for
+            # frames that actually arrive get populated; the rest stay NaN.
+            # Counting finite rows gives the true n_frames once PandA has
+            # delivered (handles --skip-frames cleanly: the skipped frames'
+            # positions are never published, so they stay NaN and don't
+            # inflate the denominator).
             chunk_size = int(pred.shape[0])
             total_batches = 0
             positions = None
             if self._positions_provider is not None:
                 positions = self._positions_provider()
                 if positions is not None and chunk_size > 0:
-                    total_batches = (int(positions.shape[0]) + chunk_size - 1) // chunk_size
+                    n_finite = int(np.isfinite(positions[:, 0]).sum())
+                    total_batches = (n_finite + chunk_size - 1) // chunk_size
 
             # Hand off the positions snapshot to PositionsWriterOp on its own
             # scheduler thread (capacity=1 + QueuePolicy.POP). Each tiled
