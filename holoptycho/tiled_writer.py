@@ -121,9 +121,22 @@ class TiledWriter:
         """Overwrite the live probe/object snapshots for the current run.
 
         Called every ``display_interval`` iterations.
+
+        If either array contains non-finite values (NaN/Inf), the write is
+        skipped so the previous finite snapshot stays visible to consumers
+        (synaps-dash, etc.). The iterative engine can transiently diverge —
+        writing the corrupted state would replace a useful image with a black
+        one. The next finite iteration will overwrite as usual.
         """
         if self._run is None:
             logger.warning("write_live called before start_run; skipping")
+            return
+        if not np.isfinite(probe).all() or not np.isfinite(obj).all():
+            logger.warning(
+                "write_live skipped: non-finite values in probe/object at iter=%d "
+                "(keeping last finite snapshot)",
+                iteration,
+            )
             return
         try:
             live = _get_or_create(self._run, "live")
@@ -199,6 +212,13 @@ class _NpyFallbackWriter:
     def write_live(self, iteration: int, probe: np.ndarray, obj: np.ndarray) -> None:
         if self._run_dir is None:
             logger.warning("write_live called before start_run; skipping")
+            return
+        if not np.isfinite(probe).all() or not np.isfinite(obj).all():
+            logger.warning(
+                "write_live skipped: non-finite values in probe/object at iter=%d "
+                "(keeping last finite snapshot)",
+                iteration,
+            )
             return
         try:
             np.save(f"{self._run_dir}/prb_live.npy", probe)

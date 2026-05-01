@@ -490,6 +490,35 @@ def parse_args():
     return parser.parse_args()
 
 
+def _auto_batch_offsets(frames: np.ndarray, nx: int, ny: int) -> tuple[int, int]:
+    """Auto-detect detector ROI offsets from the diffraction pattern center.
+
+    Averages the first ~50 frames, masks out uint16-saturated pixels (which
+    can be hot pixels or detector artifacts that drag the center of mass off
+    course), then computes the intensity-weighted center of mass and derives
+    ``(batch_x0, batch_y0)`` so that an ``nx × ny`` crop is centered on it.
+
+    Verified on scan 404611: target was (135, 70), detected (137, 68) — 2px
+    rounding noise after sat masking.
+    """
+    sample = frames[:min(50, len(frames))].astype(np.float64)
+    mean_frame = sample.mean(axis=0)
+    sat_mask = (sample == np.iinfo(frames.dtype).max).any(axis=0)
+    masked = np.where(sat_mask, 0.0, mean_frame)
+    total = masked.sum()
+    if total <= 0:
+        # Frames are all zero or all saturated — bail to (0, 0) and let the
+        # user override.
+        return 0, 0
+    ys, xs = np.indices(masked.shape)
+    cy = float((ys * masked).sum() / total)
+    cx = float((xs * masked).sum() / total)
+    h, w = mean_frame.shape
+    bx0 = max(0, min(w - nx, round(cx - nx / 2)))
+    by0 = max(0, min(h - ny, round(cy - ny / 2)))
+    return int(bx0), int(by0)
+
+
 def main():
     args = parse_args()
 
@@ -497,16 +526,30 @@ def main():
         print("ERROR: --tiled-url or TILED_BASE_URL is required", file=sys.stderr)
         sys.exit(1)
 
-    if args.hp_start:
-        start_holoptycho_pipeline(args)
-
-    # Load data from tiled
+    # Load data from tiled before starting the pipeline so we can auto-detect
+    # the diffraction center if the user didn't explicitly set --batch-x0/y0.
     frames, positions_x, positions_y = load_scan_from_tiled(
         tiled_url=args.tiled_url,
         api_key=args.tiled_api_key,
         run_uid=args.uid,
         max_frames=args.max_frames,
     )
+
+    if args.batch_x0 is None or args.batch_y0 is None:
+        auto_x0, auto_y0 = _auto_batch_offsets(frames, args.nx, args.ny)
+        if args.batch_x0 is None:
+            args.batch_x0 = auto_x0
+        if args.batch_y0 is None:
+            args.batch_y0 = auto_y0
+        print(
+            f"[holoptycho] auto-detected diffraction center: "
+            f"batch_x0={args.batch_x0}, batch_y0={args.batch_y0} "
+            f"(box {args.nx}x{args.ny} on {frames.shape[1]}x{frames.shape[2]} detector)",
+            flush=True,
+        )
+
+    if args.hp_start:
+        start_holoptycho_pipeline(args)
 
     # Run Eiger and PandA publishers concurrently
     eiger_thread = threading.Thread(

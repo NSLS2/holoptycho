@@ -82,9 +82,12 @@ LEGACY_PTYCHO_DEFAULTS = {
     "refine_data_start_it": "10",
     "refine_data_interval": "5",
     "z_m": "1.0",
+    # Object amplitude / phase clipping bounds. The defaults match what
+    # ptycho_gui writes for HXN scans; without tight bounds the DM updates
+    # can run away to NaN within a few iterations.
     "amp_max": "1.0",
-    "amp_min": "0.01",
-    "pha_max": "1.0",
+    "amp_min": "0.5",
+    "pha_max": "0.01",
     "pha_min": "-1.0",
     "slice_spacing_m": "5e-06",
     "start_ave": "0.8",
@@ -443,10 +446,20 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument("--working-directory", default="/ptycho_gui_holoscan")
     recon.add_argument("--nx", type=int, default=128)
     recon.add_argument("--ny", type=int, default=128)
-    recon.add_argument("--batch-width", type=int, default=128)
-    recon.add_argument("--batch-height", type=int, default=128)
-    recon.add_argument("--batch-x0", type=int, default=0)
-    recon.add_argument("--batch-y0", type=int, default=0)
+    # batch-width/height default to nx/ny (substituted in build_full_config
+    # when None) — they're almost always equal to the recon frame size.
+    recon.add_argument("--batch-width", type=int, default=None,
+                       help="Detector crop width in pixels (default: --nx).")
+    recon.add_argument("--batch-height", type=int, default=None,
+                       help="Detector crop height in pixels (default: --ny).")
+    # batch-x0/y0 default to None and are auto-computed from the diffraction
+    # center of the first frames if the replay script has the data on hand.
+    recon.add_argument("--batch-x0", type=int, default=None,
+                       help="Detector crop column offset (default: auto from "
+                            "diffraction center of mass).")
+    recon.add_argument("--batch-y0", type=int, default=None,
+                       help="Detector crop row offset (default: auto from "
+                            "diffraction center of mass).")
     recon.add_argument("--det-roix0", type=int, default=0)
     recon.add_argument("--det-roiy0", type=int, default=0)
     recon.add_argument("--gpu-batch-size", type=int, default=256)
@@ -475,7 +488,20 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     config = load_config_from_tiled(run_uid, tiled_url=tiled_url)
     scan_num = config["scan_num"]
 
-    config.update(LEGACY_PTYCHO_DEFAULTS)
+    # Defaults only fill in keys that ``load_config_from_tiled`` didn't set —
+    # otherwise ``LEGACY_PTYCHO_DEFAULTS["z_m"] = "1.0"`` would overwrite the
+    # ``detector_distance`` we just extracted from the run metadata, silently
+    # halving the pixel size and distorting the reconstruction.
+    for k, v in LEGACY_PTYCHO_DEFAULTS.items():
+        config.setdefault(k, v)
+    # Default batch box size to nx/ny; default ROI offset to 0 if the caller
+    # didn't run auto-centering (the replay script fills these in by computing
+    # the diffraction center of mass before calling build_full_config).
+    batch_width = args.batch_width if args.batch_width is not None else args.nx
+    batch_height = args.batch_height if args.batch_height is not None else args.ny
+    batch_x0 = args.batch_x0 if args.batch_x0 is not None else 0
+    batch_y0 = args.batch_y0 if args.batch_y0 is not None else 0
+
     config.update({
         # Provenance for the per-run Tiled container metadata.
         "raw_uid": run_uid,
@@ -484,10 +510,10 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         "shm_name": f"ptycho_{scan_num}",
         "nx": str(args.nx),
         "ny": str(args.ny),
-        "batch_width": str(args.batch_width),
-        "batch_height": str(args.batch_height),
-        "batch_x0": str(args.batch_x0),
-        "batch_y0": str(args.batch_y0),
+        "batch_width": str(batch_width),
+        "batch_height": str(batch_height),
+        "batch_x0": str(batch_x0),
+        "batch_y0": str(batch_y0),
         "det_roix0": str(args.det_roix0),
         "det_roiy0": str(args.det_roiy0),
         "gpu_batch_size": str(args.gpu_batch_size),
@@ -497,13 +523,16 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         "y_arr_size": config["y_num"],
         "alg_flag": args.alg_flag,
         "alg2_flag": args.alg_flag,
-        "alg_percentage": "0.3",
+        "alg_percentage": "0.5",
         "n_iterations": str(args.n_iterations),
         "ml_mode": "Poisson",
-        "ml_weight": "5.0",
+        # Match ptycho_gui's tuned values for HXN scans. ml_weight=5.0 was
+        # too aggressive and caused NaN divergence on scans with tight
+        # clipping bounds.
+        "ml_weight": "0.1",
         "beta": "0.9",
         "init_obj_flag": "True",
-        "init_prb_flag": "False",
+        "init_prb_flag": "True",
         "prb_path": "",
         "prb_mode_num": "1",
         "obj_mode_num": "1",
