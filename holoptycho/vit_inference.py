@@ -311,23 +311,30 @@ class SaveViTResult(Operator):
             self._stitch_enabled = False
             return False
 
-        # Canvas covers commanded extent + one cropped half-patch on each
-        # side + canvas_pad. Origin anchored at the most-negative finite
-        # position seen so far minus the same buffer. Later overshoot
-        # outside this canvas is silently truncated by the placement kernel.
+        # Canvas covers max(observed, commanded) extent + one cropped half-
+        # patch + canvas_pad on each side. Using observed lets us absorb
+        # encoder overshoot during settling rows that exceed the commanded
+        # range; falling back to commanded protects the live case where
+        # only a few first-row positions have arrived and observed is a
+        # small subset of the eventual scan.
         half_h = cropped_h // 2
         half_w = cropped_w // 2
+        x_min_um = float(np.nanmin(positions_um[finite, 0]))
+        x_max_um = float(np.nanmax(positions_um[finite, 0]))
+        y_min_um = float(np.nanmin(positions_um[finite, 1]))
+        y_max_um = float(np.nanmax(positions_um[finite, 1]))
+        x_range_um = max(x_max_um - x_min_um, self._x_range_um)
+        y_range_um = max(y_max_um - y_min_um, self._y_range_um)
         canvas_h = (
-            int(np.ceil(self._y_range_um * 1e-6 / ps))
+            int(np.ceil(y_range_um * 1e-6 / ps))
             + 2 * half_h + 2 + 2 * self._canvas_pad
         )
         canvas_w = (
-            int(np.ceil(self._x_range_um * 1e-6 / ps))
+            int(np.ceil(x_range_um * 1e-6 / ps))
             + 2 * half_w + 2 + 2 * self._canvas_pad
         )
-        x_min_um = float(np.nanmin(positions_um[finite, 0]))
-        y_min_um = float(np.nanmin(positions_um[finite, 1]))
-        # Origin is the um-coordinate that maps to canvas pixel (0, 0).
+        # Origin is the um-coordinate that maps to canvas pixel (0, 0):
+        # the observed minimum minus the (half-patch + canvas_pad) buffer.
         origin_x_um = x_min_um - (half_w + 1 + self._canvas_pad) * ps * 1e6
         origin_y_um = y_min_um - (half_h + 1 + self._canvas_pad) * ps * 1e6
 
