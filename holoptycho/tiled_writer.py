@@ -37,10 +37,22 @@ _ACCESS_TAGS = ["synaps_project"]
 
 
 def _get_or_create(container, key: str):
-    """Return a sub-container by key, creating it if it doesn't exist."""
+    """Return a sub-container by key, creating it if it doesn't exist.
+
+    The check-then-create is racy on its own — under the multi-threaded
+    holoscan scheduler, both ``MosaicWriterOp`` and ``BatchWriterOp`` may
+    hit a fresh run together and both try to create ``vit/``. The loser
+    sees a 409 ``ClientError``. Catch that and re-fetch by key on the
+    assumption another thread won the race.
+    """
     if key in container:
         return container[key]
-    return container.create_container(key=key, specs=_SPECS, access_tags=_ACCESS_TAGS)
+    try:
+        return container.create_container(key=key, specs=_SPECS, access_tags=_ACCESS_TAGS)
+    except Exception:
+        if key in container:
+            return container[key]
+        raise
 
 
 class TiledWriter:
