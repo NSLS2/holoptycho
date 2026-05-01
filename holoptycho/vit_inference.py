@@ -382,17 +382,19 @@ class SaveViTResult(Operator):
             self._logger.exception("stitch_batch_into failed (skipping batch)")
             return
 
-        # NaN in unfilled regions so tiled's PNG auto-contrast spans only the
-        # valid phase range — otherwise the huge counts==0 background pulls
-        # the colormap to near-white. Threshold at 0.5 (not 0) to suppress
-        # FFT-leakage tails from the Fourier-shift placement, which deposit
-        # tiny non-zero counts well outside the patch footprints.
+        # Fill unfilled regions with the median of the valid pixels rather
+        # than NaN — tiled's PNG renderer treats NaN as 0, which would pull
+        # the colormap range down to 0 and render the actual signal at the
+        # bright end with no contrast. Threshold counts at 0.5 (not 0) to
+        # suppress FFT-leakage tails from the Fourier-shift placement, which
+        # deposit tiny non-zero counts well outside the patch footprints.
         valid = self._counts >= 0.5
-        normalised = np.where(
-            valid,
-            self._mosaic / np.where(valid, self._counts, 1.0),
-            np.nan,
-        ).astype(np.float32)
+        if valid.any():
+            avg = self._mosaic / np.where(valid, self._counts, 1.0)
+            fill = float(np.median(avg[valid]))
+            normalised = np.where(valid, avg, fill).astype(np.float32)
+        else:
+            normalised = np.zeros_like(self._mosaic, dtype=np.float32)
         _writer.write_vit_mosaic(
             normalised,
             batch_num=self.batch_num,
