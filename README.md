@@ -378,6 +378,39 @@ the config the replay script POSTs to holoptycho):
 - **`--max-frames N`** — only publishes the first `N` frames of the scan,
   trimming positions to match. Handy for quick tests on big scans where
   downloading and replaying every frame would take too long.
+- **`--skip-frames N`** — drops the first `N` Eiger frames (and aligned
+  encoder samples) before publishing. Useful when a scan's initial rows
+  overshoot the commanded extent during settling/ramp-up and crash the
+  iterative recon, or when the first row of ViT predictions ends up in the
+  wrong canvas region.
+- **`--chunk-size N`** — number of frames per tiled fetch during streaming
+  (default 256). The replay script pulls frames from tiled lazily rather
+  than loading the whole scan up front, so replay starts publishing within
+  seconds even for multi-GB scans. Smaller chunks = lower startup latency
+  and lower peak memory; larger = fewer round-trips.
+
+### Best practices
+
+- **Pass `--nx` and `--ny` together.** `--hp-start` builds a fresh config
+  from `config-from-tiled`, which defaults `nx`/`ny` to 128. Most HXN
+  detector frames are 256×256, so a 128×anything ROI causes
+  `ValueError: could not broadcast input array from shape (256,128) into shape (128,256)`
+  at pipeline startup. For 256-pixel scans always pass `--nx 256 --ny 256`.
+- **Run only one replay at a time.** Concurrent `--hp-start` replays
+  mid-stream the pipeline: the second run's `/restart` interrupts the first
+  while it's publishing, leaving PandA and Eiger out of sync. Positions
+  stay NaN and the dashboard hangs. Kill any running replay
+  (`pkill -f replay_from_tiled`) before launching a new one.
+- **Use `--skip-frames` for scans with settling/ramp-up rows.** Some scans
+  (e.g. 404611) have the first ~10 rows where encoder readings overshoot
+  the commanded scan range by several × and crash the iterative recon's
+  pre-allocated object grid. The ViT branch tolerates them but stitches
+  them into the wrong canvas region. Drop those rows.
+- **Default to `--recon-mode vit`** when iterating on ViT/mosaic code —
+  fastest cycle and the iterative branch can't crash the run.
+- **`--max-frames N` plus `--n-iterations 50–100`** gets you a full
+  end-to-end cycle (config → stream → recon → final write) in under a
+  minute for quick smoke tests on big scans.
 
 ---
 

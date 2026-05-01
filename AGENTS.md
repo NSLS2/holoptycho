@@ -604,6 +604,50 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
 `engine_batch_size` was set correctly on the op (logged at INFO during
 `ptychoml.PtychoViTInference created`).
 
+### Best practices for replay
+
+* **Pass `--nx` and `--ny` together.** `--hp-start` builds a fresh config from
+  `config-from-tiled`, which defaults `nx`/`ny` to 128. Detector frames for most
+  HXN scans are 256×256, so a 128×anything ROI causes
+  `ValueError: could not broadcast input array from shape (256,128) into shape (128,256)`
+  in `preprocess.py::ImagePreprocessorOp.compute` at startup. For 256-pixel
+  scans always pass `--nx 256 --ny 256` (or whatever matches the actual
+  detector ROI).
+
+* **Run only one replay at a time.** Concurrent `--hp-start` replays mid-stream
+  the pipeline: the second run's `/restart` interrupts the first while it's
+  publishing, leaving PandA frame counters and Eiger frame indices out of
+  sync. The pipeline then sits with `positions_um` stuck at NaN and the
+  dashboard hangs. Kill any running replay (`pkill -f replay_from_tiled`)
+  before launching a new one.
+
+* **Use `--skip-frames` for scans with settling/ramp-up rows.** Some HXN
+  scans (e.g. 404611) have the first ~10 rows where encoder readings
+  overshoot the commanded scan range by 2–3×. The iterative recon's
+  pre-allocated object grid can't fit those positions and crashes. The ViT
+  branch tolerates them but stitches them into the wrong canvas region.
+  `--skip-frames N` drops the first `N` Eiger frames *and* the corresponding
+  upsampled encoder samples so the published stream is consistent.
+
+* **`--chunk-size` controls fetch granularity.** The replay script streams
+  frames from tiled in chunks (default 256 frames) instead of loading the
+  whole 5 GB scan up front — replay starts publishing within seconds rather
+  than waiting for a full transfer. As long as a chunk's fetch (~hundreds
+  of ms) is shorter than the publish interval `chunk_size / rate_hz`, the
+  stream stays smooth. Drop `--chunk-size` if you see jitter; raise it for
+  fewer round-trips.
+
+* **`--max-frames` for quick smoke tests.** Cap the publish to the first N
+  frames. Combine with `--n-iterations 50–100` to get a full end-to-end
+  cycle (config write → stream → recon → final write) in under a minute.
+
+* **`--recon-mode {iterative,vit,both}` for branch-isolation.** Use
+  `iterative` to test the DM/ML solver without TRT competition, `vit` to
+  test the ViT branch (and the server-side mosaic stitching) without
+  iterative, or `both` to run them in parallel for comparison. `vit`-only
+  is the fastest path for verifying changes to `mosaic_stitch.py` /
+  `SaveViTResult`.
+
 Then start holoptycho with:
 
 ```bash
@@ -638,9 +682,25 @@ hxn/processed/holoptycho/
       object
       timestamps
       num_points
+    positions_um   ← (nz, 2) per-frame scan positions in microns,
+                     filled in by PointProcessorOp as PandA data arrives
     vit/
-      pred_latest    ← overwritten each ViT batch
-      indices_latest
+      pred_latest    ← overwritten each ViT batch (B, 2, H, W)
+      indices_latest ← overwritten each ViT batch (B,)
+      mosaic         ← server-side stitched phase mosaic, overwritten each
+                       ViT batch (counts-normalised, Fourier-shift placed via
+                       holoptycho.mosaic_stitch.place_patches_fourier_shift).
+                       Unfilled pixels are filled with the median of the valid
+                       region — tiled's PNG renderer treats NaN as 0, which
+                       wrecks contrast scaling.
+      batches/
+        000000/      ← append-only per-batch history
+          pred
+          indices
+        000001/
+          pred
+          indices
+        ...
 ```
 
 `run_uid` is generated in `PtychoApp.compose()` and surfaced via
