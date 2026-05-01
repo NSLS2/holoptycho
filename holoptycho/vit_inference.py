@@ -245,6 +245,7 @@ class SaveViTResult(Operator):
         canvas_pad: int = 64,
         fourier_pad: int = 32,
         phase_channel_index: int = 1,
+        overshoot_factor: float = 3.0,
         **kwargs,
     ):
         super().__init__(fragment, *args, **kwargs)
@@ -263,6 +264,7 @@ class SaveViTResult(Operator):
         self._canvas_pad = canvas_pad
         self._fourier_pad = fourier_pad
         self._phase_channel_index = phase_channel_index
+        self._overshoot_factor = overshoot_factor
 
         # Lazy state — built on first batch once we know the model's patch
         # size (``pred.shape[-1]``). Reset on each new scan.
@@ -298,13 +300,6 @@ class SaveViTResult(Operator):
         self._canvas_origin_um = None
         self._half_h = 0
         self._half_w = 0
-        self._grow_log_count = 0
-        # Tell the writer to drop the old mosaic node so the new run starts
-        # with a fresh shape rather than failing the shape check.
-        try:
-            _writer.delete_vit_mosaic()
-        except Exception:
-            self._logger.exception("delete_vit_mosaic on reset failed (continuing)")
 
     def _ensure_canvas(self, patch_h: int, patch_w: int, positions_um: np.ndarray) -> bool:
         """Allocate canvas + counts on first batch. Returns True if ready."""
@@ -325,20 +320,27 @@ class SaveViTResult(Operator):
             self._stitch_enabled = False
             return False
 
-        # Canvas covers max(observed, commanded) extent + one cropped half-
-        # patch + canvas_pad on each side. Using observed lets us absorb
-        # encoder overshoot during settling rows that exceed the commanded
-        # range; falling back to commanded protects the live case where
-        # only a few first-row positions have arrived and observed is a
-        # small subset of the eventual scan.
+        # Pre-allocate the canvas large enough to hold the full scan including
+        # encoder overshoot on settling rows. Tiled does not allow node
+        # deletion via the writer client, so the canvas shape must be fixed
+        # for the lifetime of the run — we cannot grow.
+        #
+        # Strategy: take max(observed, commanded * safety_factor) on each
+        # axis and center on the observed midpoint. The safety factor
+        # (3×) covers the HXN settling-row overshoot seen in practice
+        # (commanded 2 µm → observed 6 µm).
         half_h = cropped_h // 2
         half_w = cropped_w // 2
         x_min_um = float(np.nanmin(positions_um[finite, 0]))
         x_max_um = float(np.nanmax(positions_um[finite, 0]))
         y_min_um = float(np.nanmin(positions_um[finite, 1]))
         y_max_um = float(np.nanmax(positions_um[finite, 1]))
-        x_range_um = max(x_max_um - x_min_um, self._x_range_um)
-        y_range_um = max(y_max_um - y_min_um, self._y_range_um)
+        x_obs_um = x_max_um - x_min_um
+        y_obs_um = y_max_um - y_min_um
+        x_range_um = max(x_obs_um, self._x_range_um * self._overshoot_factor)
+        y_range_um = max(y_obs_um, self._y_range_um * self._overshoot_factor)
+        x_mid_um = 0.5 * (x_min_um + x_max_um)
+        y_mid_um = 0.5 * (y_min_um + y_max_um)
         canvas_h = (
             int(np.ceil(y_range_um * 1e-6 / ps))
             + 2 * half_h + 2 + 2 * self._canvas_pad
@@ -347,10 +349,8 @@ class SaveViTResult(Operator):
             int(np.ceil(x_range_um * 1e-6 / ps))
             + 2 * half_w + 2 + 2 * self._canvas_pad
         )
-        # Origin is the um-coordinate that maps to canvas pixel (0, 0):
-        # the observed minimum minus the (half-patch + canvas_pad) buffer.
-        origin_x_um = x_min_um - (half_w + 1 + self._canvas_pad) * ps * 1e6
-        origin_y_um = y_min_um - (half_h + 1 + self._canvas_pad) * ps * 1e6
+        origin_x_um = x_mid_um - (canvas_w / 2.0) * ps * 1e6
+        origin_y_um = y_mid_um - (canvas_h / 2.0) * ps * 1e6
 
         self._mosaic = np.zeros((canvas_h, canvas_w), dtype=np.float32)
         self._counts = np.zeros_like(self._mosaic)
@@ -365,90 +365,6 @@ class SaveViTResult(Operator):
             origin_y_um, origin_x_um,
             cropped_h, cropped_w,
         )
-        return True
-
-    def _grow_canvas_if_needed(self, batch_positions_um: np.ndarray) -> bool:
-        """Grow canvas + counts to fit ``batch_positions_um`` if any of those
-        positions would push past the current canvas's per-side buffer.
-
-        Old data is copied to its correct offset in the new (larger) canvas.
-        Returns True if the canvas was grown (the writer should drop the old
-        tiled node before the next write so the shape change takes effect).
-        """
-        if self._mosaic is None or self._canvas_origin_um is None:
-            return False
-        ps = self._pixel_size_m
-        oy_um, ox_um = self._canvas_origin_um
-        canvas_h, canvas_w = self._mosaic.shape
-        # The "valid placement" window inside the canvas — the buffer we
-        # require so a patch centered at the canvas edge still fits.
-        margin_y = self._half_h + 1 + self._canvas_pad
-        margin_x = self._half_w + 1 + self._canvas_pad
-        margin_y_um = margin_y * ps * 1e6
-        margin_x_um = margin_x * ps * 1e6
-
-        # Are these positions already inside the valid placement window?
-        bx_min = float(np.nanmin(batch_positions_um[:, 0]))
-        bx_max = float(np.nanmax(batch_positions_um[:, 0]))
-        by_min = float(np.nanmin(batch_positions_um[:, 1]))
-        by_max = float(np.nanmax(batch_positions_um[:, 1]))
-        cur_y_lo = oy_um + margin_y_um
-        cur_y_hi = oy_um + (canvas_h - margin_y) * ps * 1e6
-        cur_x_lo = ox_um + margin_x_um
-        cur_x_hi = ox_um + (canvas_w - margin_x) * ps * 1e6
-        # 1-pixel slack avoids float-roundoff false-negatives when a batch's
-        # extreme position is bit-equal to the canvas bound it set originally.
-        eps_um = ps * 1e6
-        fits = (
-            by_min >= cur_y_lo - eps_um and by_max <= cur_y_hi + eps_um
-            and bx_min >= cur_x_lo - eps_um and bx_max <= cur_x_hi + eps_um
-        )
-        # Log the first 3 grow-checks and every check where fits=False so we
-        # can verify the canvas actually expands when positions overflow.
-        log_count = getattr(self, "_grow_log_count", 0)
-        if log_count < 3 or not fits:
-            self._logger.info(
-                "ViT mosaic grow-check #%d: batch bounds y=[%.3f, %.3f] x=[%.3f, %.3f] "
-                "vs canvas-valid y=[%.3f, %.3f] x=[%.3f, %.3f] -> fits=%s",
-                log_count, by_min, by_max, bx_min, bx_max,
-                cur_y_lo, cur_y_hi, cur_x_lo, cur_x_hi, fits,
-            )
-            self._grow_log_count = log_count + 1
-        if fits:
-            return False
-
-        # Otherwise, expand the bounding box to include the new positions
-        # plus the margin, then size + offset accordingly.
-        new_y_lo = min(by_min, cur_y_lo)
-        new_y_hi = max(by_max, cur_y_hi)
-        new_x_lo = min(bx_min, cur_x_lo)
-        new_x_hi = max(bx_max, cur_x_hi)
-        new_origin_y_um = new_y_lo - margin_y_um
-        new_origin_x_um = new_x_lo - margin_x_um
-        new_canvas_h = int(np.ceil((new_y_hi + margin_y_um - new_origin_y_um) / (ps * 1e6)))
-        new_canvas_w = int(np.ceil((new_x_hi + margin_x_um - new_origin_x_um) / (ps * 1e6)))
-        new_mosaic = np.zeros((new_canvas_h, new_canvas_w), dtype=np.float32)
-        new_counts = np.zeros_like(new_mosaic)
-        # Where the old (0, 0) lands in the new array.
-        offset_y = int(round((oy_um - new_origin_y_um) / (ps * 1e6)))
-        offset_x = int(round((ox_um - new_origin_x_um) / (ps * 1e6)))
-        new_mosaic[offset_y:offset_y + canvas_h, offset_x:offset_x + canvas_w] = self._mosaic
-        new_counts[offset_y:offset_y + canvas_h, offset_x:offset_x + canvas_w] = self._counts
-
-        self._logger.info(
-            "ViT mosaic canvas grew %dx%d -> %dx%d, origin (%.3f, %.3f) -> (%.3f, %.3f) um",
-            canvas_h, canvas_w, new_canvas_h, new_canvas_w,
-            oy_um, ox_um, new_origin_y_um, new_origin_x_um,
-        )
-        self._mosaic = new_mosaic
-        self._counts = new_counts
-        self._canvas_origin_um = (new_origin_y_um, new_origin_x_um)
-        # Shape changed — make the writer drop the old node so the next
-        # write recreates it with the new shape rather than 422'ing.
-        try:
-            _writer.delete_vit_mosaic()
-        except Exception:
-            self._logger.exception("delete_vit_mosaic after grow failed (write will likely fail)")
         return True
 
     def _stitch_batch(self, pred: np.ndarray, indices: np.ndarray) -> None:
@@ -471,18 +387,39 @@ class SaveViTResult(Operator):
         if not finite.any():
             return
 
-        # Grow the canvas if any of these positions falls outside the
-        # current canvas's per-side buffer. Old data is copied into the
-        # new (larger) canvas at the right offset; the origin shifts so
-        # we have to recompute pixel coords AFTER this call.
-        self._grow_canvas_if_needed(sub[finite])
-
+        # Drop frames whose center would land outside the placement window
+        # (canvas can't grow — tiled doesn't allow node deletion via the
+        # writer client). The canvas is sized from commanded extent ×
+        # overshoot_factor so this should be rare in practice.
         ps = self._pixel_size_m
         oy_um, ox_um = self._canvas_origin_um
-        positions_px = np.empty((finite.sum(), 2), dtype=np.float64)
-        positions_px[:, 0] = (sub[finite, 1] - oy_um) * 1e-6 / ps   # y
-        positions_px[:, 1] = (sub[finite, 0] - ox_um) * 1e-6 / ps   # x
-        batch = phase[finite]
+        canvas_h, canvas_w = self._mosaic.shape
+        margin_y = self._half_h + 1
+        margin_x = self._half_w + 1
+        x_um = sub[finite, 0]
+        y_um = sub[finite, 1]
+        py = (y_um - oy_um) * 1e-6 / ps
+        px = (x_um - ox_um) * 1e-6 / ps
+        in_bounds = (
+            (py >= margin_y) & (py < canvas_h - margin_y)
+            & (px >= margin_x) & (px < canvas_w - margin_x)
+        )
+        if not in_bounds.any():
+            self._logger.warning(
+                "ViT mosaic: all %d frames in batch fall outside canvas — "
+                "increase overshoot_factor", int(finite.sum()),
+            )
+            return
+        if not in_bounds.all():
+            self._logger.warning(
+                "ViT mosaic: %d/%d frames in batch fall outside canvas — clipping",
+                int((~in_bounds).sum()), int(finite.sum()),
+            )
+        positions_px = np.empty((int(in_bounds.sum()), 2), dtype=np.float64)
+        positions_px[:, 0] = py[in_bounds]
+        positions_px[:, 1] = px[in_bounds]
+        finite_idx = np.where(finite)[0][in_bounds]
+        batch = phase[finite_idx]
 
         try:
             self._mosaic, self._counts = stitch_batch_into(

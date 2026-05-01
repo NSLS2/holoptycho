@@ -255,25 +255,6 @@ class TiledWriter:
         except Exception:
             logger.exception("TiledWriter.write_vit_mosaic failed")
 
-    def delete_vit_mosaic(self) -> None:
-        """Delete the ``<run>/vit/mosaic`` array node, if present.
-
-        Used by ``SaveViTResult`` when the canvas grows: tiled array nodes
-        have a fixed shape, so a write with a different shape would 422.
-        Recreate-on-next-write by deleting the existing node here.
-        """
-        if self._run is None:
-            return
-        try:
-            vit = self._run.get("vit") if "vit" in self._run else None
-            if vit is None or "mosaic" not in vit:
-                return
-            vit["mosaic"].delete(external_only=False)
-            logger.info("delete_vit_mosaic: dropped existing mosaic node for shape change")
-        except Exception:
-            logger.exception("TiledWriter.delete_vit_mosaic failed")
-
-
 class _NpyFallbackWriter:
     """Writes results to .npy files under /data/users/Holoscan/<run_uid>/ —
     matches the behaviour before tiled integration was added, but per-run."""
@@ -366,17 +347,6 @@ class _NpyFallbackWriter:
             os.replace(tmp, f"{self._run_dir}/vit_mosaic.npy")
         except Exception:
             logger.exception("_NpyFallbackWriter.write_vit_mosaic failed")
-
-    def delete_vit_mosaic(self) -> None:
-        """Drop the .npy mosaic so the next write replaces it cleanly."""
-        if self._run_dir is None:
-            return
-        try:
-            path = f"{self._run_dir}/vit_mosaic.npy"
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            logger.exception("_NpyFallbackWriter.delete_vit_mosaic failed")
 
 
 # Module-level singleton — shared by all callers within the same process.
