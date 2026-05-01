@@ -258,6 +258,7 @@ def load_scan_from_tiled(
     run_uid: str,
     api_key: str = "",
     max_frames: int | None = None,
+    skip_frames: int = 0,
 ) -> tuple[np.ndarray, list, list]:
     """Load diffraction frames and motor positions for a run from tiled.
 
@@ -312,7 +313,11 @@ def load_scan_from_tiled(
     )
     frames_node = stream[detector_key]
     n_total = frames_node.shape[0]
-    n_frames = min(max_frames, n_total) if max_frames is not None else n_total
+    if skip_frames < 0:
+        raise ValueError(f"skip_frames must be >= 0, got {skip_frames}")
+    if skip_frames >= n_total:
+        raise ValueError(f"skip_frames={skip_frames} >= n_total={n_total}; nothing to publish")
+    end_frame = min(skip_frames + max_frames, n_total) if max_frames is not None else n_total
 
     # HXN tiled stores per-frame chunks (chunks=(1,1,1,...) along axis 0). One
     # big slice expands into thousands of tiny per-chunk HTTP requests and the
@@ -320,10 +325,10 @@ def load_scan_from_tiled(
     # request returns ~hundreds of MB and concatenate.
     batch_size = 500
     parts = []
-    for start in range(0, n_frames, batch_size):
-        stop = min(start + batch_size, n_frames)
+    for start in range(skip_frames, end_frame, batch_size):
+        stop = min(start + batch_size, end_frame)
         parts.append(np.asarray(frames_node[start:stop]))
-        print(f"  ... read {stop}/{n_frames} frames", flush=True)
+        print(f"  ... read {stop - skip_frames}/{end_frame - skip_frames} frames", flush=True)
     frames = np.concatenate(parts, axis=0)
 
     if frames.ndim == 4 and frames.shape[0] == 1:
@@ -333,10 +338,18 @@ def load_scan_from_tiled(
         frames = frames[:, 0]
     positions_x = stream[x_key].read().tolist()
     positions_y = stream[y_key].read().tolist()
-    if max_frames is not None:
-        positions_x = positions_x[:max_frames]
-        positions_y = positions_y[:max_frames]
+    # Encoder arrays are upsample× longer than the Eiger frame count. Trim them
+    # to the same window we trimmed Eiger to so PointProcessorOp keeps its
+    # frame_idx → position mapping.
+    upsample = max(1, len(positions_x) // n_total)
+    pos_start = skip_frames * upsample
+    pos_end = end_frame * upsample
+    positions_x = positions_x[pos_start:pos_end]
+    positions_y = positions_y[pos_start:pos_end]
 
+    if skip_frames or max_frames is not None:
+        print(f"Skipping first {skip_frames} frames; publishing {len(frames)} frames "
+              f"(scan-orig indices {skip_frames}..{end_frame - 1}).", flush=True)
     print(f"Loaded {len(frames)} frames, shape={frames.shape}, dtype={frames.dtype}", flush=True)
     return frames, positions_x, positions_y
 
@@ -487,6 +500,15 @@ def parse_args():
         default=None,
         help="Truncate the scan to the first N frames (handy for quick tests on big scans)",
     )
+    parser.add_argument(
+        "--skip-frames",
+        type=int,
+        default=0,
+        help="Drop the first N Eiger frames (and aligned encoder samples) before "
+             "publishing. Useful when a scan has a settling/ramp-up region whose "
+             "encoder readings overshoot the commanded scan range and crash the "
+             "iterative recon.",
+    )
     return parser.parse_args()
 
 
@@ -533,6 +555,7 @@ def main():
         api_key=args.tiled_api_key,
         run_uid=args.uid,
         max_frames=args.max_frames,
+        skip_frames=args.skip_frames,
     )
 
     if args.batch_x0 is None or args.batch_y0 is None:
