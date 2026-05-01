@@ -522,7 +522,7 @@ class SaveViTResult(Operator):
             )
             self.batch_num += 1
         except Exception:
-            pass
+            self._logger.exception("SaveViTResult.compute failed")
 
 
 class MosaicWriterOp(Operator):
