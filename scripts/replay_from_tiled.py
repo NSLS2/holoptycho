@@ -102,7 +102,10 @@ def _eiger_encoding_msg(shape: tuple, dtype: np.dtype) -> bytes:
 
 
 def publish_eiger(
-    frames: np.ndarray,
+    chunks_iter,
+    n_frames: int,
+    frame_shape: tuple,
+    frame_dtype: np.dtype,
     endpoint: str,
     server_public_key: str,
     server_secret_key: str,
@@ -111,10 +114,21 @@ def publish_eiger(
 ):
     """Publish Eiger frames over a ZMQ PUB socket.
 
+    Frames are pulled from ``chunks_iter`` lazily — each iteration yields a
+    ``(M, H, W)`` ndarray fetched from tiled. Switching to chunked iteration
+    avoids holding the whole 5 GB scan in memory and lets the publisher
+    start streaming before the entire scan has been transferred from tiled.
+
     Parameters
     ----------
-    frames:
-        Array of shape [N, H, W] — one detector frame per scan point.
+    chunks_iter:
+        Iterator yielding ``(M, H, W)`` ndarrays of detector frames.
+    n_frames:
+        Total number of frames the iterator will yield (for logging).
+    frame_shape:
+        ``(H, W)`` of every frame — used to build the encoding header.
+    frame_dtype:
+        dtype of every frame — used to build the encoding header.
     endpoint:
         ZMQ bind address, e.g. ``tcp://0.0.0.0:5555``.
     server_public_key, server_secret_key, client_public_key:
@@ -151,21 +165,20 @@ def publish_eiger(
     time.sleep(0.5)
 
     interval = 1.0 / rate_hz
-    n_frames, h, w = frames.shape
-    dtype = frames.dtype
+    encoding = _eiger_encoding_msg(frame_shape, frame_dtype)
 
     print(f"[eiger] publishing {n_frames} frames at {rate_hz} Hz on {endpoint}", flush=True)
 
-    for frame_id, frame in enumerate(frames):
-        header = json.dumps({"frame": frame_id, "series": 1}).encode()
-        encoding = _eiger_encoding_msg((h, w), dtype)
-        compressed = _compress_bslz4(frame)
-
-        socket.send(header, zmq.SNDMORE)
-        socket.send(encoding, zmq.SNDMORE)
-        socket.send(compressed)
-
-        time.sleep(interval)
+    frame_id = 0
+    for chunk in chunks_iter:
+        for frame in chunk:
+            header = json.dumps({"frame": frame_id, "series": 1}).encode()
+            compressed = _compress_bslz4(frame)
+            socket.send(header, zmq.SNDMORE)
+            socket.send(encoding, zmq.SNDMORE)
+            socket.send(compressed)
+            time.sleep(interval)
+            frame_id += 1
 
     print("[eiger] done", flush=True)
     socket.close()
@@ -253,23 +266,50 @@ def publish_panda(
 # Tiled data loading
 # ---------------------------------------------------------------------------
 
-def load_scan_from_tiled(
+def _fetch_frame_chunk(
+    frames_node, frame_axis: int, start: int, stop: int
+) -> np.ndarray:
+    """Fetch a (stop - start, H, W) chunk via tiled server-side slicing.
+
+    Squeezes out the spurious unit axis used by eiger2 ``(1, N, H, W)`` and
+    eiger1 ``(N, 1, H, W)`` layouts so the caller always sees ``(M, H, W)``.
+    """
+    if frame_axis == 0:
+        chunk = np.asarray(frames_node[start:stop])
+    else:
+        chunk = np.asarray(frames_node[:, start:stop])
+    if chunk.ndim == 4 and chunk.shape[0] == 1:
+        chunk = chunk[0]
+    elif chunk.ndim == 4 and chunk.shape[1] == 1:
+        chunk = chunk[:, 0]
+    return chunk
+
+
+def setup_scan_from_tiled(
     tiled_url: str,
     run_uid: str,
     api_key: str = "",
     max_frames: int | None = None,
     skip_frames: int = 0,
-) -> tuple[np.ndarray, list, list]:
-    """Load diffraction frames and motor positions for a run from tiled.
+    autodetect_frames: int = 50,
+) -> dict:
+    """Open tiled handles for a run and load just the data needed up front.
 
     Authentication is taken from the tiled credential cache (run ``tiled login``
     before calling this script).  Pass ``api_key`` only if you want to override.
 
+    Eagerly loads only:
+      * the encoder arrays (small — a few hundred KB even for 10k frames), and
+      * the first ``autodetect_frames`` detector frames so the caller can run
+        ``_auto_batch_offsets`` before publishing starts.
+
+    The remaining frames are streamed chunk-by-chunk during publishing via
+    ``_fetch_frame_chunk(frames_node, frame_axis, start, stop)``.
+
     Returns
     -------
-    frames : np.ndarray, shape [N, H, W]
-    positions_x : list of float
-    positions_y : list of float
+    dict with keys: frames_node, frame_axis, start, end, n_frames, frame_shape,
+    frame_dtype, head_frames, positions_x, positions_y.
     """
     if api_key:
         print(
@@ -294,7 +334,6 @@ def load_scan_from_tiled(
             f"Available keys: {list(stream)[:30]}"
         )
 
-    # Motor encoder channels also differ between scans.
     x_candidates = ("inenc2_val", "zpssx")
     y_candidates = ("inenc3_val", "zpssy")
     x_key = next((k for k in x_candidates if k in list(stream)), None)
@@ -307,42 +346,39 @@ def load_scan_from_tiled(
 
     slice_msg = f", first {max_frames}" if max_frames else ""
     print(
-        f"Loading frames for scan {scan_num} ({run_uid}) from tiled "
+        f"Setting up streamed replay for scan {scan_num} ({run_uid}) "
         f"[detector={detector_key}, x={x_key}, y={y_key}{slice_msg}]...",
         flush=True,
     )
     frames_node = stream[detector_key]
-    # Detect the frame axis. eiger2 stores (1, N, H, W); eiger1 sometimes (N, H, W).
     shape = tuple(frames_node.shape)
     if len(shape) == 4 and shape[0] == 1:
         frame_axis, n_total = 1, shape[1]
+        frame_h, frame_w = shape[2], shape[3]
+    elif len(shape) == 4:
+        frame_axis, n_total = 0, shape[0]
+        frame_h, frame_w = shape[2], shape[3]
     else:
         frame_axis, n_total = 0, shape[0]
+        frame_h, frame_w = shape[1], shape[2]
+    frame_dtype = frames_node.dtype
+
     if skip_frames < 0:
         raise ValueError(f"skip_frames must be >= 0, got {skip_frames}")
     if skip_frames >= n_total:
         raise ValueError(f"skip_frames={skip_frames} >= n_total={n_total}; nothing to publish")
     end_frame = min(skip_frames + max_frames, n_total) if max_frames is not None else n_total
+    n_publish = end_frame - skip_frames
 
-    # Let tiled slice the frame axis server-side — single request for the range.
-    print(f"  ... reading frames {skip_frames}..{end_frame} from tiled", flush=True)
-    if frame_axis == 0:
-        frames = np.asarray(frames_node[skip_frames:end_frame])
-    else:
-        frames = np.asarray(frames_node[:, skip_frames:end_frame])
+    # Pull the first chunk eagerly so auto-batch detection can run before
+    # the holoptycho pipeline starts. Cap to ``autodetect_frames`` or the
+    # size of the publish window, whichever is smaller.
+    head_n = min(autodetect_frames, n_publish)
+    print(f"  ... fetching head ({head_n} frames) for autodetect", flush=True)
+    head_frames = _fetch_frame_chunk(frames_node, frame_axis, skip_frames, skip_frames + head_n)
 
-    if frames.ndim == 4 and frames.shape[0] == 1:
-        frames = frames[0]
-    elif frames.ndim == 4 and frames.shape[1] == 1:
-        # (N, 1, H, W) layout used by some eiger1 scans — squeeze the spurious axis.
-        frames = frames[:, 0]
-    # Encoders are stored as (1, N*upsample) at HXN; ravel before slicing so
-    # the upsample math doesn't depend on dimensionality.
     positions_x = np.asarray(stream[x_key].read()).ravel().tolist()
     positions_y = np.asarray(stream[y_key].read()).ravel().tolist()
-    # Encoder arrays are upsample× longer than the Eiger frame count. Trim them
-    # to the same window we trimmed Eiger to so PointProcessorOp keeps its
-    # frame_idx → position mapping.
     upsample = max(1, len(positions_x) // n_total)
     pos_start = skip_frames * upsample
     pos_end = end_frame * upsample
@@ -350,10 +386,39 @@ def load_scan_from_tiled(
     positions_y = positions_y[pos_start:pos_end]
 
     if skip_frames or max_frames is not None:
-        print(f"Skipping first {skip_frames} frames; publishing {len(frames)} frames "
+        print(f"Skipping first {skip_frames} frames; will publish {n_publish} frames "
               f"(scan-orig indices {skip_frames}..{end_frame - 1}).", flush=True)
-    print(f"Loaded {len(frames)} frames, shape={frames.shape}, dtype={frames.dtype}", flush=True)
-    return frames, positions_x, positions_y
+    print(f"Will stream {n_publish} frames, shape=({frame_h}, {frame_w}), dtype={frame_dtype}", flush=True)
+    return {
+        "frames_node": frames_node,
+        "frame_axis": frame_axis,
+        "start": skip_frames,
+        "end": end_frame,
+        "n_frames": n_publish,
+        "frame_shape": (frame_h, frame_w),
+        "frame_dtype": frame_dtype,
+        "head_frames": head_frames,
+        "positions_x": positions_x,
+        "positions_y": positions_y,
+    }
+
+
+def iter_frame_chunks(
+    streams: dict, head_frames: np.ndarray, chunk_size: int
+):
+    """Yield chunks of detector frames, starting with the already-fetched head.
+
+    ``head_frames`` is the eager auto-detect read from
+    :func:`setup_scan_from_tiled`. We yield it as-is (avoids re-reading the
+    same range from tiled), then fall back to chunked server-side slicing
+    for the rest of the publish window.
+    """
+    yield head_frames
+    head_end = streams["start"] + len(head_frames)
+    end = streams["end"]
+    for s in range(head_end, end, chunk_size):
+        stop = min(s + chunk_size, end)
+        yield _fetch_frame_chunk(streams["frames_node"], streams["frame_axis"], s, stop)
 
 
 def _json_request(url: str, method: str = "GET", payload: dict | None = None) -> dict:
@@ -511,6 +576,17 @@ def parse_args():
              "encoder readings overshoot the commanded scan range and crash the "
              "iterative recon.",
     )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=256,
+        help="Number of frames per tiled fetch during streaming (default: 256). "
+             "Smaller = lower latency before publishing starts and lower peak "
+             "memory; larger = fewer round-trips. The publisher fetches the "
+             "next chunk between rate-limited frame sends, so as long as a "
+             "chunk's fetch (~hundreds of ms) is shorter than the publish "
+             "interval (chunk_size / rate_hz) the stream stays smooth.",
+    )
     return parser.parse_args()
 
 
@@ -550,9 +626,9 @@ def main():
         print("ERROR: --tiled-url or TILED_BASE_URL is required", file=sys.stderr)
         sys.exit(1)
 
-    # Load data from tiled before starting the pipeline so we can auto-detect
-    # the diffraction center if the user didn't explicitly set --batch-x0/y0.
-    frames, positions_x, positions_y = load_scan_from_tiled(
+    # Open tiled handles + eagerly load only the head frames + encoder
+    # arrays. The remaining frames are pulled chunk-by-chunk during publish.
+    streams = setup_scan_from_tiled(
         tiled_url=args.tiled_url,
         api_key=args.tiled_api_key,
         run_uid=args.uid,
@@ -561,26 +637,33 @@ def main():
     )
 
     if args.batch_x0 is None or args.batch_y0 is None:
-        auto_x0, auto_y0 = _auto_batch_offsets(frames, args.nx, args.ny)
+        auto_x0, auto_y0 = _auto_batch_offsets(streams["head_frames"], args.nx, args.ny)
         if args.batch_x0 is None:
             args.batch_x0 = auto_x0
         if args.batch_y0 is None:
             args.batch_y0 = auto_y0
+        h, w = streams["frame_shape"]
         print(
             f"[holoptycho] auto-detected diffraction center: "
             f"batch_x0={args.batch_x0}, batch_y0={args.batch_y0} "
-            f"(box {args.nx}x{args.ny} on {frames.shape[1]}x{frames.shape[2]} detector)",
+            f"(box {args.nx}x{args.ny} on {h}x{w} detector)",
             flush=True,
         )
 
     if args.hp_start:
         start_holoptycho_pipeline(args)
 
-    # Run Eiger and PandA publishers concurrently
+    # Run Eiger and PandA publishers concurrently. The Eiger thread pulls
+    # chunks from tiled lazily — first chunk is the already-fetched head,
+    # subsequent chunks are server-side-sliced via _fetch_frame_chunk.
+    chunks_iter = iter_frame_chunks(streams, streams["head_frames"], args.chunk_size)
     eiger_thread = threading.Thread(
         target=publish_eiger,
         args=(
-            frames,
+            chunks_iter,
+            streams["n_frames"],
+            streams["frame_shape"],
+            streams["frame_dtype"],
             args.eiger_endpoint,
             args.eiger_server_public_key,
             args.eiger_server_secret_key,
@@ -592,8 +675,8 @@ def main():
     panda_thread = threading.Thread(
         target=publish_panda,
         args=(
-            positions_x,
-            positions_y,
+            streams["positions_x"],
+            streams["positions_y"],
             args.panda_endpoint,
             args.panda_ch1,
             args.panda_ch2,
