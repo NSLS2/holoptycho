@@ -298,6 +298,7 @@ class SaveViTResult(Operator):
         self._canvas_origin_um = None
         self._half_h = 0
         self._half_w = 0
+        self._grow_log_count = 0
         # Tell the writer to drop the old mosaic node so the new run starts
         # with a fresh shape rather than failing the shape check.
         try:
@@ -395,10 +396,22 @@ class SaveViTResult(Operator):
         cur_y_hi = oy_um + (canvas_h - margin_y) * ps * 1e6
         cur_x_lo = ox_um + margin_x_um
         cur_x_hi = ox_um + (canvas_w - margin_x) * ps * 1e6
-        if (
+        fits = (
             by_min >= cur_y_lo and by_max <= cur_y_hi
             and bx_min >= cur_x_lo and bx_max <= cur_x_hi
-        ):
+        )
+        # Log the first 3 grow-checks and every check where fits=False so we
+        # can verify the canvas actually expands when positions overflow.
+        log_count = getattr(self, "_grow_log_count", 0)
+        if log_count < 3 or not fits:
+            self._logger.info(
+                "ViT mosaic grow-check #%d: batch bounds y=[%.3f, %.3f] x=[%.3f, %.3f] "
+                "vs canvas-valid y=[%.3f, %.3f] x=[%.3f, %.3f] -> fits=%s",
+                log_count, by_min, by_max, bx_min, bx_max,
+                cur_y_lo, cur_y_hi, cur_x_lo, cur_x_hi, fits,
+            )
+            self._grow_log_count = log_count + 1
+        if fits:
             return False
 
         # Otherwise, expand the bounding box to include the new positions
