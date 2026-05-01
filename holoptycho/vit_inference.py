@@ -478,20 +478,33 @@ class SaveViTResult(Operator):
             self.max_index_seen = max(self.max_index_seen, int(indices.max()))
             t0 = time.perf_counter()
 
+            # Compute progress info (chunk N / M, frames per chunk) for the
+            # per-op timing logs. ``positions_um`` length is the configured
+            # n_frames for the scan; with batch size pred.shape[0] (= 64
+            # currently) we get the total number of chunks.
+            chunk_size = int(pred.shape[0])
+            total_batches = 0
+            positions = None
+            if self._positions_provider is not None:
+                positions = self._positions_provider()
+                if positions is not None and chunk_size > 0:
+                    total_batches = (int(positions.shape[0]) + chunk_size - 1) // chunk_size
+
             # Write positions BEFORE the per-batch container so any WebSocket
             # subscriber that wakes on the new batch sees an already-fresh
             # positions_um and can stitch with the real per-frame positions.
-            if self._positions_provider is not None:
-                positions = self._positions_provider()
-                if positions is not None:
-                    _writer.write_positions(positions)
+            if positions is not None:
+                _writer.write_positions(positions)
 
-            # Hand off (batch_num, pred, indices) to BatchWriterOp. The
-            # downstream queue is bounded (capacity=32) FIFO with no drop
-            # policy: every batch's pred + indices is unique data, so we
-            # backpressure rather than discard. Up to 32 batches × ~33 MB
-            # can buffer in RAM while tiled drains.
-            op_output.emit((self.batch_num, pred, indices), "vit_batch")
+            # Hand off (batch_num, total_batches, chunk_size, pred, indices) to
+            # BatchWriterOp. The downstream queue is bounded (capacity=32)
+            # FIFO with no drop policy: every batch's pred + indices is unique
+            # data, so we backpressure rather than discard. Up to 32 batches ×
+            # ~33 MB can buffer in RAM while tiled drains.
+            op_output.emit(
+                (self.batch_num, total_batches, chunk_size, pred, indices),
+                "vit_batch",
+            )
 
             # Stitch in-memory and hand off to MosaicWriterOp. The downstream
             # input is capacity=1 + QueuePolicy.POP, so if the writer is mid-
@@ -499,11 +512,13 @@ class SaveViTResult(Operator):
             # it. We never block this thread on the tiled write.
             snap = self._stitch_batch(pred, indices)
             if snap is not None:
+                snap = (*snap, total_batches, chunk_size)
                 op_output.emit(snap, "mosaic_snapshot")
 
             self._logger.info(
-                "SaveViTResult: batch=%d processed in %.1f ms",
-                self.batch_num, (time.perf_counter() - t0) * 1000,
+                "SaveViTResult: chunk %d/%d (%d frames) processed in %.1f ms",
+                self.batch_num + 1, total_batches, chunk_size,
+                (time.perf_counter() - t0) * 1000,
             )
             self.batch_num += 1
         except Exception:
@@ -552,7 +567,8 @@ class MosaicWriterOp(Operator):
         if snap is None:
             return
         try:
-            mosaic, counts, batch_num, pixel_size_m, canvas_origin_um = snap
+            (mosaic, counts, batch_num, pixel_size_m, canvas_origin_um,
+             total_batches, chunk_size) = snap
             t0 = time.perf_counter()
             # Threshold counts at 0.5 (not 0) to suppress FFT-leakage tails
             # from the Fourier-shift placement, which deposit tiny non-zero
@@ -576,8 +592,9 @@ class MosaicWriterOp(Operator):
             )
             t_done = time.perf_counter()
             self._logger.info(
-                "MosaicWriterOp: batch=%d normalize=%.0f ms write=%.0f ms",
-                batch_num, (t_norm - t0) * 1000, (t_done - t_norm) * 1000,
+                "MosaicWriterOp: chunk %d/%d (%d frames) normalize=%.0f ms write=%.0f ms",
+                batch_num + 1, total_batches, chunk_size,
+                (t_norm - t0) * 1000, (t_done - t_norm) * 1000,
             )
         except Exception:
             self._logger.exception("MosaicWriterOp.compute failed")
@@ -618,12 +635,13 @@ class BatchWriterOp(Operator):
         if msg is None:
             return
         try:
-            batch_num, pred, indices = msg
+            batch_num, total_batches, chunk_size, pred, indices = msg
             t0 = time.perf_counter()
             _writer.write_vit(batch_num=batch_num, pred=pred, indices=indices)
             self._logger.info(
-                "BatchWriterOp: batch=%d wrote in %.0f ms",
-                batch_num, (time.perf_counter() - t0) * 1000,
+                "BatchWriterOp: chunk %d/%d (%d frames) wrote in %.0f ms",
+                batch_num + 1, total_batches, chunk_size,
+                (time.perf_counter() - t0) * 1000,
             )
         except Exception:
             self._logger.exception("BatchWriterOp.compute failed")
