@@ -249,6 +249,10 @@ class SaveViTResult(Operator):
         enable_batch_writes: bool = False,
         **kwargs,
     ):
+        # Holoscan's Operator.__init__ calls setup(spec), so any attribute
+        # setup() reads must be assigned BEFORE super().__init__() runs.
+        self._enable_batch_writes = enable_batch_writes
+
         super().__init__(fragment, *args, **kwargs)
         self.batch_num = 0
         self.max_index_seen = -1
@@ -266,7 +270,6 @@ class SaveViTResult(Operator):
         self._fourier_pad = fourier_pad
         self._phase_channel_index = phase_channel_index
         self._overshoot_factor = overshoot_factor
-        self._enable_batch_writes = enable_batch_writes
 
         # Lazy state — built on first batch once we know the model's patch
         # size (``pred.shape[-1]``). Reset on each new scan.
