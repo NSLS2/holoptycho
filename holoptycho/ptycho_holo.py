@@ -484,16 +484,21 @@ class PtychoSimulApp(Application):
             data_is_shifted=False,
             name="vit_inference",
         )
+        # Per-batch pred + indices export is gated by the config field
+        # vit_batch_writes (default off) — see SaveViTResult docstring for why.
+        enable_batch_writes = bool(getattr(self.param, "vit_batch_writes", False))
         self.vit_save = SaveViTResult(
             self,
             positions_provider=lambda: self.point_proc.positions_um,
             pixel_size_m=float(self.pty.recon.x_pixel_m),
             x_range_um=float(self.pty.recon.x_range_um),
             y_range_um=float(self.pty.recon.y_range_um),
+            enable_batch_writes=enable_batch_writes,
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
-        self.batch_writer = BatchWriterOp(self, name="batch_writer")
+        if enable_batch_writes:
+            self.batch_writer = BatchWriterOp(self, name="batch_writer")
 
         self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
 
@@ -512,11 +517,13 @@ class PtychoSimulApp(Application):
         # VIT: branch off InitSimul's diff_amp (fan-out, parallel to image_send)
         self.add_flow(self.init, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
         self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
-        # Async tiled writes: pred+indices via a bounded FIFO (no drop, every
-        # batch is unique data) and the mosaic snapshot via capacity=1 +
-        # QueuePolicy.POP (latest wins, intermediate snapshots OK to skip).
-        self.add_flow(self.vit_save, self.batch_writer, {("vit_batch", "batch")})
+        # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the writer's
+        # input drops superseded snapshots while a write is in flight.
         self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
+        if enable_batch_writes:
+            # Per-batch pred + indices via a bounded FIFO (no drop, every
+            # batch is unique data). Gated by config; see SaveViTResult docstring.
+            self.add_flow(self.vit_save, self.batch_writer, {("vit_batch", "batch")})
 
 
 class PtychoApp(Application):
@@ -729,16 +736,21 @@ class PtychoApp(Application):
         # SaveViTResult publishes positions_um alongside each batch and
         # accumulates the running phase mosaic at <run>/vit/mosaic. The
         # dashboard renders that array directly — no client-side stitching.
+        # Per-batch pred + indices export is gated by the config field
+        # vit_batch_writes (default off) — see SaveViTResult docstring.
+        enable_batch_writes = bool(getattr(self.param, "vit_batch_writes", False))
         self.vit_save = SaveViTResult(
             self,
             positions_provider=lambda: self.point_proc.positions_um,
             pixel_size_m=float(self.pty.recon.x_pixel_m),
             x_range_um=float(self.pty.recon.x_range_um),
             y_range_um=float(self.pty.recon.y_range_um),
+            enable_batch_writes=enable_batch_writes,
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
-        self.batch_writer = BatchWriterOp(self, name="batch_writer")
+        if enable_batch_writes:
+            self.batch_writer = BatchWriterOp(self, name="batch_writer")
 
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
@@ -758,11 +770,14 @@ class PtychoApp(Application):
             # ViT: branch off ImagePreprocessorOp's diff_amp (fan-out, parallel to image_send)
             self.add_flow(self.image_proc, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
             self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
-            # Async tiled writes: pred+indices via a bounded FIFO (no drop,
-            # every batch is unique data) and the mosaic snapshot via
-            # capacity=1 + QueuePolicy.POP (latest wins).
-            self.add_flow(self.vit_save, self.batch_writer, {("vit_batch", "batch")})
+            # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the
+            # writer's input drops superseded snapshots while a write is in
+            # flight, so the ViT branch keeps stitching at full cadence.
             self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
+            if enable_batch_writes:
+                # Per-batch pred + indices via a bounded FIFO (no drop,
+                # every batch is unique data). Gated by config.
+                self.add_flow(self.vit_save, self.batch_writer, {("vit_batch", "batch")})
 
 
 def main():

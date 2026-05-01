@@ -383,6 +383,7 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `batch_x0`, `batch_y0` | int (str) | Top-left crop offset in the detector frame |
 | `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
 | `recon_mode` | str | Which reconstruction branches to wire: `iterative`, `vit`, or `both`. Default `both`. Use `iterative` to skip the ViT op entirely (no engine load); use `vit` to skip the iterative DM/ML solver (no `live/`/`final/` Tiled writes). |
+| `vit_batch_writes` | bool | (Optional) Enable per-batch `pred` + `indices` writes to `<run>/vit/batches/NNNNNN/...` via `BatchWriterOp`. Default `false`. Each batch's `pred` is `(64, 2, 256, 256)` float32 (~33 MB) and a tiled HTTPS PUT runs at ~1 MB/s, so enabling this gates the whole ViT branch at ~28 s/batch. Leave off for live mosaic viewing; turn on only when offline analysts need the raw per-batch arrays. |
 | `raw_uid` | str | (Optional) UID of the raw Bluesky run being reconstructed. Stored as metadata on the per-run Tiled container. The `replay_from_tiled.py` and `config_from_tiled.py` config builders fill it in automatically from `--uid`. |
 | `scan_id` | str | (Optional) Scan id of the raw run. Defaults to `scan_num` if omitted. Stored as metadata on the per-run Tiled container. |
 | `xray_energy_kev` | float (str) | X-ray energy in keV |

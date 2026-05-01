@@ -246,6 +246,7 @@ class SaveViTResult(Operator):
         fourier_pad: int = 32,
         phase_channel_index: int = 1,
         overshoot_factor: float = 3.0,
+        enable_batch_writes: bool = False,
         **kwargs,
     ):
         super().__init__(fragment, *args, **kwargs)
@@ -265,6 +266,7 @@ class SaveViTResult(Operator):
         self._fourier_pad = fourier_pad
         self._phase_channel_index = phase_channel_index
         self._overshoot_factor = overshoot_factor
+        self._enable_batch_writes = enable_batch_writes
 
         # Lazy state — built on first batch once we know the model's patch
         # size (``pred.shape[-1]``). Reset on each new scan.
@@ -458,7 +460,12 @@ class SaveViTResult(Operator):
             IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
         )
         spec.output("mosaic_snapshot").condition(ConditionType.NONE)
-        spec.output("vit_batch").condition(ConditionType.NONE)
+        # Per-batch pred + indices export is opt-in (config field
+        # vit_batch_writes). Disabled by default because tiled HTTPS PUT
+        # throughput (~1 MB/s for the 33 MB pred) gates the whole ViT
+        # branch when enabled.
+        if self._enable_batch_writes:
+            spec.output("vit_batch").condition(ConditionType.NONE)
 
     def compute(self, op_input, op_output, context):
         try:
@@ -496,15 +503,15 @@ class SaveViTResult(Operator):
             if positions is not None:
                 _writer.write_positions(positions)
 
-            # Hand off (batch_num, total_batches, chunk_size, pred, indices) to
-            # BatchWriterOp. The downstream queue is bounded (capacity=32)
-            # FIFO with no drop policy: every batch's pred + indices is unique
-            # data, so we backpressure rather than discard. Up to 32 batches ×
-            # ~33 MB can buffer in RAM while tiled drains.
-            op_output.emit(
-                (self.batch_num, total_batches, chunk_size, pred, indices),
-                "vit_batch",
-            )
+            # Per-batch pred + indices export is opt-in (config field
+            # vit_batch_writes). When enabled, hand off to BatchWriterOp via a
+            # bounded FIFO; when disabled, skip entirely so the ViT branch
+            # isn't gated by tiled's slow HTTPS PUT (~28 s per 33 MB pred).
+            if self._enable_batch_writes:
+                op_output.emit(
+                    (self.batch_num, total_batches, chunk_size, pred, indices),
+                    "vit_batch",
+                )
 
             # Stitch in-memory and hand off to MosaicWriterOp. The downstream
             # input is capacity=1 + QueuePolicy.POP, so if the writer is mid-
