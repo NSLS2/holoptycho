@@ -67,7 +67,7 @@ _handler = logging.handlers.RotatingFileHandler(
     _log_file, maxBytes=10 * 1024 * 1024, backupCount=3
 )
 _handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 )
 logging.getLogger().addHandler(_handler)
 logging.getLogger().setLevel(_resolve_log_level())

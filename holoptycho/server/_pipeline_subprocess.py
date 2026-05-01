@@ -62,7 +62,7 @@ def _configure_logging() -> None:
         Path(log_file), maxBytes=10 * 1024 * 1024, backupCount=3
     )
     handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     )
     root = logging.getLogger()
     root.addHandler(handler)
