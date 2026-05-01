@@ -27,7 +27,7 @@ def std_err_print(msg):
     sys.stderr.write(msg+"\n")
 
 
-supported_encodings = {"bs32-lz4<": "bslz4", "lz4<": "lz4", "bs16-lz4<": "bslz4"}
+supported_encodings = {"bs32-lz4<": "bslz4", "lz4<": "lz4", "bs16-lz4<": "bslz4", "raw": "raw"}
 supported_types = {"uint32": "uint32", "uint16": "uint16"}
 def decode_json_message(data_msg, encoding_msg) -> tuple[str, npt.NDArray]:
     # std_err_print("DECODING THE MESSAGE")
@@ -47,9 +47,13 @@ def decode_json_message(data_msg, encoding_msg) -> tuple[str, npt.NDArray]:
 
         elem_type = getattr(np, data_type_str)
         elem_size = elem_type(0).nbytes
-        # std_err_print(f"data_msg: {data_msg}")
-        decompressed = decompress(data_msg, data_encoding_str, elem_size=elem_size)
-        image = np.frombuffer(bytearray(decompressed), dtype=elem_type)
+        if data_encoding_str == "raw":
+            # Replay-mode escape hatch: payload is the raw frame bytes with
+            # no header, no compression. Skip the dectris decompressor.
+            image = np.frombuffer(bytearray(data_msg), dtype=elem_type)
+        else:
+            decompressed = decompress(data_msg, data_encoding_str, elem_size=elem_size)
+            image = np.frombuffer(bytearray(decompressed), dtype=elem_type)
         image = image.reshape(data_shape[1], data_shape[0])
         msg_type = "image"
     else:

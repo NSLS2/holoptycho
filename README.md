@@ -326,7 +326,8 @@ pixi run -e replay replay \
     --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
-    --rate 200
+    --rate 200 \
+    --no-compress
 
 # Or let the replay script build the config from the same run and start or
 # restart holoptycho before it publishes anything. This requires a selected
@@ -338,7 +339,8 @@ pixi run -e replay replay \
     --hp-url http://localhost:8000 \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
-    --rate 200
+    --rate 200 \
+    --no-compress
 
 # 5. If you did not use --hp-start, start holoptycho in another terminal
 hp start '{"scan_num": "320045", ...}'
@@ -388,6 +390,15 @@ the config the replay script POSTs to holoptycho):
   than loading the whole scan up front, so replay starts publishing within
   seconds even for multi-GB scans. Smaller chunks = lower startup latency
   and lower peak memory; larger = fewer round-trips.
+- **`--no-compress`** — skip bslz4 compression and publish raw frame bytes
+  with a `"raw"` encoding header. The receiver inside holoptycho recognises
+  this and reshapes the bytes directly without invoking the dectris
+  decompressor. Avoids the ~30s/batch Python `bitshuffle` bottleneck that
+  otherwise gates publish throughput (`dectris-compression 0.3.1` removed
+  the C `compress` entrypoint, so the script falls back to a pure-Python
+  implementation). Localhost ZMQ handles the ~10× larger wire size easily,
+  so a 50s scan replays in 50s instead of ~12 min. Live mode is unaffected
+  — the real Eiger detector never uses the `"raw"` encoding.
 
 ### Best practices
 
@@ -411,6 +422,11 @@ the config the replay script POSTs to holoptycho):
 - **`--max-frames N` plus `--n-iterations 50–100`** gets you a full
   end-to-end cycle (config → stream → recon → final write) in under a
   minute for quick smoke tests on big scans.
+- **Pass `--no-compress`** for replay throughput. With the current
+  `dectris-compression` package the C `compress` is missing, so the
+  default path falls back to Python `bitshuffle` which gates the
+  pipeline at ~15 frames/sec. `--no-compress` removes that bottleneck
+  entirely.
 
 ---
 

@@ -546,7 +546,8 @@ pixi run -e replay replay \
     --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
-    --rate 200
+    --rate 200 \
+    --no-compress
 
 # Or let the replay script build the config from the same run and start or
 # restart holoptycho before it begins publishing. This requires a selected
@@ -558,7 +559,8 @@ pixi run -e replay replay \
     --hp-url http://localhost:8000 \
     --eiger-endpoint tcp://0.0.0.0:5555 \
     --panda-endpoint tcp://0.0.0.0:5556 \
-    --rate 200
+    --rate 200 \
+    --no-compress
 ```
 
 `--tiled-url` may be either the Tiled server root
@@ -647,6 +649,18 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   iterative, or `both` to run them in parallel for comparison. `vit`-only
   is the fastest path for verifying changes to `mosaic_stitch.py` /
   `SaveViTResult`.
+
+* **Default to `--no-compress`.** `dectris-compression 0.3.1` removed the
+  C `compress` entrypoint, so without this flag the replay script falls
+  back to a Python `bitshuffle.compress_lz4` per frame which gates publish
+  throughput at ~15 frames/sec — a 50-second scan takes ~12 minutes to
+  replay and the pipeline can fall behind by tens of batches. `--no-compress`
+  publishes raw frame bytes with a `"raw"` encoding header; the receiver
+  in `holoptycho/datasource.py::decode_json_message` recognises this and
+  reshapes the bytes directly, skipping decompression. Localhost ZMQ
+  handles the ~10× larger wire size easily, so replay runs at the
+  requested `--rate`. Live mode is unaffected — the real Eiger detector
+  never sets `encoding=raw`.
 
 Then start holoptycho with:
 

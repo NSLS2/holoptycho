@@ -61,8 +61,17 @@ from config_from_tiled import (
 # Eiger wire format helpers
 # ---------------------------------------------------------------------------
 
-def _compress_bslz4(array: np.ndarray) -> bytes:
-    """Compress a 2-D detector frame with bslz4 (bit-shuffle + LZ4)."""
+def _encode_frame(array: np.ndarray, *, no_compress: bool) -> bytes:
+    """Encode a 2-D detector frame for the dimage_d-1.0 wire format.
+
+    With ``no_compress=True`` the payload is the raw frame bytes (paired with
+    the ``"raw"`` encoding header); the receiver reshapes the bytes directly
+    without invoking the dectris decompressor. With ``no_compress=False`` the
+    frame is bslz4-compressed to match the live Eiger wire format.
+    """
+    if no_compress:
+        return np.ascontiguousarray(array).tobytes()
+
     try:
         from dectris.compression import compress
     except ImportError:
@@ -86,16 +95,20 @@ def _compress_bslz4(array: np.ndarray) -> bytes:
     return compress(array.tobytes(), "bslz4", elem_size=array.dtype.itemsize)
 
 
-def _eiger_encoding_msg(shape: tuple, dtype: np.dtype) -> bytes:
+def _eiger_encoding_msg(shape: tuple, dtype: np.dtype, *, no_compress: bool) -> bytes:
     """Build the dimage_d-1.0 encoding JSON frame."""
     dtype_map = {np.dtype("uint32"): "uint32", np.dtype("uint16"): "uint16"}
-    encoding_map = {
-        np.dtype("uint32"): "bs32-lz4<",
-        np.dtype("uint16"): "bs16-lz4<",
-    }
+    if no_compress:
+        encoding = "raw"
+    else:
+        encoding_map = {
+            np.dtype("uint32"): "bs32-lz4<",
+            np.dtype("uint16"): "bs16-lz4<",
+        }
+        encoding = encoding_map.get(dtype, "bs32-lz4<")
     return json.dumps({
         "htype": "dimage_d-1.0",
-        "encoding": encoding_map.get(dtype, "bs32-lz4<"),
+        "encoding": encoding,
         "shape": [shape[1], shape[0]],  # Eiger reports [cols, rows]
         "type": dtype_map.get(dtype, "uint32"),
     }).encode()
@@ -111,6 +124,7 @@ def publish_eiger(
     server_secret_key: str,
     client_public_key: str,
     rate_hz: float,
+    no_compress: bool = False,
 ):
     """Publish Eiger frames over a ZMQ PUB socket.
 
@@ -165,18 +179,19 @@ def publish_eiger(
     time.sleep(0.5)
 
     interval = 1.0 / rate_hz
-    encoding = _eiger_encoding_msg(frame_shape, frame_dtype)
+    encoding = _eiger_encoding_msg(frame_shape, frame_dtype, no_compress=no_compress)
 
-    print(f"[eiger] publishing {n_frames} frames at {rate_hz} Hz on {endpoint}", flush=True)
+    mode = "raw" if no_compress else "bslz4"
+    print(f"[eiger] publishing {n_frames} frames at {rate_hz} Hz on {endpoint} ({mode})", flush=True)
 
     frame_id = 0
     for chunk in chunks_iter:
         for frame in chunk:
             header = json.dumps({"frame": frame_id, "series": 1}).encode()
-            compressed = _compress_bslz4(frame)
+            payload = _encode_frame(frame, no_compress=no_compress)
             socket.send(header, zmq.SNDMORE)
             socket.send(encoding, zmq.SNDMORE)
-            socket.send(compressed)
+            socket.send(payload)
             time.sleep(interval)
             frame_id += 1
 
@@ -587,6 +602,16 @@ def parse_args():
              "chunk's fetch (~hundreds of ms) is shorter than the publish "
              "interval (chunk_size / rate_hz) the stream stays smooth.",
     )
+    parser.add_argument(
+        "--no-compress",
+        action="store_true",
+        help="Skip bslz4 compression and publish raw frame bytes with a "
+             "'raw' encoding header. Avoids the ~30s/batch Python "
+             "bitshuffle bottleneck (dectris-compression 0.3.1 dropped "
+             "the C compress entrypoint, so the script falls back to a "
+             "pure-Python implementation otherwise). The receiver inside "
+             "holoptycho recognises 'raw' and reshapes the bytes directly.",
+    )
     return parser.parse_args()
 
 
@@ -669,6 +694,7 @@ def main():
             args.eiger_server_secret_key,
             args.eiger_client_public_key,
             args.rate,
+            args.no_compress,
         ),
         name="eiger-publisher",
     )
