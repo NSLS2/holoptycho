@@ -77,7 +77,7 @@ LEGACY_PTYCHO_DEFAULTS = {
     "pc_kernel_n": "32",
     "position_correction_start": "50",
     "position_correction_step": "10",
-    "start_update_probe": "0",
+    "start_update_probe": "2",
     "start_update_object": "0",
     "refine_data_start_it": "10",
     "refine_data_interval": "5",

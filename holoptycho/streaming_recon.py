@@ -65,6 +65,13 @@ class StreamingPtychoRecon:
         self.alpha = float(getattr(config, "alpha", 1e-3))
         self.beta = float(getattr(config, "beta", 0.9))
         self.sigma2 = float(getattr(config, "sigma2", 5e-5))
+        # Hold the probe fixed at the FFT-init estimate for the first
+        # ``start_update_probe`` iterations while the object locks onto the
+        # data. HXN_development:ptycho_trans_ml.py line 3546 ships this with
+        # default 2; without it the probe update at iter 0 correlates against
+        # a near-uniform seed object and the DM loop can diverge.
+        self.start_update_probe = int(getattr(config, "start_update_probe", 2))
+        self.start_update_object = int(getattr(config, "start_update_object", 0))
         self.mask_obj_flag = bool(getattr(config, "mask_obj_flag", False))
         self.amp_max = float(getattr(config, "amp_max", 1.0))
         self.amp_min = float(getattr(config, "amp_min", 0.5))
@@ -590,11 +597,18 @@ class StreamingPtychoRecon:
         # exit-wave update
         self._update_psi(it)
 
-        # probe + object updates
-        self._accumulate_obj()
-        self._gather_obj()
-        self._accumulate_prb()
-        self._gather_prb()
+        # probe + object updates. Gating mirrors HXN_development's
+        # update_prb_obj (line 4448-4461): with the default
+        # ``start_update_probe = 2`` the probe is held fixed at the FFT init
+        # for the first 2 iterations while the object updates against the
+        # measured intensities. Without this gate, probe and object update
+        # together from a near-uniform seed and the DM loop diverges.
+        if it >= self.start_update_object:
+            self._accumulate_obj()
+            self._gather_obj()
+        if it >= self.start_update_probe:
+            self._accumulate_prb()
+            self._gather_prb()
 
         # snapshot into mmap arrays (for SaveLiveResult)
         self._update_mmap(it)
