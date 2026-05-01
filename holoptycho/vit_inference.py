@@ -98,7 +98,13 @@ class PtychoViTInferenceOp(Operator):
         self.total_infer_time = 0.0
 
     def _init_session(self):
-        """Create the ptychoml inference session."""
+        """Create and eagerly initialize the ptychoml inference session.
+
+        ``PtychoViTInference.__init__`` only stores config; the TRT engine and
+        CUDA context are loaded lazily on the first ``predict()`` call. We
+        force that load here by calling the (private) ``_init_engine`` so the
+        first batch isn't slowed down by the ~1–2 s engine deserialize.
+        """
         from ptychoml import PtychoViTInference
 
         if self.gpu == 0:
@@ -112,9 +118,10 @@ class PtychoViTInferenceOp(Operator):
             gpu=self.gpu,
             data_is_shifted=self._data_is_shifted,
         )
-        self.engine_batch_size = read_engine_batch_size(self.engine_path)
+        self._session._init_engine()
+        self.engine_batch_size = int(self._session.expected_input_shape[0])
         self._logger.info(
-            "ptychoml.PtychoViTInference created: engine=%s gpu=%d engine_batch=%d",
+            "ptychoml.PtychoViTInference ready: engine=%s gpu=%d engine_batch=%d",
             self.engine_path,
             self.gpu,
             self.engine_batch_size,
@@ -128,6 +135,12 @@ class PtychoViTInferenceOp(Operator):
             IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
         )
         spec.output("vit_result").condition(ConditionType.NONE)
+
+    def start(self):
+        # Load the TRT engine before the scheduler starts dispatching data so
+        # the first ViT batch doesn't pay the ~1–2 s engine load latency.
+        if self._session is None:
+            self._init_session()
 
     def compute(self, op_input, op_output, context):
         try:
@@ -469,6 +482,23 @@ class SaveViTResult(Operator):
         # branch when enabled.
         if self._enable_batch_writes:
             spec.output("vit_batch").condition(ConditionType.NONE)
+
+    def start(self):
+        # Numba JIT-compiles ``stitch_batch_into`` (and its FFT helpers) on
+        # the first call — ~1–2 s on the very first batch otherwise. Burn
+        # that cost here with a 2-frame dummy so the first real batch hits a
+        # warm cache.
+        try:
+            dummy_canvas = np.zeros((16, 16), dtype=np.float32)
+            dummy_counts = np.zeros_like(dummy_canvas)
+            dummy_patches = np.zeros((1, 4, 4), dtype=np.float32)
+            dummy_positions = np.array([[8.0, 8.0]], dtype=np.float64)
+            stitch_batch_into(
+                dummy_canvas, dummy_counts, dummy_patches, dummy_positions, pad=2,
+            )
+            self._logger.info("SaveViTResult: numba stitch kernel pre-compiled")
+        except Exception:
+            self._logger.exception("Numba pre-warm failed (non-fatal)")
 
     def compute(self, op_input, op_output, context):
         try:
