@@ -367,7 +367,15 @@ class SaveViTResult(Operator):
         )
         return True
 
-    def _stitch_batch(self, pred: np.ndarray, indices: np.ndarray) -> None:
+    def _stitch_batch(self, pred: np.ndarray, indices: np.ndarray):
+        """Stitch the batch into the in-memory mosaic and return a snapshot.
+
+        Returns ``(mosaic_copy, counts_copy, batch_num, pixel_size_m,
+        canvas_origin_um)`` for the downstream ``MosaicWriterOp`` to
+        normalize and write to tiled, or ``None`` if no work was done.
+        Copying the mosaic is ~1 ms for the typical 666x668 float32, well
+        under the per-batch budget.
+        """
         if not self._stitch_enabled:
             return
         positions_um = self._positions_provider()
@@ -433,30 +441,23 @@ class SaveViTResult(Operator):
             self._logger.exception("stitch_batch_into failed (skipping batch)")
             return
 
-        # Fill unfilled regions with the median of the valid pixels rather
-        # than NaN — tiled's PNG renderer treats NaN as 0, which would pull
-        # the colormap range down to 0 and render the actual signal at the
-        # bright end with no contrast. Threshold counts at 0.5 (not 0) to
-        # suppress FFT-leakage tails from the Fourier-shift placement, which
-        # deposit tiny non-zero counts well outside the patch footprints.
-        valid = self._counts >= 0.5
-        if valid.any():
-            avg = self._mosaic / np.where(valid, self._counts, 1.0)
-            fill = float(np.median(avg[valid]))
-            normalised = np.where(valid, avg, fill).astype(np.float32)
-        else:
-            normalised = np.zeros_like(self._mosaic, dtype=np.float32)
-        _writer.write_vit_mosaic(
-            normalised,
-            batch_num=self.batch_num,
-            pixel_size_m=self._pixel_size_m,
-            canvas_origin_um=self._canvas_origin_um,
+        # Hand off to MosaicWriterOp via a copy. The downstream operator runs
+        # on its own scheduler thread and does the (heavier) normalize +
+        # tiled write so this compute thread can return to the next ViT
+        # batch immediately. Copying ~3.5 MB total takes well under 1 ms.
+        return (
+            self._mosaic.copy(),
+            self._counts.copy(),
+            self.batch_num,
+            self._pixel_size_m,
+            self._canvas_origin_um,
         )
 
     def setup(self, spec: OperatorSpec):
         spec.input("results").connector(
             IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
         )
+        spec.output("mosaic_snapshot").condition(ConditionType.NONE)
 
     def compute(self, op_input, op_output, context):
         try:
@@ -489,11 +490,80 @@ class SaveViTResult(Operator):
                 indices=indices,
             )
 
-            # Accumulate this batch's phase into the running mosaic and
-            # publish the normalised result. On error this is logged but
-            # does not stop the per-batch publish above.
-            self._stitch_batch(pred, indices)
+            # Stitch in-memory and hand off to MosaicWriterOp. The downstream
+            # input is capacity=1 + QueuePolicy.POP, so if the writer is mid-
+            # tiled-PUT this snapshot replaces any stale one queued behind
+            # it. We never block this thread on the tiled write.
+            snap = self._stitch_batch(pred, indices)
+            if snap is not None:
+                op_output.emit(snap, "mosaic_snapshot")
 
             self.batch_num += 1
         except Exception:
             pass
+
+
+class MosaicWriterOp(Operator):
+    """Writes the latest ViT mosaic snapshot to tiled on its own scheduler
+    thread.
+
+    Each tiled HTTPS PUT of the mosaic node takes ~30 s end-to-end. Running
+    that on the upstream ``SaveViTResult`` thread would gate the whole ViT
+    branch on the tiled write. Instead, ``SaveViTResult`` emits a copy of
+    the in-memory ``(mosaic, counts)`` arrays per batch; this op's input
+    connector is ``capacity=1`` with ``QueuePolicy.POP``, so newer
+    snapshots evict older ones whenever the writer is busy. The pipeline
+    keeps stitching at full ViT cadence; tiled sees whatever slice of
+    progress it can keep up with.
+
+    This op is the only writer for ``<run>/vit/mosaic``. The pred + indices
+    per-batch outputs stay synchronous on ``SaveViTResult`` because
+    intermediate batches there can't be dropped — every batch's data is
+    unique.
+    """
+
+    def __init__(self, fragment, *args, **kwargs):
+        super().__init__(fragment, *args, **kwargs)
+        self._logger = logging.getLogger("holoptycho.MosaicWriterOp")
+
+    def setup(self, spec: OperatorSpec):
+        # capacity=1 + POP gives single-slot, latest-wins semantics: while
+        # this op is mid-write, any newer snapshot from upstream replaces
+        # the queued one. We never hold more than one stale snapshot.
+        spec.input("snapshot").connector(
+            IOSpec.ConnectorType.DOUBLE_BUFFER,
+            capacity=1,
+            policy=IOSpec.QueuePolicy.POP,
+        )
+
+    def compute(self, op_input, op_output, context):
+        try:
+            snap = op_input.receive("snapshot")
+        except Exception:
+            self._logger.exception("MosaicWriterOp.receive failed")
+            return
+        if snap is None:
+            return
+        try:
+            mosaic, counts, batch_num, pixel_size_m, canvas_origin_um = snap
+            # Threshold counts at 0.5 (not 0) to suppress FFT-leakage tails
+            # from the Fourier-shift placement, which deposit tiny non-zero
+            # counts well outside the patch footprints. Fill unfilled
+            # regions with the median of the valid pixels rather than NaN —
+            # tiled's PNG renderer treats NaN as 0, which would crush the
+            # colormap range and render the actual signal with no contrast.
+            valid = counts >= 0.5
+            if valid.any():
+                avg = mosaic / np.where(valid, counts, 1.0)
+                fill = float(np.median(avg[valid]))
+                normalised = np.where(valid, avg, fill).astype(np.float32)
+            else:
+                normalised = np.zeros_like(mosaic, dtype=np.float32)
+            _writer.write_vit_mosaic(
+                normalised,
+                batch_num=batch_num,
+                pixel_size_m=pixel_size_m,
+                canvas_origin_um=canvas_origin_um,
+            )
+        except Exception:
+            self._logger.exception("MosaicWriterOp.compute failed")

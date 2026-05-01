@@ -83,7 +83,7 @@ from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressO
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
 from .liverecon_utils import parse_scan_header
 from .live_simulation import InitSimul
-from .vit_inference import PtychoViTInferenceOp, SaveViTResult
+from .vit_inference import PtychoViTInferenceOp, SaveViTResult, MosaicWriterOp
 from .tiled_writer import get_writer
 
 class InitRecon(Operator):
@@ -480,6 +480,7 @@ class PtychoSimulApp(Application):
             y_range_um=float(self.pty.recon.y_range_um),
             name="vit_save",
         )
+        self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
 
         self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
 
@@ -498,6 +499,9 @@ class PtychoSimulApp(Application):
         # VIT: branch off InitSimul's diff_amp (fan-out, parallel to image_send)
         self.add_flow(self.init, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
         self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
+        # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the
+        # writer's input drops superseded snapshots while a write is in flight.
+        self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
 
 
 class PtychoApp(Application):
@@ -706,6 +710,7 @@ class PtychoApp(Application):
             y_range_um=float(self.pty.recon.y_range_um),
             name="vit_save",
         )
+        self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
 
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
@@ -725,6 +730,10 @@ class PtychoApp(Application):
             # ViT: branch off ImagePreprocessorOp's diff_amp (fan-out, parallel to image_send)
             self.add_flow(self.image_proc, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
             self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
+            # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the
+            # writer's input drops superseded snapshots while a write is in
+            # flight, so the ViT branch keeps stitching at full cadence.
+            self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
 
 
 def main():
