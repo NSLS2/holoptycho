@@ -312,32 +312,42 @@ def load_scan_from_tiled(
         flush=True,
     )
     frames_node = stream[detector_key]
-    n_total = frames_node.shape[0]
+    # Detect the frame axis. eiger2 stores (1, N, H, W); eiger1 sometimes (N, 1, H, W).
+    shape = tuple(frames_node.shape)
+    if len(shape) == 4 and shape[0] == 1:
+        frame_axis, n_total = 1, shape[1]
+    else:
+        frame_axis, n_total = 0, shape[0]
     if skip_frames < 0:
         raise ValueError(f"skip_frames must be >= 0, got {skip_frames}")
     if skip_frames >= n_total:
         raise ValueError(f"skip_frames={skip_frames} >= n_total={n_total}; nothing to publish")
     end_frame = min(skip_frames + max_frames, n_total) if max_frames is not None else n_total
 
-    # HXN tiled stores per-frame chunks (chunks=(1,1,1,...) along axis 0). One
-    # big slice expands into thousands of tiny per-chunk HTTP requests and the
-    # server times some of them out. Read in larger batches so each HTTP
+    # HXN tiled stores per-frame chunks (chunks=(1,1,1,...) along the frame axis).
+    # One big slice expands into thousands of tiny per-chunk HTTP requests and
+    # the server times some of them out. Read in larger batches so each HTTP
     # request returns ~hundreds of MB and concatenate.
     batch_size = 500
     parts = []
     for start in range(skip_frames, end_frame, batch_size):
         stop = min(start + batch_size, end_frame)
-        parts.append(np.asarray(frames_node[start:stop]))
+        if frame_axis == 0:
+            parts.append(np.asarray(frames_node[start:stop]))
+        else:
+            parts.append(np.asarray(frames_node[:, start:stop]))
         print(f"  ... read {stop - skip_frames}/{end_frame - skip_frames} frames", flush=True)
-    frames = np.concatenate(parts, axis=0)
+    frames = np.concatenate(parts, axis=frame_axis)
 
     if frames.ndim == 4 and frames.shape[0] == 1:
         frames = frames[0]
     elif frames.ndim == 4 and frames.shape[1] == 1:
         # (N, 1, H, W) layout used by some eiger1 scans — squeeze the spurious axis.
         frames = frames[:, 0]
-    positions_x = stream[x_key].read().tolist()
-    positions_y = stream[y_key].read().tolist()
+    # Encoders are stored as (1, N*upsample) at HXN; ravel before slicing so
+    # the upsample math doesn't depend on dimensionality.
+    positions_x = np.asarray(stream[x_key].read()).ravel().tolist()
+    positions_y = np.asarray(stream[y_key].read()).ravel().tolist()
     # Encoder arrays are upsample× longer than the Eiger frame count. Trim them
     # to the same window we trimmed Eiger to so PointProcessorOp keeps its
     # frame_idx → position mapping.
