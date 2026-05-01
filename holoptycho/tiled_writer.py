@@ -103,7 +103,13 @@ class TiledWriter:
         """Write an array into *container* under *key*, overwriting if it already exists."""
         arr = np.asarray(array)
         if key in container:
-            container[key].write(arr)
+            node = container[key]
+            node.write(arr)
+            # `node.write()` overwrites bytes only; metadata is locked in at
+            # array creation. Patch it so callers (e.g. write_live) can keep a
+            # field like `iteration` in sync with each fresh snapshot.
+            if metadata:
+                node.update_metadata(metadata=metadata)
         else:
             container.write_array(
                 arr,
