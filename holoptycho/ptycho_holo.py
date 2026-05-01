@@ -398,6 +398,18 @@ class PtychoSimulApp(Application):
         self.gpu = self.param.gpus[0]
         self.engine_path = engine_path or "/models/ptycho_vit_amp_phase_b64.engine"
 
+        # Multi-threaded scheduler so downstream tiled-write operators
+        # (MosaicWriterOp, BatchWriterOp) run concurrently with the upstream
+        # ViT branch instead of serially under the default GreedyScheduler.
+        self.scheduler(MultiThreadScheduler(
+            self,
+            worker_thread_number=11,
+            check_recession_period_ms=0.001,
+            stop_on_deadlock=True,
+            stop_on_deadlock_timeout=500,
+            name="multithread_scheduler",
+        ))
+
     def config_ops(self,param):
 
         nx_prb = self.pty.recon.nx_prb
@@ -515,6 +527,18 @@ class PtychoApp(Application):
         self.param = parse_config(self.config_path, config_overrides=config_overrides)
         self.gpu = self.param.gpus[0]
         self.engine_path = engine_path or "/models/ptycho_vit_amp_phase_b64.engine"
+
+        # Multi-threaded scheduler so downstream tiled-write operators
+        # (MosaicWriterOp, BatchWriterOp) run concurrently with the upstream
+        # ViT branch instead of serially under the default GreedyScheduler.
+        self.scheduler(MultiThreadScheduler(
+            self,
+            worker_thread_number=11,
+            check_recession_period_ms=0.001,
+            stop_on_deadlock=True,
+            stop_on_deadlock_timeout=500,
+            name="multithread_scheduler",
+        ))
 
     def config_ops(self,param):
 
@@ -760,28 +784,7 @@ def main():
     else:
         app = PtychoApp(config_path=config_path)
     
-    #app.config()
-    
-    # scheduler = EventBasedScheduler(
-    #             app,
-    #             worker_thread_number=16,
-    #             stop_on_deadlock=True,
-    #             stop_on_deadlock_timeout=500,
-    #             name="event_based_scheduler",
-    #         )
-    # app.scheduler(scheduler)
-    
-    scheduler = MultiThreadScheduler(
-                app,
-                worker_thread_number=11,
-                check_recession_period_ms=0.001,
-                stop_on_deadlock=True,
-                stop_on_deadlock_timeout=500,
-                # strict_job_thread_pinning=True,
-                name="multithread_scheduler",
-            )
-    app.scheduler(scheduler)
-
+    # Scheduler is configured in PtychoApp.__init__ / PtychoSimulApp.__init__.
     app.run()
     
     
