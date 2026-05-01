@@ -396,9 +396,12 @@ class SaveViTResult(Operator):
         cur_y_hi = oy_um + (canvas_h - margin_y) * ps * 1e6
         cur_x_lo = ox_um + margin_x_um
         cur_x_hi = ox_um + (canvas_w - margin_x) * ps * 1e6
+        # 1-pixel slack avoids float-roundoff false-negatives when a batch's
+        # extreme position is bit-equal to the canvas bound it set originally.
+        eps_um = ps * 1e6
         fits = (
-            by_min >= cur_y_lo and by_max <= cur_y_hi
-            and bx_min >= cur_x_lo and bx_max <= cur_x_hi
+            by_min >= cur_y_lo - eps_um and by_max <= cur_y_hi + eps_um
+            and bx_min >= cur_x_lo - eps_um and bx_max <= cur_x_hi + eps_um
         )
         # Log the first 3 grow-checks and every check where fits=False so we
         # can verify the canvas actually expands when positions overflow.

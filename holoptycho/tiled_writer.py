@@ -268,7 +268,7 @@ class TiledWriter:
             vit = self._run.get("vit") if "vit" in self._run else None
             if vit is None or "mosaic" not in vit:
                 return
-            del vit["mosaic"]
+            vit["mosaic"].delete(external_only=False)
             logger.info("delete_vit_mosaic: dropped existing mosaic node for shape change")
         except Exception:
             logger.exception("TiledWriter.delete_vit_mosaic failed")
