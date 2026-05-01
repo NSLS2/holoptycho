@@ -83,7 +83,13 @@ from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressO
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
 from .liverecon_utils import parse_scan_header
 from .live_simulation import InitSimul
-from .vit_inference import PtychoViTInferenceOp, SaveViTResult, MosaicWriterOp, BatchWriterOp
+from .vit_inference import (
+    PtychoViTInferenceOp,
+    SaveViTResult,
+    MosaicWriterOp,
+    PositionsWriterOp,
+    BatchWriterOp,
+)
 from .tiled_writer import get_writer
 
 class InitRecon(Operator):
@@ -497,6 +503,7 @@ class PtychoSimulApp(Application):
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
+        self.positions_writer = PositionsWriterOp(self, name="positions_writer")
         if enable_batch_writes:
             self.batch_writer = BatchWriterOp(self, name="batch_writer")
 
@@ -520,6 +527,10 @@ class PtychoSimulApp(Application):
         # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the writer's
         # input drops superseded snapshots while a write is in flight.
         self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
+        # Async tiled positions write: same drop-policy semantics as the
+        # mosaic — positions_um is fully overwritten per write, only the
+        # latest matters.
+        self.add_flow(self.vit_save, self.positions_writer, {("positions_snapshot", "snapshot")})
         if enable_batch_writes:
             # Per-batch pred + indices via a bounded FIFO (no drop, every
             # batch is unique data). Gated by config; see SaveViTResult docstring.
@@ -749,6 +760,7 @@ class PtychoApp(Application):
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
+        self.positions_writer = PositionsWriterOp(self, name="positions_writer")
         if enable_batch_writes:
             self.batch_writer = BatchWriterOp(self, name="batch_writer")
 
@@ -774,6 +786,8 @@ class PtychoApp(Application):
             # writer's input drops superseded snapshots while a write is in
             # flight, so the ViT branch keeps stitching at full cadence.
             self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
+            # Async tiled positions write: same drop-policy semantics.
+            self.add_flow(self.vit_save, self.positions_writer, {("positions_snapshot", "snapshot")})
             if enable_batch_writes:
                 # Per-batch pred + indices via a bounded FIFO (no drop,
                 # every batch is unique data). Gated by config.

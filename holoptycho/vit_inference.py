@@ -476,6 +476,7 @@ class SaveViTResult(Operator):
             IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
         )
         spec.output("mosaic_snapshot").condition(ConditionType.NONE)
+        spec.output("positions_snapshot").condition(ConditionType.NONE)
         # Per-batch pred + indices export is opt-in (config field
         # vit_batch_writes). Disabled by default because tiled HTTPS PUT
         # throughput (~1 MB/s for the 33 MB pred) gates the whole ViT
@@ -530,12 +531,14 @@ class SaveViTResult(Operator):
                 if positions is not None and chunk_size > 0:
                     total_batches = (int(positions.shape[0]) + chunk_size - 1) // chunk_size
 
-            # Write positions BEFORE the per-batch container so any WebSocket
-            # subscriber that wakes on the new batch sees an already-fresh
-            # positions_um and can stitch with the real per-frame positions.
+            # Hand off the positions snapshot to PositionsWriterOp on its own
+            # scheduler thread (capacity=1 + QueuePolicy.POP). Each tiled
+            # HTTPS PUT of positions_um is ~700 ms; doing it inline blocked
+            # SaveViTResult for ~85% of every chunk and prevented the pipeline
+            # from keeping up with the 200 Hz publish rate.
             t_pos_start = time.perf_counter()
             if positions is not None:
-                _writer.write_positions(positions)
+                op_output.emit(positions.copy(), "positions_snapshot")
             t_pos_end = time.perf_counter()
 
             # Per-batch pred + indices export is opt-in (config field
@@ -647,6 +650,52 @@ class MosaicWriterOp(Operator):
             )
         except Exception:
             self._logger.exception("MosaicWriterOp.compute failed")
+
+
+class PositionsWriterOp(Operator):
+    """Writes the latest positions_um snapshot to tiled on its own scheduler
+    thread.
+
+    Each tiled HTTPS PUT of positions_um is ~700 ms — measured via
+    SaveViTResult's per-phase timing breakdown to be ~85% of the total
+    SaveViTResult.compute time. Running that inline prevented the pipeline
+    from keeping up with the 200 Hz publish rate.
+
+    Same drop-policy semantics as ``MosaicWriterOp``: positions_um is fully
+    overwritten on each write (it always contains the latest cumulative
+    snapshot), so dropping intermediate snapshots is fine — only the most
+    recent matters. ``capacity=1`` + ``QueuePolicy.POP`` evicts older
+    snapshots while we're mid-PUT.
+    """
+
+    def __init__(self, fragment, *args, **kwargs):
+        super().__init__(fragment, *args, **kwargs)
+        self._logger = logging.getLogger("holoptycho.PositionsWriterOp")
+
+    def setup(self, spec: OperatorSpec):
+        spec.input("snapshot").connector(
+            IOSpec.ConnectorType.DOUBLE_BUFFER,
+            capacity=1,
+            policy=IOSpec.QueuePolicy.POP,
+        )
+
+    def compute(self, op_input, op_output, context):
+        try:
+            positions = op_input.receive("snapshot")
+        except Exception:
+            self._logger.exception("PositionsWriterOp.receive failed")
+            return
+        if positions is None:
+            return
+        try:
+            t0 = time.perf_counter()
+            _writer.write_positions(positions)
+            self._logger.info(
+                "PositionsWriterOp: wrote in %.0f ms",
+                (time.perf_counter() - t0) * 1000,
+            )
+        except Exception:
+            self._logger.exception("PositionsWriterOp.compute failed")
 
 
 class BatchWriterOp(Operator):
