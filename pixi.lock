@@ -1666,17 +1666,11 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cbor2-5.9.0-py312h5253ce2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/colorama-0.4.6-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/cpython-3.12.13-py312hd8ed1ab_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/cuda-cccl_linux-64-12.9.27-ha770c72_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-cudart-12.9.79-h5888daf_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/cuda-cudart-dev_linux-64-12.9.79-h3f2d84a_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/cuda-cudart-static_linux-64-12.9.79-h3f2d84a_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/cuda-cudart_linux-64-12.9.79-h3f2d84a_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvrtc-12.9.86-hecca717_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/cuda-version-12.9-h4f385c5_3.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/cupy-13.6.0-py312h0317cef_2.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/cupy-core-13.6.0-py312h16a6543_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/exceptiongroup-1.3.1-pyhd8ed1ab_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/fastrlock-0.8.3-py312h8285ef7_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gcc-11.4.0-h602e360_13.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gcc_impl_linux-64-11.4.0-h00c12a0_13.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gcc_linux-64-11.4.0-ha077dfb_4.conda
@@ -1818,6 +1812,7 @@ environments:
       - pypi: https://files.pythonhosted.org/packages/a3/f9/e6990744316c62fe0bfc758a9683f4f3ee13082607e871240bb2682e1417/dectris-compression-0.3.1.tar.gz
       - pypi: https://files.pythonhosted.org/packages/35/a8/365059bbcd4572cbc41de17fd5b682be5868b218c3c5479071865cab9078/entrypoints-0.4-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/5a/ff/2e4eca3ade2c22fe1dea7043b8ee9dabe47753349eb1b56a202de8af6349/fastapi-0.136.1-py3-none-any.whl
+      - pypi: https://files.pythonhosted.org/packages/80/07/cdecb7aa976f34328372f1c4efd6c9dc1b039b3cc8d3f38787d640009a25/fastrlock-0.8.3-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_28_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/a4/a5/842ae8f0c08b61d6484b52f99a03510a3a72d23141942d216ebe81fefbce/filelock-3.25.2-py3-none-any.whl
       - pypi: https://files.pythonhosted.org/packages/9b/8a/99c8b3c3888c5c474c08dbfd7c8899786de9604b727fcefb055b42c84bba/fonttools-4.62.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
       - pypi: https://files.pythonhosted.org/packages/d5/1f/5f4a3cd9e4440e9d9bc78ad0a91a1c8d46b4d429d5239ebe6793c9fe5c41/fsspec-2026.3.0-py3-none-any.whl
@@ -4867,15 +4862,6 @@ packages:
   - pytest>=6.2.4 ; extra == 'test'
   - pytest-benchmark>=3.4.1 ; extra == 'test'
   - pyglet>=2.1.9 ; extra == 'test'
-- conda: https://conda.anaconda.org/conda-forge/noarch/cuda-cccl_linux-64-12.9.27-ha770c72_0.conda
-  sha256: 2ee3b9564ca326226e5cda41d11b251482df8e7c757e333d28ec75213c75d126
-  md5: 87ff6381e33b76e5b9b179a2cdd005ec
-  depends:
-  - cuda-version >=12.9,<12.10.0a0
-  license: LicenseRef-NVIDIA-End-User-License-Agreement
-  purls: []
-  size: 1150650
-  timestamp: 1746189825236
 - pypi: https://files.pythonhosted.org/packages/af/c6/a4eac2e7d4089e8d4d0060de36934199c83e2a1ea7cbc0b6084acfc05cfc/cuda_core-0.7.0-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
   name: cuda-core
   version: 0.7.0
@@ -4899,27 +4885,6 @@ packages:
   purls: []
   size: 23242
   timestamp: 1749218416505
-- conda: https://conda.anaconda.org/conda-forge/noarch/cuda-cudart-dev_linux-64-12.9.79-h3f2d84a_0.conda
-  sha256: ffe86ed0144315b276f18020d836c8ef05bf971054cf7c3eb167af92494080d5
-  md5: 86e40eb67d83f1a58bdafdd44e5a77c6
-  depends:
-  - cuda-cccl_linux-64
-  - cuda-cudart-static_linux-64
-  - cuda-cudart_linux-64
-  - cuda-version >=12.9,<12.10.0a0
-  license: LicenseRef-NVIDIA-End-User-License-Agreement
-  purls: []
-  size: 389140
-  timestamp: 1749218427266
-- conda: https://conda.anaconda.org/conda-forge/noarch/cuda-cudart-static_linux-64-12.9.79-h3f2d84a_0.conda
-  sha256: d435f8a19b59b52ce460ee3a6bfd877288a0d1d645119a6ba60f1c3627dc5032
-  md5: b87bf315d81218dd63eb46cc1eaef775
-  depends:
-  - cuda-version >=12.9,<12.10.0a0
-  license: LicenseRef-NVIDIA-End-User-License-Agreement
-  purls: []
-  size: 1148889
-  timestamp: 1749218381225
 - conda: https://conda.anaconda.org/conda-forge/noarch/cuda-cudart_linux-64-12.9.79-h3f2d84a_0.conda
   sha256: 6cde0ace2b995b49d0db2eefb7bc30bf00ffc06bb98ef7113632dec8f8907475
   md5: 64508631775fbbf9eca83c84b1df0cae
@@ -5003,57 +4968,6 @@ packages:
   purls: []
   size: 21578
   timestamp: 1746134436166
-- conda: https://conda.anaconda.org/conda-forge/linux-64/cupy-13.6.0-py312h0317cef_2.conda
-  sha256: 078e83045e252b7c616c4e6b580acc1c12b4ade24b4ecd71be4d5dc767387bca
-  md5: 8cee37f4bad743e108f904e902f65df1
-  depends:
-  - cuda-cudart-dev_linux-64
-  - cuda-nvrtc
-  - cuda-version >=12,<13.0a0
-  - cupy-core 13.6.0 py312h16a6543_2
-  - libcublas
-  - libcufft
-  - libcurand
-  - libcusolver
-  - libcusparse
-  - python >=3.12,<3.13.0a0
-  - python_abi 3.12.* *_cp312
-  license: MIT
-  license_family: MIT
-  purls: []
-  size: 359152
-  timestamp: 1757733115653
-- conda: https://conda.anaconda.org/conda-forge/linux-64/cupy-core-13.6.0-py312h16a6543_2.conda
-  sha256: ebe205ad39f19067898f4513816d8c44ac8036d0c4b9f1ee5aa0233e0f5dc1d7
-  md5: e0667d2bf17e4ff3bd50861f245ed961
-  depends:
-  - __glibc >=2.17,<3.0.a0
-  - fastrlock >=0.8.3,<0.9.0a0
-  - libgcc >=14
-  - libstdcxx >=14
-  - numpy >=1.22
-  - python >=3.12,<3.13.0a0
-  - python_abi 3.12.* *_cp312
-  constrains:
-  - cuda-nvrtc >=12,<13.0a0
-  - libcufft >=11,<12.0a0
-  - libcurand >=10,<11.0a0
-  - scipy >=1.7,<1.17
-  - optuna ~=3.0
-  - cutensor >=2.3.1.0,<3.0a0
-  - cuda-version >=12,<13.0a0
-  - cupy >=13.6.0,<13.7.0a0
-  - libcusparse >=12,<13.0a0
-  - libcusolver >=11,<12.0a0
-  - nccl >=2.27.7.1,<3.0a0
-  - libcublas >=12,<13.0a0
-  - __cuda >=12.0
-  license: MIT
-  license_family: MIT
-  purls:
-  - pkg:pypi/cupy?source=hash-mapping
-  size: 56720768
-  timestamp: 1757733006716
 - pypi: https://files.pythonhosted.org/packages/e0/95/d7e1295141e7d530674a3cc567e13ed0eb6b81524cb122d797ed996b5bea/cupy_cuda12x-13.6.0-cp312-cp312-manylinux2014_x86_64.whl
   name: cupy-cuda12x
   version: 13.6.0
@@ -5261,22 +5175,10 @@ packages:
   - pydantic-settings>=2.0.0 ; extra == 'all'
   - pydantic-extra-types>=2.0.0 ; extra == 'all'
   requires_python: '>=3.10'
-- conda: https://conda.anaconda.org/conda-forge/linux-64/fastrlock-0.8.3-py312h8285ef7_2.conda
-  sha256: b0e5b19d2148816914920fe5c3148d5b5bf7c46bc34a2cac5124883bd1b83d05
-  md5: 94fb93ec1751a3614d3a6f184832fd87
-  depends:
-  - python
-  - __glibc >=2.17,<3.0.a0
-  - libgcc >=14
-  - libstdcxx >=14
-  - libgcc >=14
-  - python_abi 3.12.* *_cp312
-  license: MIT
-  license_family: MIT
-  purls:
-  - pkg:pypi/fastrlock?source=hash-mapping
-  size: 41672
-  timestamp: 1756729175159
+- pypi: https://files.pythonhosted.org/packages/80/07/cdecb7aa976f34328372f1c4efd6c9dc1b039b3cc8d3f38787d640009a25/fastrlock-0.8.3-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_28_x86_64.whl
+  name: fastrlock
+  version: 0.8.3
+  sha256: 5f13ec08f1adb1aa916c384b05ecb7dbebb8df9ea81abd045f60941c6283a670
 - pypi: https://files.pythonhosted.org/packages/a4/a5/842ae8f0c08b61d6484b52f99a03510a3a72d23141942d216ebe81fefbce/filelock-3.25.2-py3-none-any.whl
   name: filelock
   version: 3.25.2
@@ -6114,6 +6016,14 @@ packages:
   purls: []
   size: 3418702
   timestamp: 1775244340092
+- pypi: ./
+  name: holoptycho
+  version: 0.1.0
+  sha256: b363a9e7ba6b8b19e519e05a73d9f9033c788f9b2e7a1b9e0556cc43df08ade7
+  requires_dist:
+  - tiled[client]>=0.1
+  - pytest ; extra == 'test'
+  requires_python: '>=3.12'
 - pypi: ./
   name: holoptycho
   version: 0.1.0

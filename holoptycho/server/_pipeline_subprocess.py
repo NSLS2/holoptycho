@@ -27,12 +27,32 @@ import json
 import logging
 import logging.handlers
 import os
+import resource
 import signal
 import sys
 import traceback
 from pathlib import Path
 
 logger = logging.getLogger("holoptycho.pipeline_subprocess")
+
+
+def _bump_stack_size() -> None:
+    """Raise the soft stack limit to 32 MB before holoscan loads.
+
+    Holoscan recommends a 32 MB stack to avoid intermittent segfaults inside
+    the GXF runtime. ``pixi run`` captures activation env vars but discards
+    process-state changes like ``ulimit``, so we set it inside Python.
+    """
+    target = 32 * 1024 * 1024
+    soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+    if soft >= target:
+        return
+    new_hard = hard if hard != resource.RLIM_INFINITY and hard < target else hard
+    try:
+        resource.setrlimit(resource.RLIMIT_STACK, (target, new_hard))
+    except (ValueError, OSError):
+        # Hard limit too low — nothing we can do as a non-privileged user.
+        pass
 
 
 def _configure_logging() -> None:
@@ -112,6 +132,7 @@ def _write_work_complete_sentinel() -> None:
 
 
 def main() -> int:
+    _bump_stack_size()
     _configure_logging()
     _install_finish_handler()
     _write_work_complete_sentinel()

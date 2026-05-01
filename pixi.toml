@@ -21,9 +21,12 @@ pytest = "*"
 [target.linux-64.dependencies]
 libgl = "*"
 
-# GPU/CUDA dependencies — Linux only
+# GPU/CUDA dependencies — Linux only.
+# cupy itself is intentionally NOT listed here: holoscan-sdk pulls in
+# cupy-cuda12x via pip transitively, and adding the conda-forge `cupy`
+# alongside it produces a "multiple CuPy packages installed" warning at
+# import time.
 [feature.gpu.target.linux-64.dependencies]
-cupy = "*"
 numba = "*"
 cuda-cudart = ">=12.6.77,<13"
 libcublas = ">=12.6.3.3,<13"
