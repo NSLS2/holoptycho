@@ -228,10 +228,15 @@ class SaveViTResult(Operator):
         preds = np.concatenate([np.load(f) for f in sorted(glob('vit_batch_*_pred.npy'))])
     """
 
-    def __init__(self, fragment, *args, **kwargs):
+    def __init__(self, fragment, *args, positions_provider=None, **kwargs):
         super().__init__(fragment, *args, **kwargs)
         self.batch_num = 0
         self.max_index_seen = -1
+        # Optional callable returning the latest (n, 2) per-frame positions
+        # array (microns) — typically lambda: point_proc.positions_um. When
+        # supplied, the snapshot is published alongside each ViT batch so
+        # downstream consumers can stitch using real positions.
+        self._positions_provider = positions_provider
 
     def setup(self, spec: OperatorSpec):
         spec.input("results").connector(
@@ -253,6 +258,14 @@ class SaveViTResult(Operator):
                 self.max_index_seen = -1
 
             self.max_index_seen = max(self.max_index_seen, int(indices.max()))
+
+            # Write positions BEFORE the per-batch container so any WebSocket
+            # subscriber that wakes on the new batch sees an already-fresh
+            # positions_um and can stitch with the real per-frame positions.
+            if self._positions_provider is not None:
+                positions = self._positions_provider()
+                if positions is not None:
+                    _writer.write_positions(positions)
 
             _writer.write_vit(
                 batch_num=self.batch_num,

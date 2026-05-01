@@ -409,6 +409,7 @@ class PtychoSimulApp(Application):
 
         self.point_proc.point_info = np.zeros((nz,4),dtype = np.int32)
         self.point_proc.point_info_target = self.pty.recon.point_info_d
+        self.point_proc.positions_um = np.full((nz, 2), np.nan, dtype=np.float64)
 
         self.point_proc.min_points = self.min_points
         self.point_proc.max_points = nz
@@ -471,7 +472,11 @@ class PtychoSimulApp(Application):
             data_is_shifted=False,
             name="vit_inference",
         )
-        self.vit_save = SaveViTResult(self, name="vit_save")
+        self.vit_save = SaveViTResult(
+            self,
+            positions_provider=lambda: self.point_proc.positions_um,
+            name="vit_save",
+        )
 
         self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
 
@@ -523,6 +528,10 @@ class PtychoApp(Application):
 
         self.point_proc.point_info = np.zeros((nz,4),dtype = np.int32)
         self.point_proc.point_info_target = self.pty.recon.point_info_d
+        # Per-frame scan positions (microns), filled by PointProcessorOp as
+        # PandA data arrives. Read by SaveViTResult and published to tiled
+        # so the dashboard mosaic stitcher uses real positions.
+        self.point_proc.positions_um = np.full((nz, 2), np.nan, dtype=np.float64)
 
         self.point_proc.min_points = self.min_points
         self.point_proc.max_points = nz
@@ -675,7 +684,13 @@ class PtychoApp(Application):
             data_is_shifted=True,
             name="vit_inference",
         )
-        self.vit_save = SaveViTResult(self, name="vit_save")
+        # SaveViTResult publishes positions_um alongside each batch so the
+        # dashboard stitcher uses real positions, not a deterministic raster.
+        self.vit_save = SaveViTResult(
+            self,
+            positions_provider=lambda: self.point_proc.positions_um,
+            name="vit_save",
+        )
 
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})

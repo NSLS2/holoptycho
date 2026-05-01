@@ -168,6 +168,23 @@ class TiledWriter:
         except Exception:
             logger.exception("TiledWriter.write_final failed")
 
+    def write_positions(self, positions_um: np.ndarray) -> None:
+        """Overwrite the per-frame scan positions for the current run.
+
+        ``positions_um`` is shape ``(nz, 2)`` in microns; rows for frames the
+        PandA stream hasn't reached yet are NaN. The dashboard's mosaic
+        stitcher reads this array to place each ViT patch at its real scan
+        position rather than a deterministic raster (which was wrong for snake
+        scans / motor jitter).
+        """
+        if self._run is None:
+            logger.warning("write_positions called before start_run; skipping")
+            return
+        try:
+            self._write_or_overwrite_array(self._run, "positions_um", positions_um)
+        except Exception:
+            logger.exception("TiledWriter.write_positions failed")
+
     def write_vit(
         self,
         batch_num: int,
@@ -268,6 +285,17 @@ class _NpyFallbackWriter:
             os.replace(tmp, f"{self._run_dir}/vit_pred_latest.npy")
         except Exception:
             logger.exception("_NpyFallbackWriter.write_vit failed")
+
+    def write_positions(self, positions_um: np.ndarray) -> None:
+        if self._run_dir is None:
+            logger.warning("write_positions called before start_run; skipping")
+            return
+        try:
+            tmp = f"{self._run_dir}/_positions_um.tmp.npy"
+            np.save(tmp, positions_um)
+            os.replace(tmp, f"{self._run_dir}/positions_um.npy")
+        except Exception:
+            logger.exception("_NpyFallbackWriter.write_positions failed")
 
 
 # Module-level singleton — shared by all callers within the same process.

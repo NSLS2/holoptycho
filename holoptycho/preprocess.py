@@ -109,6 +109,13 @@ class PointProcessorOp(Operator):
 
         self.point_info = None
         self.point_info_target = None
+        # Per-frame scan positions in microns, post-conversion. Assigned by
+        # compose() with shape (nz, 2). Filled by process_point_info as the
+        # PandA stream arrives. Read by SaveViTResult to publish positions
+        # alongside ViT batches so downstream stitching uses real positions
+        # rather than a deterministic raster (matches live_compare_viewer.py,
+        # which loaded H5 `points`).
+        self.positions_um = None
 
         self.angle_correction_flag = True
         self.angle = 0
@@ -259,6 +266,18 @@ class PointProcessorOp(Operator):
                         self.point_info[i,:] = np.array([(int(points0[index] - self.nx_prb//2), int(points0[index] + self.nx_prb//2), \
                                         int(points1[index] - self.ny_prb//2), int(points1[index] + self.ny_prb//2))]\
                                         ,dtype = np.int32)
+
+                # Mirror the freshly-converted per-frame positions into the
+                # buffer that downstream consumers (SaveViTResult → tiled
+                # writer → synaps-dash mosaic stitcher) read. Stored in
+                # microns, NaN where not yet populated.
+                if self.positions_um is not None:
+                    end = min(p_total_num, self.positions_um.shape[0])
+                    take = end - self.pos_loaded_num
+                    if take > 0:
+                        self.positions_um[self.pos_loaded_num:end, 0] = pos0[:take]
+                        self.positions_um[self.pos_loaded_num:end, 1] = pos1[:take]
+
                 self.pos_loaded_num = p_total_num
                 
     def send_points_to_recon(self):
