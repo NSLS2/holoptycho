@@ -647,6 +647,14 @@ class PtychoApp(Application):
             self.pty.num_points_min = self.pty.recon.gpu_batch_size
         self.pty.probe_initialized = False
 
+        # Override the positions_um buffer that config_ops sized to
+        # `pty.recon.num_points` (the recon engine's max-points cap, default
+        # 8192). We want one slot per scan frame so ViT batches beyond the
+        # iterative cap still publish positions for the dashboard.
+        self.point_proc.positions_um = np.full(
+            (x_num * y_num, 2), np.nan, dtype=np.float64
+        )
+
         # Each pipeline run gets a fresh container in Tiled keyed by its own uid.
         # Metadata captures the raw scan being reconstructed plus the scan-grid
         # geometry that downstream consumers (synaps-dash) need to stitch
