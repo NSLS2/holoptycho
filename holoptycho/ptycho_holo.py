@@ -83,7 +83,7 @@ from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressO
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
 from .liverecon_utils import parse_scan_header
 from .live_simulation import InitSimul
-from .vit_inference import PtychoViTInferenceOp, SaveViTResult, MosaicWriterOp
+from .vit_inference import PtychoViTInferenceOp, SaveViTResult, MosaicWriterOp, BatchWriterOp
 from .tiled_writer import get_writer
 
 class InitRecon(Operator):
@@ -481,6 +481,7 @@ class PtychoSimulApp(Application):
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
+        self.batch_writer = BatchWriterOp(self, name="batch_writer")
 
         self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
 
@@ -499,8 +500,10 @@ class PtychoSimulApp(Application):
         # VIT: branch off InitSimul's diff_amp (fan-out, parallel to image_send)
         self.add_flow(self.init, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
         self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
-        # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the
-        # writer's input drops superseded snapshots while a write is in flight.
+        # Async tiled writes: pred+indices via a bounded FIFO (no drop, every
+        # batch is unique data) and the mosaic snapshot via capacity=1 +
+        # QueuePolicy.POP (latest wins, intermediate snapshots OK to skip).
+        self.add_flow(self.vit_save, self.batch_writer, {("vit_batch", "batch")})
         self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
 
 
@@ -711,6 +714,7 @@ class PtychoApp(Application):
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
+        self.batch_writer = BatchWriterOp(self, name="batch_writer")
 
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
@@ -730,9 +734,10 @@ class PtychoApp(Application):
             # ViT: branch off ImagePreprocessorOp's diff_amp (fan-out, parallel to image_send)
             self.add_flow(self.image_proc, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
             self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
-            # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the
-            # writer's input drops superseded snapshots while a write is in
-            # flight, so the ViT branch keeps stitching at full cadence.
+            # Async tiled writes: pred+indices via a bounded FIFO (no drop,
+            # every batch is unique data) and the mosaic snapshot via
+            # capacity=1 + QueuePolicy.POP (latest wins).
+            self.add_flow(self.vit_save, self.batch_writer, {("vit_batch", "batch")})
             self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
 
 

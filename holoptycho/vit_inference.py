@@ -458,6 +458,7 @@ class SaveViTResult(Operator):
             IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
         )
         spec.output("mosaic_snapshot").condition(ConditionType.NONE)
+        spec.output("vit_batch").condition(ConditionType.NONE)
 
     def compute(self, op_input, op_output, context):
         try:
@@ -484,11 +485,12 @@ class SaveViTResult(Operator):
                 if positions is not None:
                     _writer.write_positions(positions)
 
-            _writer.write_vit(
-                batch_num=self.batch_num,
-                pred=pred,
-                indices=indices,
-            )
+            # Hand off (batch_num, pred, indices) to BatchWriterOp. The
+            # downstream queue is bounded (capacity=32) FIFO with no drop
+            # policy: every batch's pred + indices is unique data, so we
+            # backpressure rather than discard. Up to 32 batches × ~33 MB
+            # can buffer in RAM while tiled drains.
+            op_output.emit((self.batch_num, pred, indices), "vit_batch")
 
             # Stitch in-memory and hand off to MosaicWriterOp. The downstream
             # input is capacity=1 + QueuePolicy.POP, so if the writer is mid-
@@ -567,3 +569,44 @@ class MosaicWriterOp(Operator):
             )
         except Exception:
             self._logger.exception("MosaicWriterOp.compute failed")
+
+
+class BatchWriterOp(Operator):
+    """Writes per-batch ViT (pred, indices) to tiled on its own scheduler thread.
+
+    Each pred is ``(64, 2, 256, 256)`` float32 = ~33 MB; the tiled HTTPS PUT
+    takes ~30 s. Running that on the upstream ``SaveViTResult`` thread would
+    gate the whole ViT branch on the tiled write — exactly the bottleneck
+    that was making a 50-second replay take ~80 minutes.
+
+    Unlike ``MosaicWriterOp`` (single-slot, drop-on-overrun), this writer must
+    NOT drop anything: every batch's ``pred``/``indices`` is unique data that
+    offline analysts re-stitch from. The input connector is a bounded FIFO
+    (``capacity=32``), so up to ~1 GB of pred buffers can queue in RAM while
+    tiled drains. If the queue stays full, holoscan's
+    ``DownstreamMessageAffordableCondition`` backpressures upstream so we
+    never lose data.
+    """
+
+    def __init__(self, fragment, *args, **kwargs):
+        super().__init__(fragment, *args, **kwargs)
+        self._logger = logging.getLogger("holoptycho.BatchWriterOp")
+
+    def setup(self, spec: OperatorSpec):
+        spec.input("batch").connector(
+            IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
+        )
+
+    def compute(self, op_input, op_output, context):
+        try:
+            msg = op_input.receive("batch")
+        except Exception:
+            self._logger.exception("BatchWriterOp.receive failed")
+            return
+        if msg is None:
+            return
+        try:
+            batch_num, pred, indices = msg
+            _writer.write_vit(batch_num=batch_num, pred=pred, indices=indices)
+        except Exception:
+            self._logger.exception("BatchWriterOp.compute failed")
