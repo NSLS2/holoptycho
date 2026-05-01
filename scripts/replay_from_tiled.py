@@ -436,6 +436,43 @@ def iter_frame_chunks(
         yield _fetch_frame_chunk(streams["frames_node"], streams["frame_axis"], s, stop)
 
 
+def prefetch_chunks(chunks_iter, max_ahead: int = 1):
+    """Wrap a chunks iterator so fetches overlap with the consumer's work.
+
+    Tiled HTTPS read throughput (~1–2 MB/s) is the slow link in the replay:
+    publishing a 32 MB chunk over ZMQ at 200 Hz takes ~1.3 s, but fetching
+    the next 32 MB from tiled takes ~18 s. Without overlap, the publisher
+    idles for ~17 s between bursts. A worker thread that pulls chunk N+1
+    while the consumer is iterating chunk N hides that latency: the bounded
+    queue caps memory at ``max_ahead`` chunks ready ahead of the publisher.
+    """
+    import queue
+    import threading
+
+    q: "queue.Queue" = queue.Queue(maxsize=max_ahead)
+    sentinel = object()
+
+    def _worker():
+        try:
+            for chunk in chunks_iter:
+                q.put(chunk)
+        except Exception as e:
+            q.put(("__error__", e))
+        else:
+            q.put(sentinel)
+
+    t = threading.Thread(target=_worker, daemon=True, name="tiled-prefetch")
+    t.start()
+
+    while True:
+        item = q.get()
+        if item is sentinel:
+            return
+        if isinstance(item, tuple) and len(item) == 2 and item[0] == "__error__":
+            raise item[1]
+        yield item
+
+
 def _json_request(url: str, method: str = "GET", payload: dict | None = None) -> dict:
     data = None if payload is None else json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -603,6 +640,17 @@ def parse_args():
              "interval (chunk_size / rate_hz) the stream stays smooth.",
     )
     parser.add_argument(
+        "--prefetch-ahead",
+        type=int,
+        default=1,
+        help="Number of chunks the prefetch worker keeps ready ahead of the "
+             "publisher (default: 1). Tiled HTTPS read (~1-2 MB/s) is much "
+             "slower than ZMQ publish at 200 Hz, so prefetching one chunk "
+             "ahead overlaps the ~18 s tiled fetch with the ~1.3 s publish "
+             "burst and keeps the stream continuous. Raise above 1 only if "
+             "RAM allows (each chunk ~chunk_size * frame_bytes).",
+    )
+    parser.add_argument(
         "--no-compress",
         action="store_true",
         help="Skip bslz4 compression and publish raw frame bytes with a "
@@ -681,7 +729,13 @@ def main():
     # Run Eiger and PandA publishers concurrently. The Eiger thread pulls
     # chunks from tiled lazily — first chunk is the already-fetched head,
     # subsequent chunks are server-side-sliced via _fetch_frame_chunk.
-    chunks_iter = iter_frame_chunks(streams, streams["head_frames"], args.chunk_size)
+    # Prefetch next chunk in a worker thread so tiled fetches overlap with
+    # ZMQ publishing. Without this the publisher idles ~17 s between
+    # bursts while the next 32 MB chunk downloads from tiled.
+    chunks_iter = prefetch_chunks(
+        iter_frame_chunks(streams, streams["head_frames"], args.chunk_size),
+        max_ahead=args.prefetch_ahead,
+    )
     eiger_thread = threading.Thread(
         target=publish_eiger,
         args=(
