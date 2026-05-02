@@ -148,6 +148,13 @@ class EigerZmqRxOp(Operator):
         # Set receive timeout
         self.socket.setsockopt(zmq.RCVTIMEO, receive_timeout_ms)
 
+        # Bump receive HWM far above the default 1000 so the SUB-side queue
+        # can absorb publisher overruns when the pipeline transiently runs
+        # below the publish rate. At ~128 KB per Eiger frame, 20000 = ~2.6 GB
+        # peak — comfortable for a dev machine and big enough to buffer a
+        # full HXN scan (10000 frames) with margin.
+        self.socket.setsockopt(zmq.RCVHWM, 20000)
+
         self.socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
         try:
@@ -294,6 +301,9 @@ class PositionRxOp(Operator):
         socket.setsockopt_string(zmq.SUBSCRIBE, "")
         # Set receive timeout
         socket.setsockopt(zmq.RCVTIMEO, receive_timeout_ms)
+        # Bump receive HWM (matches EigerZmqRxOp). PandA messages are smaller
+        # (~10 positions per message) so memory cost is negligible.
+        socket.setsockopt(zmq.RCVHWM, 20000)
         self.socket = socket
 
         self._first_message_logged = False

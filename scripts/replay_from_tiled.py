@@ -153,6 +153,11 @@ def publish_eiger(
     """
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
+    # Bump send HWM well above the default 1000 so transient publish/consumer
+    # rate mismatches don't cause silent drops. At ~128 KB per Eiger frame,
+    # 20000 = ~2.6 GB peak — comfortable for a dev box and big enough to
+    # buffer a full HXN scan (10000 frames) with margin.
+    socket.setsockopt(zmq.SNDHWM, 20000)
 
     auth_values = {
         "SERVER_PUBLIC_KEY": server_public_key,
@@ -228,6 +233,9 @@ def publish_panda(
     """
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
+    # PandA messages are tiny (~10 positions per message) so the HWM bump
+    # mostly costs nothing; matches the Eiger publisher and the SUB-side HWM.
+    socket.setsockopt(zmq.SNDHWM, 20000)
     socket.bind(endpoint)
 
     time.sleep(0.5)
