@@ -519,50 +519,85 @@ CertificateCredential(
 
 To test end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. The replay script and holoptycho must run on the **same machine** — ZMQ traffic stays local. Run both on the compute node and control holoptycho from your local machine via the `8000` SSH tunnel as normal.
 
+> **`--uid` is a Bluesky UUID4, not a scan number.** Passing the scan
+> number (e.g. `404611`) fails with `Run not found` because the catalog
+> is keyed by UUID. Always look up the UID from the scan id first (see
+> step 2 below).
+
+> **`TILED_BASE_URL` must be set in the shell that runs the replay
+> script** (separate from the value the API server reads). Either
+> `export TILED_BASE_URL=https://tiled.nsls2.bnl.gov/hxn/migration` or
+> pass `--tiled-url` on every invocation; the script aborts otherwise.
+
+#### Setup (once per shell)
+
 ```bash
-# On the compute node — authenticate and start the replay script
+# On the compute node — authenticate and install the replay env
 tiled login https://tiled.nsls2.bnl.gov
 pixi install -e replay
 
 # If holoptycho has no selected engine yet, choose one before using --hp-start
 hp model set nsls0408_bs1
 hp model status
+```
 
-# If you need the run UID from a scan ID first:
+#### 1. Look up the run UID from a scan id
+
+```bash
 pixi run -e replay python - <<'PY'
 from tiled.client import from_uri
 from tiled.queries import Eq
 
 catalog = from_uri("https://tiled.nsls2.bnl.gov")["hxn"]["raw"]
-results = catalog.search(Eq("scan_id", 320045))
+results = catalog.search(Eq("scan_id", 404611))   # ← scan id
 uid = next(iter(results))
-print(uid)
+print(uid)                                         # ← UUID4 to pass as --uid
 PY
-
-# By default the replay script publishes plain ZMQ. To test CurveZMQ, also
-# pass the full Eiger key set: --eiger-server-public-key,
-# --eiger-server-secret-key, and --eiger-client-public-key.
-pixi run -e replay replay \
-    --uid 67e77251-cbe4-444c-8a8c-36491b0b9100 \
-    --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \
-    --eiger-endpoint tcp://0.0.0.0:5555 \
-    --panda-endpoint tcp://0.0.0.0:5556 \
-    --rate 200 \
-    --no-compress
-
-# Or let the replay script build the config from the same run and start or
-# restart holoptycho before it begins publishing. This requires a selected
-# model/engine, so run `hp model set ...` first if needed.
-pixi run -e replay replay \
-    --uid 67e77251-cbe4-444c-8a8c-36491b0b9100 \
-    --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \
-    --hp-start \
-    --hp-url http://localhost:8000 \
-    --eiger-endpoint tcp://0.0.0.0:5555 \
-    --panda-endpoint tcp://0.0.0.0:5556 \
-    --rate 200 \
-    --no-compress
 ```
+
+#### 2. Canonical replay command (with `--hp-start`)
+
+`--hp-start` is the standard pattern: the replay script builds the run
+config from the same run metadata and `/run`s or `/restart`s holoptycho
+before it begins publishing, so the pipeline always sees the right
+`scan_num`, geometry, and pixel size.
+
+```bash
+# 256x256 detector ROI, ViT branch only, full HXN scan at 1 kHz publish rate.
+# Replace --uid with the UUID from step 1.
+pixi run -e replay replay \
+    --uid 7fcf8d25-f609-4f2c-8710-44793341455f \
+    --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \
+    --hp-start --hp-url http://localhost:8000 \
+    --eiger-endpoint tcp://0.0.0.0:5555 \
+    --panda-endpoint tcp://0.0.0.0:5556 \
+    --nx 256 --ny 256 \
+    --rate 1000 --chunk-size 1024 --skip-frames 64 \
+    --recon-mode vit --no-compress
+```
+
+Tune for your scan:
+* `--nx` / `--ny`: must match the detector ROI (256 for HXN scans, 128 for many older scans). See "Best practices for replay" below — these *must* be passed together.
+* `--rate`: publish frequency in Hz. 1000 matches the production HXN rate; lower values smoke out throughput regressions; higher values (e.g. 4000) stress-test the pipeline ceiling and surface frame drops.
+* `--skip-frames`: drops the first N Eiger frames + matching encoder samples. Required for scans with settling/ramp-up rows.
+* `--recon-mode`: `vit` is the fastest path when iterating on `mosaic_stitch.py` / `SaveViTResult`; `iterative` exercises only DM/ML; `both` runs both branches in parallel.
+
+#### Variant: replay without restarting holoptycho
+
+Use this only when holoptycho is already running with a config that exactly matches the scan being replayed (same `nx`/`ny`/geometry). Most of the time you want `--hp-start`.
+
+```bash
+pixi run -e replay replay \
+    --uid 7fcf8d25-f609-4f2c-8710-44793341455f \
+    --tiled-url https://tiled.nsls2.bnl.gov/hxn/migration \
+    --eiger-endpoint tcp://0.0.0.0:5555 \
+    --panda-endpoint tcp://0.0.0.0:5556 \
+    --rate 1000 --no-compress
+```
+
+By default the replay script publishes plain ZMQ. To test CurveZMQ, also
+pass the full Eiger key set: `--eiger-server-public-key`,
+`--eiger-server-secret-key`, and `--eiger-client-public-key`.
 
 `--tiled-url` may be either the Tiled server root
 (`https://tiled.nsls2.bnl.gov`) or an exact catalog path such as
