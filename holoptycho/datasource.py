@@ -169,6 +169,16 @@ class EigerZmqRxOp(Operator):
         self.frame_id_last = -1
         self._first_frame_logged = False
 
+        # Per-second compute() throughput counters. Lets us tell, during the
+        # bursty 15-s dead-zones we're chasing, whether Holoscan is calling
+        # compute() at all (count==0 → starved by scheduler) or it is being
+        # called but the socket is empty (rx==0, again==N → ZMQ side drained
+        # but pipeline still has frames queued downstream).
+        self._diag_window_start = time.time()
+        self._diag_calls = 0
+        self._diag_rx = 0
+        self._diag_again = 0
+
     def setup(self, spec: OperatorSpec):
         spec.input("flush").condition(ConditionType.NONE)
         # spec.output("image").condition(ConditionType.NONE)
@@ -177,11 +187,22 @@ class EigerZmqRxOp(Operator):
     
     def compute(self, op_input, op_output, context):
         # self.logger.info("Waiting for message")
+        self._diag_calls += 1
+        now = time.time()
+        if now - self._diag_window_start >= 1.0:
+            self.logger.debug(
+                "EigerZmqRx 1s: calls=%d rx=%d zmq_again=%d",
+                self._diag_calls, self._diag_rx, self._diag_again,
+            )
+            self._diag_window_start = now
+            self._diag_calls = 0
+            self._diag_rx = 0
+            self._diag_again = 0
         try:
             # Try to receive with timeout
             # msg = self.socket.recv()
             # self.logger.info(f"Received message: {msg}")
-            
+
             if self.msg_format == "json":
                 while True:
                     msg = self.socket.recv()
@@ -192,6 +213,7 @@ class EigerZmqRxOp(Operator):
                     if "frame" in msg:
                         break
                 frame_id = msg["frame"]
+                self._diag_rx += 1
                 if not self._first_frame_logged:
                     self.logger.info(
                         "First Eiger frame received: frame_id=%d from %s",
@@ -249,7 +271,7 @@ class EigerZmqRxOp(Operator):
         except zmq.error.Again:
             # ZMQ poll timeout — no frame this tick. Holoscan ops can't block in
             # compute(), so RCVTIMEO is set and Again fires every empty poll.
-            pass
+            self._diag_again += 1
         except Exception as e:
             self.logger.error(f"Error receiving message: {e}")
 

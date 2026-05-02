@@ -1,5 +1,6 @@
 import logging
 import sys
+import time
 
 import numpy as np
 import cupy as cp
@@ -23,6 +24,11 @@ class ImageBatchOp(Operator):
         self.images_to_add = None #np.zeros((self.batchsize, 256, 256))
         self.indices_to_add = None #np.zeros(self.batchsize, dtype=np.int32)
 
+        # Per-second compute() throughput counters. See note in EigerZmqRxOp.
+        self._diag_window_start = time.time()
+        self._diag_calls = 0
+        self._diag_batches_emitted = 0
+
     def flush(self,param):
         self.counter = 0
         self.roi = np.array(param)
@@ -34,6 +40,17 @@ class ImageBatchOp(Operator):
         spec.output("image_indices")
         
     def compute(self, op_input, op_output, context):
+        self._diag_calls += 1
+        now = time.time()
+        if now - self._diag_window_start >= 1.0:
+            self.logger.debug(
+                "ImageBatchOp 1s: calls=%d batches_emitted=%d",
+                self._diag_calls, self._diag_batches_emitted,
+            )
+            self._diag_window_start = now
+            self._diag_calls = 0
+            self._diag_batches_emitted = 0
+
         image = op_input.receive("image")
         image_index = op_input.receive("image_index")
 
@@ -50,18 +67,19 @@ class ImageBatchOp(Operator):
 
         # Remove Bad pixels (-1 to unsigned int)
         image[image==np.iinfo(image.dtype).max] = 0
-        
+
         self.images_to_add[self.counter, :, :] = image
         self.indices_to_add[self.counter] = image_index
 
         # sys.stderr.write(f"Received image {image_index}\n")
-        
+
         if self.counter < (self.batchsize - 1):
             self.counter += 1
         else:
             op_output.emit(self.images_to_add.copy(), "image_batch")
             op_output.emit(self.indices_to_add.copy(), "image_indices")
             self.counter = 0
+            self._diag_batches_emitted += 1
             
 class ImagePreprocessorOp(Operator):
     def __init__(self, *args, **kwargs):
@@ -72,14 +90,31 @@ class ImagePreprocessorOp(Operator):
         self.detmap_threshold = 0
         self.badpixels = None
         super().__init__(*args, **kwargs)
-        
+
+        # Per-second compute() throughput counters. See note in EigerZmqRxOp.
+        self._diag_window_start = time.time()
+        self._diag_calls = 0
+        self._diag_total_ms = 0.0
+
     def setup(self, spec: OperatorSpec):
         spec.input("image_batch").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.input("image_indices_in").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.output("diff_amp")
         spec.output("image_indices")
-        
+
     def compute(self, op_input, op_output, context):
+        t0 = time.perf_counter()
+        self._diag_calls += 1
+        now = time.time()
+        if now - self._diag_window_start >= 1.0:
+            self.logger.debug(
+                "ImagePreprocessorOp 1s: calls=%d total=%.1f ms",
+                self._diag_calls, self._diag_total_ms,
+            )
+            self._diag_window_start = now
+            self._diag_calls = 0
+            self._diag_total_ms = 0.0
+
         images = op_input.receive("image_batch")
         indices = op_input.receive("image_indices_in")
         
@@ -100,6 +135,7 @@ class ImagePreprocessorOp(Operator):
 
         op_output.emit(diff_amp, "diff_amp")
         op_output.emit(indices, "image_indices")
+        self._diag_total_ms += (time.perf_counter() - t0) * 1000.0
 
 class PointProcessorOp(Operator):
     def __init__(self, *args, x_direction = -1., y_direction = -1., **kwargs):

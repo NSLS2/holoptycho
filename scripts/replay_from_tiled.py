@@ -190,7 +190,21 @@ def publish_eiger(
     print(f"[eiger] publishing {n_frames} frames at {rate_hz} Hz on {endpoint} ({mode})", flush=True)
 
     frame_id = 0
-    for chunk in chunks_iter:
+    diag_window_start = time.perf_counter()
+    diag_frames_in_window = 0
+    diag_pre_chunk_block_ms = 0.0
+    chunk_iter = iter(chunks_iter)
+    while True:
+        # Time how long the next-chunk fetch blocks the publisher. With
+        # tiled fetches in the prefetch threadpool, this should be ~0; if
+        # the publisher is starved, this number jumps and explains the
+        # 15-s SUB-side dead zones we see in the pipeline diag.
+        t_pre = time.perf_counter()
+        try:
+            chunk = next(chunk_iter)
+        except StopIteration:
+            break
+        diag_pre_chunk_block_ms += (time.perf_counter() - t_pre) * 1000.0
         for frame in chunk:
             header = json.dumps({"frame": frame_id, "series": 1}).encode()
             payload = _encode_frame(frame, no_compress=no_compress)
@@ -199,6 +213,18 @@ def publish_eiger(
             socket.send(payload)
             time.sleep(interval)
             frame_id += 1
+            diag_frames_in_window += 1
+            now = time.perf_counter()
+            if now - diag_window_start >= 1.0:
+                print(
+                    f"[eiger] 1s: sent={diag_frames_in_window} "
+                    f"chunk_wait={diag_pre_chunk_block_ms:.0f} ms "
+                    f"total={frame_id}/{n_frames}",
+                    flush=True,
+                )
+                diag_window_start = now
+                diag_frames_in_window = 0
+                diag_pre_chunk_block_ms = 0.0
 
     print("[eiger] done", flush=True)
     socket.close()
@@ -428,20 +454,28 @@ def setup_scan_from_tiled(
 
 def iter_frame_chunks(
     streams: dict, head_frames: np.ndarray, chunk_size: int,
-    n_workers: int = 4,
+    n_workers: int = 16,
 ):
     """Yield chunks of detector frames; tiled fetches run in a worker pool.
 
     Tiled HTTPS read tops out around 1-2 MB/s per connection. A single
-    fetcher gates the replay at ~17 s per 32 MB chunk. Run several fetches
-    in parallel (each over its own httpx connection); tiled handles
-    concurrent range requests fine, so we get roughly n_workers× the
-    aggregate throughput up to whatever cap the tiled server enforces.
+    fetcher gates the replay at ~15-22 s per 128 MB chunk
+    (chunk_size=1024 × 256x256 uint16). Each parallel fetcher uses its own
+    httpx connection and tiled handles concurrent range requests fine, so
+    we get roughly n_workers× aggregate throughput up to the server cap.
+
+    n_workers must be large enough that the in-flight chunks cover the
+    publisher's drain time. With 16 workers × ~1 s drain per chunk we
+    have ~16 s of buffered drain, which covers a single fetch even at the
+    slowest observed rate (~16 s/chunk). With only 4 workers the
+    publisher stalls for 15-17 s waiting for the next chunk roughly every
+    4 chunks, which manifests as 5-second-on / 15-second-off bursts at
+    the pipeline's ZMQ subscriber.
 
     Order is preserved with a sliding window: at most ``n_workers`` fetches
     are in flight, and ``yield`` waits on them in submission order. Memory
-    peak is ``n_workers * chunk_size * frame_bytes`` (~128 MB at the default
-    chunk_size=1024 with 4 workers).
+    peak is ``n_workers * chunk_size * frame_bytes`` (~512 MB at the default
+    chunk_size=1024 with 16 workers; ~2 GB if you push n_workers to 64).
 
     ``head_frames`` is the eager auto-detect read from
     :func:`setup_scan_from_tiled`; we yield it as-is to avoid re-reading
