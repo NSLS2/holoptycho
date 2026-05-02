@@ -419,53 +419,61 @@ def setup_scan_from_tiled(
 
 
 def iter_frame_chunks(
-    streams: dict, head_frames: np.ndarray, chunk_size: int
+    streams: dict, head_frames: np.ndarray, chunk_size: int,
+    n_workers: int = 4,
 ):
-    """Yield chunks of detector frames; tiled fetches run in a worker thread.
+    """Yield chunks of detector frames; tiled fetches run in a worker pool.
 
-    Tiled HTTPS read tops out around 1-2 MB/s while ZMQ publish at 200 Hz
-    drains a 32 MB chunk in ~1.3 s. Without overlap the publisher idles
-    ~17 s between bursts waiting on each fetch. A worker thread pushes
-    chunks into a ``Queue(maxsize=1)``: the worker is always trying to
-    stage chunk N+1 while the consumer is iterating chunk N, and ``put``
-    blocks on the bounded queue when the consumer hasn't drained the
-    previous chunk yet.
+    Tiled HTTPS read tops out around 1-2 MB/s per connection. A single
+    fetcher gates the replay at ~17 s per 32 MB chunk. Run several fetches
+    in parallel (each over its own httpx connection); tiled handles
+    concurrent range requests fine, so we get roughly n_workers× the
+    aggregate throughput up to whatever cap the tiled server enforces.
+
+    Order is preserved with a sliding window: at most ``n_workers`` fetches
+    are in flight, and ``yield`` waits on them in submission order. Memory
+    peak is ``n_workers * chunk_size * frame_bytes`` (~128 MB at the default
+    chunk_size=1024 with 4 workers).
 
     ``head_frames`` is the eager auto-detect read from
     :func:`setup_scan_from_tiled`; we yield it as-is to avoid re-reading
     the same range from tiled.
     """
-    import queue
-    import threading
+    import collections
+    import concurrent.futures
 
     head_end = streams["start"] + len(head_frames)
     end = streams["end"]
     frames_node = streams["frames_node"]
     frame_axis = streams["frame_axis"]
 
-    q: "queue.Queue" = queue.Queue(maxsize=1)
-    sentinel = object()
+    yield head_frames
 
-    def _worker():
-        try:
-            q.put(head_frames)
-            for s in range(head_end, end, chunk_size):
-                stop = min(s + chunk_size, end)
-                q.put(_fetch_frame_chunk(frames_node, frame_axis, s, stop))
-        except Exception as e:
-            q.put(("__error__", e))
-        else:
-            q.put(sentinel)
+    ranges = [
+        (s, min(s + chunk_size, end))
+        for s in range(head_end, end, chunk_size)
+    ]
+    if not ranges:
+        return
 
-    threading.Thread(target=_worker, daemon=True, name="tiled-fetcher").start()
-
-    while True:
-        item = q.get()
-        if item is sentinel:
-            return
-        if isinstance(item, tuple) and len(item) == 2 and item[0] == "__error__":
-            raise item[1]
-        yield item
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=n_workers, thread_name_prefix="tiled-fetcher"
+    ) as ex:
+        pending: collections.deque = collections.deque()
+        idx = 0
+        # Prime the pool with up to n_workers pending fetches.
+        while idx < len(ranges) and len(pending) < n_workers:
+            s, e = ranges[idx]
+            pending.append(ex.submit(_fetch_frame_chunk, frames_node, frame_axis, s, e))
+            idx += 1
+        # Yield in submission order; submit a new fetch for each one we drain.
+        while pending:
+            chunk = pending.popleft().result()
+            if idx < len(ranges):
+                s, e = ranges[idx]
+                pending.append(ex.submit(_fetch_frame_chunk, frames_node, frame_axis, s, e))
+                idx += 1
+            yield chunk
 
 
 def _json_request(url: str, method: str = "GET", payload: dict | None = None) -> dict:
