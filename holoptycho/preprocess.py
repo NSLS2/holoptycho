@@ -34,8 +34,19 @@ class ImageBatchOp(Operator):
         self.roi = np.array(param)
         
     def setup(self, spec: OperatorSpec):
-        spec.input("image").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=256)
-        spec.input("image_index").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=256)
+        # capacity=4096 (~4 s of buffer at 1000 fps) + REJECT propagates
+        # backpressure upstream during the initial burst when this op is
+        # spinning up — see EigerDecompressOp for the same rationale.
+        spec.input("image").connector(
+            IOSpec.ConnectorType.DOUBLE_BUFFER,
+            capacity=4096,
+            policy=IOSpec.QueuePolicy.REJECT,
+        )
+        spec.input("image_index").connector(
+            IOSpec.ConnectorType.DOUBLE_BUFFER,
+            capacity=4096,
+            policy=IOSpec.QueuePolicy.REJECT,
+        )
         spec.output("image_batch")
         spec.output("image_indices")
         

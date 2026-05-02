@@ -215,7 +215,7 @@ class EigerZmqRxOp(Operator):
                 frame_id = msg["frame"]
                 self._diag_rx += 1
                 if not self._first_frame_logged:
-                    self.logger.info(
+                    self.logger.debug(
                         "First Eiger frame received: frame_id=%d from %s",
                         frame_id,
                         self.endpoint,
@@ -286,19 +286,47 @@ class EigerDecompressOp(Operator):
         super().__init__(*args, **kwargs)
         self.logger = logging.getLogger("EigerDecompressOp")
         logging.basicConfig(level=logging.INFO)
-        
+
+        # Per-second compute() throughput counters. See EigerZmqRxOp.
+        self._diag_window_start = time.time()
+        self._diag_calls = 0
+        self._diag_total_ms = 0.0
+
     def setup(self, spec: OperatorSpec):
-        spec.input("image_index_encoding").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=512, policy = IOSpec.QueuePolicy.POP)
-        
+        # capacity=4096 (~4 s of buffer at 1000 fps) absorbs the initial
+        # burst when ImageBatchOp downstream takes ~3 s to spin up. policy=
+        # REJECT propagates backpressure all the way to the ZMQ SUB socket
+        # (HWM=20000) instead of silently POPping frames here. Measured at
+        # 1000 fps replay: POP+512 dropped ~600 frames over the run; REJECT+
+        # 4096 buffers the transient and drops zero.
+        spec.input("image_index_encoding").connector(
+            IOSpec.ConnectorType.DOUBLE_BUFFER,
+            capacity=4096,
+            policy=IOSpec.QueuePolicy.REJECT,
+        )
+
         spec.output("decompressed_image").condition(ConditionType.NONE)
         spec.output("image_index").condition(ConditionType.NONE)
-        
+
     def compute(self, op_input, op_output, context):
+        t0 = time.perf_counter()
+        self._diag_calls += 1
+        now = time.time()
+        if now - self._diag_window_start >= 1.0:
+            self.logger.debug(
+                "EigerDecompressOp 1s: calls=%d total=%.1f ms",
+                self._diag_calls, self._diag_total_ms,
+            )
+            self._diag_window_start = now
+            self._diag_calls = 0
+            self._diag_total_ms = 0.0
+
         compressed_image, image_index, encoding_msg = op_input.receive("image_index_encoding")
         _, decompressed_image = decode_json_message(compressed_image, encoding_msg)
         # std_err_print(f'Decompress {image_index}')
         op_output.emit(decompressed_image, "decompressed_image")
         op_output.emit(image_index, "image_index")
+        self._diag_total_ms += (time.perf_counter() - t0) * 1000.0
 
 
 class PositionRxOp(Operator):
@@ -343,7 +371,7 @@ class PositionRxOp(Operator):
             if msg["msg_type"] == "data":
                 frame_number = msg["frame_number"]
                 if not self._first_message_logged:
-                    self.logger.info(
+                    self.logger.debug(
                         "First PandA data message received: frame_number=%d from %s",
                         frame_number,
                         self.endpoint,

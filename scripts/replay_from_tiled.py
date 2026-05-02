@@ -149,14 +149,25 @@ def publish_eiger(
         If all three are provided, enable CurveZMQ for the Eiger publisher.
         If all are empty, publish over plain ZMQ.
     rate_hz:
-        Target frame rate in Hz.
+        Logged target frame rate in Hz, but no longer enforced per-frame.
+        Each fetched chunk is dumped to ZMQ as fast as the SNDHWM and the
+        SUB-side pipeline allow; the receiver's HWM is what absorbs the
+        burst. Tightly pacing per-frame here just made the publisher block
+        on tiled fetches because the chunk drain rate had to be slower
+        than the chunk fetch rate, which reintroduced the SUB-side dead
+        zones we already chased down.
     """
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
-    # Bump send HWM well above the default 1000 so transient publish/consumer
-    # rate mismatches don't cause silent drops. At ~128 KB per Eiger frame,
-    # 20000 = ~2.6 GB peak — comfortable for a dev box and big enough to
-    # buffer a full HXN scan (10000 frames) with margin.
+    # Bump send HWM well above the default 1000 so the publisher can dump
+    # a fetched chunk into ZMQ in one burst without waiting for the
+    # subscriber to drain. At ~128 KB per Eiger frame, 20000 = ~2.6 GB
+    # peak in the kernel/zmq buffers — comfortable for a dev box and
+    # enough to hold a full HXN scan (10000 frames) with margin. Above
+    # SNDHWM, frames get dropped at the PUB side, which is at least
+    # predictable (and visible to the subscriber via missing frame_id
+    # gaps) — far better than the silent stalls we had with rate-pacing
+    # racing tiled fetch latency.
     socket.setsockopt(zmq.SNDHWM, 20000)
 
     auth_values = {
@@ -183,11 +194,14 @@ def publish_eiger(
     # Brief pause to let subscribers connect
     time.sleep(0.5)
 
-    interval = 1.0 / rate_hz
     encoding = _eiger_encoding_msg(frame_shape, frame_dtype, no_compress=no_compress)
 
     mode = "raw" if no_compress else "bslz4"
-    print(f"[eiger] publishing {n_frames} frames at {rate_hz} Hz on {endpoint} ({mode})", flush=True)
+    print(
+        f"[eiger] publishing {n_frames} frames (target {rate_hz} Hz; "
+        f"dumping at ZMQ-bound rate) on {endpoint} ({mode})",
+        flush=True,
+    )
 
     frame_id = 0
     diag_window_start = time.perf_counter()
@@ -196,9 +210,10 @@ def publish_eiger(
     chunk_iter = iter(chunks_iter)
     while True:
         # Time how long the next-chunk fetch blocks the publisher. With
-        # tiled fetches in the prefetch threadpool, this should be ~0; if
-        # the publisher is starved, this number jumps and explains the
-        # 15-s SUB-side dead zones we see in the pipeline diag.
+        # the prefetch threadpool keeping n_workers chunks in flight, this
+        # should usually be ~0. If chunk_wait jumps in steady state, tiled
+        # is the bottleneck and the SUB-side ZMQ buffer (HWM=20000 on the
+        # receiver) is what's keeping the pipeline fed during the gap.
         t_pre = time.perf_counter()
         try:
             chunk = next(chunk_iter)
@@ -211,7 +226,6 @@ def publish_eiger(
             socket.send(header, zmq.SNDMORE)
             socket.send(encoding, zmq.SNDMORE)
             socket.send(payload)
-            time.sleep(interval)
             frame_id += 1
             diag_frames_in_window += 1
             now = time.perf_counter()
@@ -252,7 +266,10 @@ def publish_panda(
         Channel names matching holoptycho's PositionRxOp configuration,
         e.g. ``/INENC2.VAL.Value`` and ``/INENC3.VAL.Value``.
     rate_hz:
-        Target message rate in Hz.
+        Logged target rate, no longer enforced. PandA positions are
+        already small and infrequent (one message per ``points_per_message``
+        scan points); the pipeline correlates them with Eiger frames by
+        ``frame_number``, not wall-clock timing.
     points_per_message:
         Number of encoder samples bundled per ZMQ message (matches PandA
         default of 41).
@@ -266,7 +283,6 @@ def publish_panda(
 
     time.sleep(0.5)
 
-    interval = 1.0 / rate_hz
     n_points = len(positions_x)
 
     # Send start message
@@ -303,7 +319,6 @@ def publish_panda(
             },
         })
         frame_number += 1
-        time.sleep(interval)
 
     socket.send_json({"msg_type": "stop", "emitted_frames": frame_number})
     print("[panda]  done", flush=True)
