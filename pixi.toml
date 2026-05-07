@@ -92,6 +92,7 @@ matplotlib = ">=3.10.9,<4"
 tiled = {version = ">=0.1", extras = ["client"]}
 dectris-compression = ">=0.3"
 bitshuffle = "*"
+ptychoml = { git = "ssh://git@github.com/NSLS2/ptychoml.git", branch = "main" }
 
 [environments]
 default = { features = ["gpu", "mpi"], solve-group = "default" }
@@ -123,7 +124,7 @@ scripts = ["set-ld-path.sh"]
 
 [tasks]
 test = "pytest tests/ -v"
-api = "uvicorn holoptycho.server.api:app --host 127.0.0.1 --port 8000"
+api = "bash -c 'SERVER_STREAM_SOURCE=${SERVER_STREAM_SOURCE:-tcp://localhost:5555} PANDA_STREAM_SOURCE=${PANDA_STREAM_SOURCE:-tcp://localhost:5556} TILED_BASE_URL=${TILED_BASE_URL:-https://tiled.nsls2.bnl.gov} uvicorn holoptycho.server.api:app --host 127.0.0.1 --port 8000'"
 
 [feature.replay.tasks]
 replay = "python scripts/replay_from_tiled.py"

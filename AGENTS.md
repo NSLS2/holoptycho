@@ -427,7 +427,8 @@ lambda_nm = (6.62607e-34 * 2.99792e8) / (energy_kev * 1e3 * 1.60218e-19) * 1e9
 
 ```bash
 # 1. Pull beamline metadata from Tiled and start the pipeline
-tiled login https://tiled.nsls2.bnl.gov
+tiled profile create https://tiled.nsls2.bnl.gov --name nsls2  # once
+tiled login --profile nsls2
 hp start "$(pixi run -e client config-from-tiled --scan-num 320045)"
 
 # 2. (Optional) Override reconstruction parameters
@@ -464,8 +465,8 @@ hp restart "$(pixi run -e client config-from-tiled --scan-num 320046)"
 | `SERVER_PUBLIC_KEY` | — | CurveZMQ server (Eiger) public key |
 | `CLIENT_PUBLIC_KEY` | — | CurveZMQ client public key |
 | `CLIENT_SECRET_KEY` | — | CurveZMQ client secret key |
-| `TILED_BASE_URL` | — | Tiled server URL. If unset, falls back to .npy writes |
-| `TILED_API_KEY` | — | Tiled API key (store in Key Vault as `holoptycho-tiled-api-key`) |
+| `TILED_BASE_URL` | — | **Required.** Tiled server URL |
+| `TILED_API_KEY` | — | Tiled API key (optional — falls back to cached `tiled login` token; store in Key Vault as `holoptycho-tiled-api-key` for production) |
 | `TILED_CATALOG_PATH` | `hxn/processed/holoptycho` | Tiled catalog path for output |
 | `HOLOPTYCHO_LOG_LEVEL` | `INFO` | Root log level for API + pipeline logs. Set to `DEBUG` to surface `TiledWriter.write_live` / `write_vit` debug logs in `hp logs`. |
 | `AZURE_SUBSCRIPTION_ID` | — | Azure subscription (for Azure ML model pull) |
@@ -533,7 +534,8 @@ To test end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. 
 
 ```bash
 # On the compute node — authenticate and install the replay env
-tiled login https://tiled.nsls2.bnl.gov
+tiled profile create https://tiled.nsls2.bnl.gov --name nsls2  # once
+tiled login --profile nsls2
 pixi install -e replay
 
 # If holoptycho has no selected engine yet, choose one before using --hp-start
@@ -762,10 +764,10 @@ from the run config and are populated automatically by
 To list runs for a particular raw scan, query the catalog with
 `tiled.queries.Eq("scan_id", "<scan_id>")` (or `Eq("raw_uid", ...)`).
 
-If `TILED_BASE_URL` or `TILED_API_KEY` are not set, the pipeline falls back to
-writing `.npy` files under `/data/users/Holoscan/{run_uid}/` (one directory per
-run) with a warning. A `metadata.json` sidecar mirrors the Tiled container
-metadata for offline matching.
+`TILED_BASE_URL` is required; the pipeline raises `RuntimeError` and refuses
+to start if it is unset. `TILED_API_KEY` is optional — when omitted, the
+writer reuses the cached token from `tiled login` for the same server, or
+falls back to anonymous access.
 
 ---
 

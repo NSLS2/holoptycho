@@ -33,9 +33,8 @@ Each pipeline run produces a fresh container under `hxn/processed/holoptycho/{ru
 | `SERVER_STREAM_SOURCE` | ZMQ endpoint of the Eiger detector, e.g. `tcp://<host>:5555` |
 | `PANDA_STREAM_SOURCE` | ZMQ endpoint of the PandA box, e.g. `tcp://<host>:5556` |
 | `TILED_BASE_URL` | URL of the Tiled server |
-| `TILED_API_KEY` | Tiled API key (store in Azure Key Vault — see below) |
 
-The pipeline will refuse to start if `SERVER_STREAM_SOURCE` or `PANDA_STREAM_SOURCE` are not set. If `TILED_BASE_URL` or `TILED_API_KEY` are absent, results fall back to `.npy` files under `/data/users/Holoscan/` with a warning.
+The pipeline will refuse to start if any of `SERVER_STREAM_SOURCE`, `PANDA_STREAM_SOURCE`, or `TILED_BASE_URL` are not set. `TILED_API_KEY` is optional — when unset, the writer uses the cached token from `tiled login` (run once: `tiled profile create <url> --name <name>` then `tiled login --profile <name>`).
 
 ## Optional environment variables
 
@@ -159,7 +158,8 @@ hp logs
 Beamline metadata (energy, scan geometry, pixel size) can be pulled directly from Tiled and piped into `hp start`:
 
 ```bash
-tiled login https://tiled.nsls2.bnl.gov
+tiled profile create https://tiled.nsls2.bnl.gov --name nsls2  # once
+tiled login --profile nsls2
 hp start "$(pixi run -e client config-from-tiled --scan-num 320045)"
 ```
 
@@ -301,7 +301,8 @@ To test holoptycho end-to-end without a live beamline, use `scripts/replay_from_
 
 ```bash
 # 1a. Authenticate with Tiled and install the replay env (once)
-tiled login https://tiled.nsls2.bnl.gov
+tiled profile create https://tiled.nsls2.bnl.gov --name nsls2
+tiled login --profile nsls2
 pixi install -e replay
 
 # 1b. Look up the run UID from a scan id
