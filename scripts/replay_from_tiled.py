@@ -715,30 +715,22 @@ def parse_args():
 def _auto_batch_offsets(frames: np.ndarray, nx: int, ny: int) -> tuple[int, int]:
     """Auto-detect detector ROI offsets from the diffraction pattern center.
 
-    Averages the first ~50 frames, masks out uint16-saturated pixels (which
-    can be hot pixels or detector artifacts that drag the center of mass off
-    course), then computes the intensity-weighted center of mass and derives
-    ``(batch_x0, batch_y0)`` so that an ``nx × ny`` crop is centered on it.
+    Thin wrapper around :func:`ptychoml.preprocess.auto_detect_roi_offsets`.
+    Passes a saturation threshold derived from the input dtype so the
+    saturation-masking behaviour matches the original (uint16-saturated
+    pixels are excluded from the intensity-weighted COM).
 
     Verified on scan 404611: target was (135, 70), detected (137, 68) — 2px
     rounding noise after sat masking.
     """
-    sample = frames[:min(50, len(frames))].astype(np.float64)
-    mean_frame = sample.mean(axis=0)
-    sat_mask = (sample == np.iinfo(frames.dtype).max).any(axis=0)
-    masked = np.where(sat_mask, 0.0, mean_frame)
-    total = masked.sum()
-    if total <= 0:
-        # Frames are all zero or all saturated — bail to (0, 0) and let the
-        # user override.
-        return 0, 0
-    ys, xs = np.indices(masked.shape)
-    cy = float((ys * masked).sum() / total)
-    cx = float((xs * masked).sum() / total)
-    h, w = mean_frame.shape
-    bx0 = max(0, min(w - nx, round(cx - nx / 2)))
-    by0 = max(0, min(h - ny, round(cy - ny / 2)))
-    return int(bx0), int(by0)
+    from ptychoml.preprocess import auto_detect_roi_offsets
+
+    saturation_threshold = np.iinfo(frames.dtype).max - 1
+    return auto_detect_roi_offsets(
+        frames, nx, ny,
+        n_sample=50,
+        saturation_threshold=saturation_threshold,
+    )
 
 
 def main():

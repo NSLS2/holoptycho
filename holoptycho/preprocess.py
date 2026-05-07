@@ -5,6 +5,12 @@ import time
 import numpy as np
 import cupy as cp
 
+from ptychoml.preprocess import (
+    apply_intensity_floor,
+    crop_to_roi,
+    inpaint_bad_pixels,
+)
+
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
 from holoscan.logger import LogLevel, set_log_level
@@ -73,8 +79,7 @@ class ImageBatchOp(Operator):
             image = np.flip(image,1)
 
 
-        image = image[self.roi[0, 0]:self.roi[0, 1],
-                    self.roi[1, 0]:self.roi[1, 1]]
+        image = crop_to_roi(image, self.roi)
 
         # Remove Bad pixels (-1 to unsigned int)
         image[image==np.iinfo(image.dtype).max] = 0
@@ -130,18 +135,17 @@ class ImagePreprocessorOp(Operator):
         indices = op_input.receive("image_indices_in")
         
         processed_images = np.asarray(images)
-        
-        for bd in self.badpixels.T:
-            x = int(bd[0])
-            y = int(bd[1])
-            processed_images[:, x, y] = np.median(processed_images[:, x-1:x+2, y-1:y+2], axis=(2, 1))
-        
+
+        # self.badpixels is shape (2, K) with rows=[row_indices, col_indices];
+        # transpose to (K, 2) for inpaint_bad_pixels' coords format.
+        inpaint_bad_pixels(processed_images, self.badpixels.T)
+
         # processed_images = processed_images[:, self.roi[0,0]:self.roi[0,1], self.roi[1,0]:self.roi[1,1]]
         processed_images = np.rot90(processed_images, axes=(2,1))
         processed_images = np.fft.fftshift(processed_images, axes=(1,2))
         # processed_images = np.transpose(processed_images,[0,2,1])
         if self.detmap_threshold > 0:
-            processed_images[processed_images<self.detmap_threshold] = 0
+            apply_intensity_floor(processed_images, self.detmap_threshold)
         diff_amp = np.sqrt(processed_images, dtype = np.float32 ,order='C')
 
         op_output.emit(diff_amp, "diff_amp")

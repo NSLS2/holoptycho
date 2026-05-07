@@ -32,33 +32,11 @@ from __future__ import annotations
 from typing import Tuple
 
 import numpy as np
-import scipy.fft
 
-
-def _fourier_shift(images: np.ndarray, shifts: np.ndarray) -> np.ndarray:
-    """Sub-pixel shift each (H, W) plane of ``images`` by ``shifts[i] = (dy, dx)``.
-
-    Runs in ``complex64`` via ``scipy.fft`` with worker threads. Output
-    matches the original complex128 ``numpy.fft`` path to within float32
-    precision (~5e-7 max abs diff for unit-variance inputs).
-    """
-    h, w = images.shape[-2:]
-    images_c = np.asarray(images, dtype=np.complex64)
-    ft = scipy.fft.fft2(images_c, workers=-1)
-
-    shifts_f32 = np.asarray(shifts, dtype=np.float32)
-    fy = np.fft.fftfreq(h).astype(np.float32)
-    fx = np.fft.fftfreq(w).astype(np.float32)
-    two_pi_neg = -2.0 * np.float32(np.pi)
-    arg_y = (two_pi_neg * shifts_f32[:, 0, None]) * fy[None, :]   # (N, H)
-    arg_x = (two_pi_neg * shifts_f32[:, 1, None]) * fx[None, :]   # (N, W)
-    ramp_y = np.exp((1j * arg_y).astype(np.complex64))            # (N, H)
-    ramp_x = np.exp((1j * arg_x).astype(np.complex64))            # (N, W)
-    ft *= ramp_y[:, :, None]
-    ft *= ramp_x[:, None, :]
-
-    out = scipy.fft.ifft2(ft, workers=-1)
-    return out.real.astype(images.dtype, copy=False)
+# Sub-pixel FFT shift now lives in ptychoml so it can be shared with any
+# caller (we lifted this exact implementation there). Re-exported under
+# the original local name to keep call sites in this file stable.
+from ptychoml.preprocess import fourier_shift as _fourier_shift
 
 
 def _placement_indices(
