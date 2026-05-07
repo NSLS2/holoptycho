@@ -516,7 +516,5 @@ sudo sh -c 'echo 2 >/proc/sys/kernel/perf_event_paranoid'
 
 The following are no longer used and remain in the repo for reference only. They will be removed in a future release:
 
-- **`PtychoSimulApp`**, **`InitSimul`**, **`live_simulation.py`** — simulate mode that replayed H5 files directly, bypassing ZMQ. Use `scripts/replay_from_tiled.py` instead.
 - **`InitRecon`**, **`liverecon_utils.py`** — scan header file watcher for detecting new scans from a beamline-written text file. Scan parameters now come from the API config.
 - **`--mode simulate`** CLI option — removed; `hp start` always runs the live ZMQ pipeline.
-- **`eiger_simulation/`** — bespoke Eiger simulator container. Use `scripts/replay_from_tiled.py` with a plain Python environment instead.

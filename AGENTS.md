@@ -773,6 +773,4 @@ metadata for offline matching.
 
 The following remain in the repo for reference and will be removed in a future release:
 
-- **`PtychoSimulApp`**, **`InitSimul`**, **`live_simulation.py`** — simulate mode that replayed H5 files directly, bypassing ZMQ.
 - **`InitRecon`**, **`liverecon_utils.py`** — scan header file watcher.
-- **`eiger_simulation/`** — bespoke Eiger simulator container. Use `scripts/replay_from_tiled.py` instead.

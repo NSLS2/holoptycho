@@ -82,7 +82,6 @@ from holoscan.decorator import create_op
 from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressOp
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
 from .liverecon_utils import parse_scan_header
-from .live_simulation import InitSimul
 from .vit_inference import (
     PtychoViTInferenceOp,
     SaveViTResult,
@@ -395,148 +394,6 @@ def SaveResult(output):
     )
     print('Saving results done.')
     
-class PtychoSimulApp(Application):
-    def __init__(self, *args, config_path=None, config_overrides=None, engine_path=None, **kwargs):
-        super().__init__(*args,**kwargs)
-
-        self.config_path = config_path
-        self.param = parse_config(self.config_path, config_overrides=config_overrides)
-        self.gpu = self.param.gpus[0]
-        self.engine_path = engine_path or "/models/ptycho_vit_amp_phase_b64.engine"
-
-        # Multi-threaded scheduler so downstream tiled-write operators
-        # (MosaicWriterOp, BatchWriterOp) run concurrently with the upstream
-        # ViT branch instead of serially under the default GreedyScheduler.
-        self.scheduler(MultiThreadScheduler(
-            self,
-            worker_thread_number=11,
-            check_recession_period_ms=1.0,
-            stop_on_deadlock=True,
-            stop_on_deadlock_timeout=500,
-            name="multithread_scheduler",
-        ))
-
-    def config_ops(self,param):
-
-        nx_prb = self.pty.recon.nx_prb
-        ny_prb = self.pty.recon.ny_prb
-        nz = self.pty.recon.num_points
-
-        self.image_send.diff_d_target = self.pty.recon.diff_d
-        self.image_send.max_points = nz
-
-        self.point_proc.point_info = np.zeros((nz,4),dtype = np.int32)
-        self.point_proc.point_info_target = self.pty.recon.point_info_d
-        self.point_proc.positions_um = np.full((nz, 2), np.nan, dtype=np.float64)
-
-        self.point_proc.min_points = self.min_points
-        self.point_proc.max_points = nz
-        self.point_proc.x_direction = self.pty.recon.x_direction
-        self.point_proc.y_direction = self.pty.recon.y_direction
-        self.point_proc.x_range_um = self.pty.recon.x_range_um
-        self.point_proc.y_range_um = self.pty.recon.y_range_um
-        self.point_proc.x_pixel_m = self.pty.recon.x_pixel_m
-        self.point_proc.y_pixel_m = self.pty.recon.y_pixel_m
-        self.point_proc.nx_prb = nx_prb
-        self.point_proc.ny_prb = ny_prb
-        self.point_proc.obj_pad = self.pty.recon.obj_pad
-
-        self.point_proc.angle_correction_flag = param.angle_correction_flag
-        self.init.angle_correction_flag = param.angle_correction_flag
-
-        self.pty.num_points_min = self.min_points
-
-
-
-    def compose(self):
-
-        self.param.live_recon_flag = True
-
-        self.batchsize = 64
-        self.min_points = 256
-
-        self.flip_image = True #According to detector settings
-
-        self.image_send = ImageSendOp(self, name="image_send")
-        self.point_proc = PointProcessorOp(self, x_direction=self.param.x_direction, y_direction=self.param.y_direction, name="point_proc")
-
-        self.init = InitSimul(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points, name='InitSimul')
-
-        # Additional margin to avoid wrapping
-        self.param.x_range += 5
-        self.param.y_range += 5
-        # self.init_recon = InitRecon(self)
-        self.pty = PtychoRecon(self,param=self.param,name='pty')
-        # self.pty_ctrl = PtychoCtrl(self)
-        self.param.x_range -= 5
-        self.param.y_range -= 5
-
-
-        # Temp
-        self.o = SaveResult(self,name='out')
-        self.live_result = SaveLiveResult(self,name='live_result')
-
-        self.config_ops(self.param)
-
-        # --- PtychoViT inference (parallel to iterative recon) ---
-        # Prefer a second GPU for PyCUDA/TRT when available, but fall back to
-        # the recon GPU on single-GPU nodes instead of hard-failing.
-        vit_gpu = self.param.gpus[1] if len(self.param.gpus) > 1 else self.param.gpus[0]
-        # Simulate diffamp path: data is unshifted (DC at corners) — no undo needed
-        self.vit = PtychoViTInferenceOp(
-            self,
-            engine_path=self.engine_path,
-            gpu=vit_gpu,
-            data_is_shifted=False,
-            name="vit_inference",
-        )
-        # Per-batch pred + indices export is gated by the config field
-        # vit_batch_writes (default off) — see SaveViTResult docstring for why.
-        enable_batch_writes = bool(getattr(self.param, "vit_batch_writes", False))
-        self.vit_save = SaveViTResult(
-            self,
-            positions_provider=lambda: self.point_proc.positions_um,
-            pixel_size_m=float(self.pty.recon.x_pixel_m),
-            x_range_um=float(self.pty.recon.x_range_um),
-            y_range_um=float(self.pty.recon.y_range_um),
-            enable_batch_writes=enable_batch_writes,
-            name="vit_save",
-        )
-        self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
-        self.positions_writer = PositionsWriterOp(self, name="positions_writer")
-        if enable_batch_writes:
-            self.batch_writer = BatchWriterOp(self, name="batch_writer")
-
-        self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
-
-        self.add_flow(self.init,self.point_proc,{("pointRx_out","pointOp_in")})
-        self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
-
-        self.add_flow(self.image_send,self.pty,{("frame_ready_num","frame_ready_num")})
-        self.add_flow(self.point_proc,self.pty,{("pos_ready_num","pos_ready_num")})
-
-        self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
-        self.add_flow(self.init,self.pty,{("flush_pty","flush")})
-
-        self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
-        self.add_flow(self.pty,self.o,{("output","output")})
-
-        # VIT: branch off InitSimul's diff_amp (fan-out, parallel to image_send)
-        self.add_flow(self.init, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
-        self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
-        # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the writer's
-        # input drops superseded snapshots while a write is in flight.
-        self.add_flow(self.vit_save, self.mosaic_writer, {("mosaic_snapshot", "snapshot")})
-        # Async tiled positions write: same drop-policy semantics as the
-        # mosaic — positions_um is fully overwritten per write, only the
-        # latest matters.
-        self.add_flow(self.vit_save, self.positions_writer, {("positions_snapshot", "snapshot")})
-        if enable_batch_writes:
-            # Per-batch pred + indices via a bounded FIFO (no drop, every
-            # batch is unique data). Gated by config; see SaveViTResult docstring.
-            self.add_flow(self.vit_save, self.batch_writer, {("vit_batch", "batch")})
-
-
 class PtychoApp(Application):
     def __init__(self, *args, config_path=None, config_overrides=None, engine_path=None, **kwargs):
         super().__init__(*args,**kwargs)
@@ -808,12 +665,9 @@ def main():
     cuda.select_device(gpu)
     cp.cuda.set_pinned_memory_allocator()
 
-    if len(sys.argv) >= 3 and sys.argv[2] == 'simulate':
-        app = PtychoSimulApp(config_path=config_path)
-    else:
-        app = PtychoApp(config_path=config_path)
-    
-    # Scheduler is configured in PtychoApp.__init__ / PtychoSimulApp.__init__.
+    app = PtychoApp(config_path=config_path)
+
+    # Scheduler is configured in PtychoApp.__init__.
     app.run()
     
     

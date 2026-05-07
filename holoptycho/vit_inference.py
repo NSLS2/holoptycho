@@ -3,15 +3,14 @@ PtychoViT TensorRT inference operator for Holoscan pipeline.
 
 Runs PtychoViT neural network inference in parallel with the iterative
 PtychoRecon solver. Takes preprocessed diffraction amplitudes from
-ImagePreprocessorOp (or InitSimul in simulate mode), runs TRT inference
-via the ``ptychoml`` package, and saves predicted amplitude/phase patches
-to disk.
+ImagePreprocessorOp, runs TRT inference via the ``ptychoml`` package,
+and saves predicted amplitude/phase patches to disk.
 
 No PyTorch imports — uses TensorRT + PyCUDA via ptychoml (safe for
 NSLS-II container).
 
 Usage:
-    See ptycho_holo.py for wiring into PtychoApp / PtychoSimulApp.
+    See ptycho_holo.py for wiring into PtychoApp.
 """
 
 import logging

@@ -21,7 +21,6 @@ HOLOSCAN_MODULES = [
     "holoptycho.datasource",
     "holoptycho.preprocess",
     "holoptycho.ptycho_holo",
-    "holoptycho.live_simulation",
     "holoptycho.vit_inference",
 ]
 
