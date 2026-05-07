@@ -10,8 +10,6 @@ import numpy as np
 import cupy as cp
 from numba import cuda
 
-from ptychoml.preprocess import crop_to_roi, inpaint_bad_pixels
-
 try:
     from hxntools.motor_info import motor_table
 except ModuleNotFoundError:
@@ -80,8 +78,20 @@ class InitSimul(Operator):
         spec.output("flush_pos_proc").condition(ConditionType.NONE)
         spec.output("flush_pty").condition(ConditionType.NONE)
 
-        spec.output("diff_amp").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
-        spec.output("image_indices").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
+        # raw_data mode: per-frame raw output. Wired in compose() to
+        # ImageBatchOp + ImagePreprocessorOp so the simulate path goes
+        # through the same preprocess operators as live mode.
+        spec.output("image").condition(ConditionType.NONE)
+        spec.output("image_index").condition(ConditionType.NONE)
+
+        # Legacy diffamp mode: per-batch already-preprocessed output that
+        # bypasses ImageBatchOp + ImagePreprocessorOp.
+        spec.output("diff_amp").connector(
+            IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
+        ).condition(ConditionType.NONE)
+        spec.output("image_indices").connector(
+            IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
+        ).condition(ConditionType.NONE)
 
         spec.output("pointRx_out")
 
@@ -92,43 +102,53 @@ class InitSimul(Operator):
             op_output.emit((self.param.x_range,self.param.y_range,1.0,1.0,self.x_num*2,self.param.angle,False),'flush_pos_proc')
             op_output.emit((self.scan_num,self.param.x_range,self.param.y_range,np.maximum(self.x_num*2,self.min_points),self.nz),'flush_pty')
 
-        if self.counter < self.nz:
-            i = self.counter
-            if self.h5_raw is not None:
-                detmap = np.array(self.rawdata[i:i+self.batchsize])
-
-                # Filter bad-pixel coordinates to those inside the ROI; the
-                # original loop skipped out-of-ROI coords with an explicit
-                # guard. Pass the (K, 2) coords array to inpaint_bad_pixels.
-                rows = self.badpixels[0]
-                cols = self.badpixels[1]
-                in_roi = (
-                    (rows >= self.roi[0, 0]) & (rows < self.roi[0, 1]) &
-                    (cols >= self.roi[1, 0]) & (cols < self.roi[1, 1])
-                )
-                inpaint_bad_pixels(
-                    detmap,
-                    np.column_stack([rows[in_roi], cols[in_roi]]),
-                )
-
-                detmap = crop_to_roi(detmap, self.roi)
-                detmap = np.rot90(detmap,axes=(2,1))
-                detmap = np.fft.fftshift(detmap,axes=(1,2))
-                diff_l = np.sqrt(detmap,dtype = np.float32,order='C')
-            else:
-                diff_l = np.array(self.rawdata[i:i+self.batchsize],dtype = np.float32,order='C')
-
-            op_output.emit(diff_l, "diff_amp")
-            op_output.emit(np.arange(i,i+self.batchsize), "image_indices")
-            op_output.emit((self.point_datapack_counter,self.points_simulate[:,i*10:(i+self.batchsize)*10]), "pointRx_out")
-
-            self.counter += self.batchsize
-            self.point_datapack_counter += 1
-            time.sleep(self.batchsize / 200)
-        else:
+        if self.counter >= self.nz:
             self.h5_header.close()
             if self.h5_raw:
                 self.h5_raw.close()
             self.stop_execution()
+            return
+
+        if self.h5_raw is not None:
+            # raw_data mode — emit one raw frame per compute() tick. The
+            # downstream ImageBatchOp accumulates batches and applies the
+            # ROI crop; ImagePreprocessorOp does bad-pixel inpaint, rot90,
+            # fftshift, and intensity → amplitude. Position info is still
+            # emitted per-batch.
+            frame = np.array(self.rawdata[self.counter])
+            op_output.emit(frame, "image")
+            op_output.emit(int(self.counter), "image_index")
+
+            self.counter += 1
+            if self.counter % self.batchsize == 0:
+                i_batch_start = self.counter - self.batchsize
+                op_output.emit(
+                    (self.point_datapack_counter,
+                     self.points_simulate[:, i_batch_start*10:self.counter*10]),
+                    "pointRx_out",
+                )
+                self.point_datapack_counter += 1
+
+            # Original throughput was batchsize/200 s per batch; per-frame
+            # equivalent is 1/200 s per frame (same total).
+            time.sleep(1 / 200)
+        else:
+            # Legacy diffamp mode — already preprocessed in the source h5.
+            # Emit per-batch directly to image_send / vit, bypassing
+            # ImageBatchOp + ImagePreprocessorOp.
+            i = self.counter
+            diff_l = np.array(self.rawdata[i:i+self.batchsize], dtype=np.float32, order='C')
+
+            op_output.emit(diff_l, "diff_amp")
+            op_output.emit(np.arange(i, i+self.batchsize), "image_indices")
+            op_output.emit(
+                (self.point_datapack_counter,
+                 self.points_simulate[:, i*10:(i+self.batchsize)*10]),
+                "pointRx_out",
+            )
+
+            self.counter += self.batchsize
+            self.point_datapack_counter += 1
+            time.sleep(self.batchsize / 200)
             
         # self.stop_execution()

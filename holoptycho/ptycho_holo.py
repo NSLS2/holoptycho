@@ -422,6 +422,37 @@ class PtychoSimulApp(Application):
         ny_prb = self.pty.recon.ny_prb
         nz = self.pty.recon.num_points
 
+        # raw_data mode: configure ImageBatchOp + ImagePreprocessorOp the
+        # same way live mode does, so the simulate path exercises the
+        # same preprocess operators as production. ImageBatchOp crops
+        # *before* ImagePreprocessorOp inpaints, opposite of how the old
+        # InitSimul did it inline — translate bad-pixel coords from the
+        # full-detector frame into the cropped-frame coordinate system
+        # (and drop any that fall outside the ROI).
+        if getattr(self, "_raw_data_mode", False):
+            self.image_batch.roi = self.init.roi
+            self.image_batch.batchsize = self.batchsize
+            self.image_batch.flip_image = False  # h5 sim data is already oriented
+            self.image_batch.nx_prb = nx_prb
+            self.image_batch.ny_prb = ny_prb
+            self.image_batch.images_to_add = np.zeros(
+                (self.batchsize, nx_prb, ny_prb), dtype=np.uint32
+            )
+            self.image_batch.indices_to_add = np.zeros(self.batchsize, dtype=np.int32)
+
+            rows = self.init.badpixels[0]
+            cols = self.init.badpixels[1]
+            in_roi = (
+                (rows >= self.init.roi[0, 0]) & (rows < self.init.roi[0, 1]) &
+                (cols >= self.init.roi[1, 0]) & (cols < self.init.roi[1, 1])
+            )
+            translated = np.stack([
+                rows[in_roi] - self.init.roi[0, 0],
+                cols[in_roi] - self.init.roi[1, 0],
+            ], axis=0)
+            self.image_proc.detmap_threshold = 0
+            self.image_proc.badpixels = translated
+
         self.image_send.diff_d_target = self.pty.recon.diff_d
         self.image_send.max_points = nz
 
@@ -461,6 +492,16 @@ class PtychoSimulApp(Application):
         self.point_proc = PointProcessorOp(self, x_direction=self.param.x_direction, y_direction=self.param.y_direction, name="point_proc")
 
         self.init = InitSimul(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points, name='InitSimul')
+
+        # If the source h5 has raw_data, route through the same
+        # ImageBatchOp + ImagePreprocessorOp the live pipeline uses, so
+        # sim mode exercises the real preprocess code paths. The legacy
+        # diffamp-only h5 mode bypasses these and feeds image_send / vit
+        # directly (see wiring at the bottom of compose()).
+        self._raw_data_mode = self.init.h5_raw is not None
+        if self._raw_data_mode:
+            self.image_batch = ImageBatchOp(self, name="image_batch")
+            self.image_proc = ImagePreprocessorOp(self, name="image_proc")
 
         # Additional margin to avoid wrapping
         self.param.x_range += 5
@@ -507,7 +548,21 @@ class PtychoSimulApp(Application):
         if enable_batch_writes:
             self.batch_writer = BatchWriterOp(self, name="batch_writer")
 
-        self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
+        # Image-data wiring depends on the source h5 mode:
+        #   raw_data: init -> image_batch -> image_proc -> image_send / vit
+        #             (same operators as live mode)
+        #   diffamp:  init -> image_send / vit  (legacy, already-preprocessed)
+        # The flush_image_send signal goes from init to image_send in both
+        # cases.
+        self.add_flow(self.init, self.image_send, {("flush_image_send", "flush")})
+        if self._raw_data_mode:
+            self.add_flow(self.init, self.image_batch, {("image", "image"), ("image_index", "image_index")})
+            self.add_flow(self.image_batch, self.image_proc, {("image_batch", "image_batch"), ("image_indices", "image_indices_in")})
+            self.add_flow(self.image_proc, self.image_send, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
+            self.add_flow(self.image_proc, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
+        else:
+            self.add_flow(self.init, self.image_send, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
+            self.add_flow(self.init, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
 
         self.add_flow(self.init,self.point_proc,{("pointRx_out","pointOp_in")})
         self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
@@ -520,9 +575,6 @@ class PtychoSimulApp(Application):
 
         self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
         self.add_flow(self.pty,self.o,{("output","output")})
-
-        # VIT: branch off InitSimul's diff_amp (fan-out, parallel to image_send)
-        self.add_flow(self.init, self.vit, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
         self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
         # Async tiled mosaic write: capacity=1 + QueuePolicy.POP on the writer's
         # input drops superseded snapshots while a write is in flight.
