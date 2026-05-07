@@ -10,6 +10,8 @@ import numpy as np
 import cupy as cp
 from numba import cuda
 
+from ptychoml.preprocess import crop_to_roi, inpaint_bad_pixels
+
 try:
     from hxntools.motor_info import motor_table
 except ModuleNotFoundError:
@@ -95,16 +97,21 @@ class InitSimul(Operator):
             if self.h5_raw is not None:
                 detmap = np.array(self.rawdata[i:i+self.batchsize])
 
-                for bd in self.badpixels.T:
-                    x = int(bd[0])
-                    y = int(bd[1])
+                # Filter bad-pixel coordinates to those inside the ROI; the
+                # original loop skipped out-of-ROI coords with an explicit
+                # guard. Pass the (K, 2) coords array to inpaint_bad_pixels.
+                rows = self.badpixels[0]
+                cols = self.badpixels[1]
+                in_roi = (
+                    (rows >= self.roi[0, 0]) & (rows < self.roi[0, 1]) &
+                    (cols >= self.roi[1, 0]) & (cols < self.roi[1, 1])
+                )
+                inpaint_bad_pixels(
+                    detmap,
+                    np.column_stack([rows[in_roi], cols[in_roi]]),
+                )
 
-                    # Skip bad pixels outside the roi
-                    if x>=self.roi[0,0] and x<self.roi[0,1] and y>=self.roi[1,0] and y<self.roi[1,1]:
-                        for iz in range(self.batchsize):
-                            detmap[iz,x,y] = np.median(detmap[iz,x-1:x+2,y-1:y+2])
-                    
-                detmap = detmap[:,self.roi[0,0]:self.roi[0,1],self.roi[1,0]:self.roi[1,1]]
+                detmap = crop_to_roi(detmap, self.roi)
                 detmap = np.rot90(detmap,axes=(2,1))
                 detmap = np.fft.fftshift(detmap,axes=(1,2))
                 diff_l = np.sqrt(detmap,dtype = np.float32,order='C')

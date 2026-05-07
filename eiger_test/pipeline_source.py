@@ -6,6 +6,8 @@ from argparse import ArgumentParser
 import numpy as np
 import numpy.typing as npt
 import cupy as cp
+
+from ptychoml.preprocess import crop_to_roi
 import json
 import cbor2
 import pprint
@@ -135,8 +137,7 @@ class EigerZmqRxOp(Operator):
                 data_msg = self.socket.recv()
                 msg_type = "image"
                 _, image_data = decode_json_message(data_msg, encoding_msg)
-                image_data = image_data[self.roi[0, 0]:self.roi[0, 1],
-                                        self.roi[1, 0]:self.roi[1, 1]]
+                image_data = crop_to_roi(image_data, self.roi)
             elif self.msg_format == "cbor":
                 msg = self.socket.recv()
                 msg_type, image_data = decode_cbor_message(msg)
