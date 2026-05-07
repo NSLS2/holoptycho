@@ -491,7 +491,7 @@ export PANDA_STREAM_SOURCE="tcp://localhost:5556"
 export ENGINE_CACHE_DIR="$HOME/.cache/holoptycho/models"
 mkdir -p "$ENGINE_CACHE_DIR"
 
-pixi run start-api   # listens on 127.0.0.1:8000
+pixi run api   # listens on 127.0.0.1:8000
 ```
 
 `SERVER_STREAM_SOURCE` and `PANDA_STREAM_SOURCE` are required — the pipeline refuses to start without them. Use `tcp://localhost:5555` / `tcp://localhost:5556` when pairing with `scripts/replay_from_tiled.py` on the same host.
@@ -502,7 +502,7 @@ pixi run start-api   # listens on 127.0.0.1:8000
 
 ```bash
 nsys profile -t cuda,nvtx,osrt,python-gil -o ptycho_profile.nsys-rep -f true -d 30 \
-    pixi run start-api
+    pixi run api
 ```
 
 Requires `perf_event_paranoid <= 2`:

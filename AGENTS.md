@@ -248,7 +248,7 @@ mkdir -p "$ENGINE_CACHE_DIR"
 ### 4. Start the server
 
 ```bash
-pixi run start-api   # listens on 127.0.0.1:8000
+pixi run api   # listens on 127.0.0.1:8000
 ```
 
 Server reads env vars at startup, so changing any of them requires a restart.

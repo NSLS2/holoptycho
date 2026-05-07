@@ -123,7 +123,7 @@ scripts = ["set-ld-path.sh"]
 
 [tasks]
 test = "pytest tests/ -v"
-start-api = "uvicorn holoptycho.server.api:app --host 127.0.0.1 --port 8000"
+api = "uvicorn holoptycho.server.api:app --host 127.0.0.1 --port 8000"
 
 [feature.replay.tasks]
 replay = "python scripts/replay_from_tiled.py"
