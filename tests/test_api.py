@@ -113,56 +113,6 @@ def test_run_with_config_starts_app(client):
     mock_start.assert_called_once_with(state=state_module.state, config=_VALID_CONFIG)
 
 
-def test_run_with_fine_tune_flag_passes_through(client):
-    """`fine_tune: true` is an optional config field that controls whether the
-    pipeline writes the `<run>/diffraction/` subtree. Verify it round-trips
-    through /run -> runner.start without being stripped or coerced."""
-    config_with_flag = {**_VALID_CONFIG, "fine_tune": True}
-    with patch("holoptycho.server.runner.start") as mock_start:
-        resp = client.post("/run", json={"config": config_with_flag})
-    assert resp.status_code == 202
-    captured = mock_start.call_args.kwargs["config"]
-    assert captured["fine_tune"] is True
-
-
-def test_runner_rejects_fine_tune_with_vit_only(client, tmp_path):
-    """fine_tune=true requires the iterative branch to write final/probe and
-    final/object — ptycho-vit's training loader needs both as supervised
-    targets. vit-only runs would produce dp + positions but no targets, so
-    the run is unusable as a fine-tuning sample. Verify runner.start refuses
-    the combination at the API boundary rather than silently producing an
-    incomplete run."""
-    import holoptycho.server.runner as runner_mod
-
-    config = {**_VALID_CONFIG, "fine_tune": True, "recon_mode": "vit"}
-    with patch("subprocess.Popen") as mock_popen:
-        with pytest.raises(RuntimeError, match="fine_tune=true requires recon_mode"):
-            runner_mod.start(state=state_module.state, config=config)
-    mock_popen.assert_not_called()
-
-
-def test_runner_accepts_fine_tune_with_both_recon_modes(client, tmp_path):
-    """The vit-only check must NOT fire for recon_mode='both' or 'iterative'
-    — those write the targets ptycho-vit needs."""
-    import holoptycho.server.runner as runner_mod
-
-    for mode in ("both", "iterative"):
-        # Reset between iterations: the previous iteration's start() flipped
-        # state.status to "starting" and set the module-level _proc.
-        runner_mod._proc = None
-        state_module.state.update(status="stopped", error=None, start_time=None)
-        config = {**_VALID_CONFIG, "fine_tune": True, "recon_mode": mode}
-        fake_proc = MagicMock()
-        fake_proc.poll.return_value = None
-        fake_proc.stdin = MagicMock()
-        with patch("subprocess.Popen", return_value=fake_proc), \
-             patch("threading.Thread"):
-            # Should not raise.
-            runner_mod.start(state=state_module.state, config=config)
-    runner_mod._proc = None
-    state_module.state.update(status="stopped", error=None, start_time=None)
-
-
 def test_run_no_config_uses_last_config(client):
     state_module.state.update(last_config=_VALID_CONFIG)
     with patch("holoptycho.server.runner.start") as mock_start:

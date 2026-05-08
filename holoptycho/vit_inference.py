@@ -672,12 +672,9 @@ class PositionsWriterOp(Operator):
     snapshots while we're mid-PUT.
     """
 
-    def __init__(self, fragment, *args, enable_fine_tune_writes: bool = False, **kwargs):
+    def __init__(self, fragment, *args, **kwargs):
         super().__init__(fragment, *args, **kwargs)
         self._logger = logging.getLogger("holoptycho.PositionsWriterOp")
-        # When True, also writes meter-unit x/y arrays under
-        # <run>/diffraction/probe_position_{x,y}_m for ptycho-vit's loader.
-        self._enable_fine_tune_writes = bool(enable_fine_tune_writes)
 
     def setup(self, spec: OperatorSpec):
         spec.input("snapshot").connector(
@@ -697,12 +694,14 @@ class PositionsWriterOp(Operator):
         try:
             t0 = time.perf_counter()
             _writer.write_positions(positions)
-            if self._enable_fine_tune_writes:
-                # positions has shape (nz, 2) with col 0 = x_um, col 1 = y_um.
-                _writer.write_probe_positions_m(
-                    x_m=positions[:, 0] * 1e-6,
-                    y_m=positions[:, 1] * 1e-6,
-                )
+            # Always emit meter-unit x/y alongside the existing micron-unit
+            # array under <run>/diffraction/. Tiny extra payload (~160 KB)
+            # and gives ptycho-vit's loader the SI form it expects without
+            # a unit conversion or a per-run feature flag.
+            _writer.write_probe_positions_m(
+                x_m=positions[:, 0] * 1e-6,
+                y_m=positions[:, 1] * 1e-6,
+            )
             self._logger.info(
                 "PositionsWriterOp: wrote in %.0f ms",
                 (time.perf_counter() - t0) * 1000,

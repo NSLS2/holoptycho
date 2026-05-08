@@ -389,6 +389,10 @@ def SaveResult(output):
         timestamps=np.array(output[1]),
         num_points=np.array(output[2]),
     )
+    # Iterative branch finished — mark the run complete in metadata. For
+    # vit-only runs SaveResult is never wired and the metadata flip happens
+    # at clean subprocess exit (_pipeline_subprocess.main).
+    _writer.mark_run_complete()
     print('Saving results done.')
 
 
@@ -593,12 +597,6 @@ class PtychoApp(Application):
         # per-frame ViT predictions into a global mosaic. Done after
         # reset_for_scan so x_pixel_m is populated from the engine.
         self.run_uid = uuid.uuid4().hex
-        # Per-run "is this run intended as a fine-tuning sample?" flag. When
-        # true, holoptycho persists the detector-frame intensity buffer
-        # (<run>/diffraction/dp) plus meter-unit probe positions so ptycho-vit
-        # can use the run as a labelled training sample. Defaults off so
-        # routine reconstructions don't generate gigabyte-scale writes.
-        enable_fine_tune_writes = bool(getattr(self.param, "fine_tune", False))
         run_metadata = {
             "scan_num": str(self.param.scan_num),
             "raw_uid": str(getattr(self.param, "raw_uid", "") or ""),
@@ -618,17 +616,29 @@ class PtychoApp(Application):
             "xray_energy_kev": float(getattr(self.param, "xray_energy_kev", 0.0)),
             "wavelength_m": float(self.pty.recon.lambda_nm) * 1e-9,
             "distance_m": float(getattr(self.param, "z_m", 0.0)),
-            "fine_tune": enable_fine_tune_writes,
+            # True iff this run's iterative branch will populate final/probe
+            # and final/object — the supervised targets ptycho-vit's training
+            # loader requires. Lets downstream tooling list fine-tuning
+            # candidates via a Tiled query without inspecting subcontainers.
+            "fine_tunable": recon_mode in ("iterative", "both"),
+            # Flipped to True when the holoscan pipeline finishes processing
+            # this scan (SaveResult for iterative/both, or clean subprocess
+            # exit for vit-only). Used to filter mid-flight runs out of batch
+            # processing without inspecting state.
+            "complete": False,
         }
         _writer.start_run(self.run_uid, metadata=run_metadata)
-        if enable_fine_tune_writes:
-            # uint8 storage is amplitude (sqrt of detector intensity). See
-            # TiledWriter.start_diffraction_buffer docstring for why.
-            _writer.start_diffraction_buffer(
-                nz=int(x_num * y_num),
-                frame_shape=(int(self.param.nx), int(self.param.ny)),
-                dtype=np.uint8,
-            )
+        # Always pre-allocate the diffraction buffer so the dashboard's
+        # detector-frame tile is available on every run, regardless of
+        # recon_mode. Whether a run can be used as a ptycho-vit fine-tuning
+        # sample depends on whether final/probe and final/object are present
+        # — that's only the case when recon_mode is 'iterative' or 'both'.
+        # See TiledWriter.start_diffraction_buffer for the dtype rationale.
+        _writer.start_diffraction_buffer(
+            nz=int(x_num * y_num),
+            frame_shape=(int(self.param.nx), int(self.param.ny)),
+            dtype=np.uint8,
+        )
 
         # --- PtychoViT inference (parallel to iterative recon) ---
         # Prefer a second GPU for PyCUDA/TRT when available, but fall back to
@@ -658,27 +668,22 @@ class PtychoApp(Application):
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
-        self.positions_writer = PositionsWriterOp(
-            self,
-            enable_fine_tune_writes=enable_fine_tune_writes,
-            name="positions_writer",
-        )
+        self.positions_writer = PositionsWriterOp(self, name="positions_writer")
         if enable_batch_writes:
             self.batch_writer = BatchWriterOp(self, name="batch_writer")
-        if enable_fine_tune_writes:
-            self.frame_writer = FrameWriterOp(self, name="frame_writer")
+        self.frame_writer = FrameWriterOp(self, name="frame_writer")
 
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
         self.add_flow(self.image_batch, self.image_proc, {("image_batch", "image_batch"), ("image_indices", "image_indices_in")})
         self.add_flow(self.image_proc, self.image_send, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
-        if enable_fine_tune_writes:
-            # Tap detector-frame intensity (pre-rot/shift) into the Tiled
-            # diffraction buffer for downstream ptycho-vit fine-tuning.
-            self.add_flow(self.image_proc, self.frame_writer, {
-                ("intensity", "intensity"),
-                ("image_indices", "image_indices"),
-            })
+        # Tap detector-frame intensity (pre-rot/shift) into the Tiled
+        # diffraction buffer. Always wired so the dashboard tile and
+        # downstream ptycho-vit fine-tuning have the data on any run.
+        self.add_flow(self.image_proc, self.frame_writer, {
+            ("intensity", "intensity"),
+            ("image_indices", "image_indices"),
+        })
 
         self.add_flow(self.pos_rx, self.point_proc, {("pointRx_out", "pointOp_in")})
         self.add_flow(self.image_send, self.point_proc, {("image_indices_out", "pointOp_in")})

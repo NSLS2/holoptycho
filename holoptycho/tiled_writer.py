@@ -367,6 +367,24 @@ class TiledWriter:
         except Exception:
             logger.exception("TiledWriter.write_probe_positions_m failed")
 
+    def mark_run_complete(self) -> None:
+        """Stamp ``complete: true`` into the per-run container metadata.
+
+        Called when the holoscan pipeline naturally finishes processing the
+        scan — either at iterative end-of-run (``SaveResult``) for
+        iterative/both modes, or at clean subprocess exit for any mode.
+        Lets downstream consumers query for finalised runs without having
+        to inspect subcontainers.
+        """
+        if self._run is None:
+            logger.warning("mark_run_complete before start_run; skipping")
+            return
+        try:
+            self._run.update_metadata(metadata={"complete": True})
+            logger.info("TiledWriter.mark_run_complete run=%s", self._run_uid)
+        except Exception:
+            logger.exception("TiledWriter.mark_run_complete failed")
+
     def write_vit(
         self,
         batch_num: int,

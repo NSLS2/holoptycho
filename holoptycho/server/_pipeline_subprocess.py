@@ -178,6 +178,17 @@ def main() -> int:
         traceback.print_exc(file=sys.stderr)
         return 5
 
+    # Stamp `complete: true` into the run's Tiled metadata for any clean
+    # exit. SaveResult also calls this for iterative/both modes (slightly
+    # earlier, the moment the iterative branch's final/ writes land), but
+    # for vit-only runs there is no SaveResult and this is the only hook.
+    # Both callers are idempotent — last write wins, value is the same.
+    try:
+        from holoptycho.tiled_writer import get_writer
+        get_writer().mark_run_complete()
+    except Exception:
+        logger.exception("Failed to mark run complete")
+
     logger.info("pipeline subprocess finished cleanly")
     return 0
 

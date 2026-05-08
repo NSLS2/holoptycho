@@ -69,22 +69,6 @@ _REQUIRED_ENV_VARS = (
 )
 
 
-def _truthy(v) -> bool:
-    """Loose truthiness for config fields that may arrive as bool or string.
-
-    The /start payload carries booleans natively, but values that round-trip
-    through ``db.write_config_ini`` come back as strings (``"True"`` /
-    ``"true"`` / ``"1"``). Match all of those.
-    """
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    if isinstance(v, str):
-        return v.strip().lower() in {"1", "true", "yes", "on"}
-    return False
-
-
 def check_required_env() -> None:
     """Raise ``RuntimeError`` if any required env var is unset.
 
@@ -207,23 +191,6 @@ def start(state: AppState, config: dict | None = None) -> None:
     if missing_fields:
         raise RuntimeError(
             f"Config is missing required field(s): {', '.join(missing_fields)}."
-        )
-
-    # ptycho-vit's training dataset needs a reconstructed probe + object as
-    # supervised targets, both written by the iterative branch (final/probe,
-    # final/object). A vit-only run produces dp + positions but no
-    # probe/object, so the resulting Tiled container is unusable as a
-    # fine-tuning sample. Reject the combination at /start rather than
-    # producing a silently incomplete run.
-    if _truthy(config.get("fine_tune")) and str(
-        config.get("recon_mode", "both")
-    ).lower() == "vit":
-        raise RuntimeError(
-            "fine_tune=true requires recon_mode='iterative' or 'both' so "
-            "the iterative branch writes final/probe and final/object — "
-            "ptycho-vit's training loader needs both as supervised targets. "
-            "vit-only runs produce dp and positions but no probe/object, "
-            "leaving the run incomplete as a fine-tuning sample."
         )
 
     # Build the subprocess env. Inherit everything (so SERVER_STREAM_SOURCE,
