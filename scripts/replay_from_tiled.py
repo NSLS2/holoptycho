@@ -565,6 +565,10 @@ def start_holoptycho_pipeline(args) -> None:
         print(f"[holoptycho] WARNING: failed to clear logs: {exc}", flush=True)
     config_tiled_url = args.hp_config_tiled_url or args.tiled_url
     config = build_full_config(args.uid, tiled_url=config_tiled_url, args=args)
+    # Replay is the canonical path for capturing fine-tuning samples — default
+    # the flag on so a plain `replay` invocation produces a Tiled run that
+    # ptycho-vit can train against. Override via --no-fine-tune.
+    config["fine_tune"] = bool(getattr(args, "fine_tune", True))
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
     # Retry-with-backoff for the brief window where a prior runner thread is
@@ -630,6 +634,17 @@ def parse_args():
         type=float,
         default=2.0,
         help="Seconds to wait after --hp-start before publishing ZMQ (default: 2.0)",
+    )
+    parser.add_argument(
+        "--fine-tune",
+        dest="fine_tune",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Tag the run as a fine-tuning sample (default: True). When on, "
+            "holoptycho writes <run>/diffraction/dp + meter-unit positions for "
+            "ptycho-vit. Pass --no-fine-tune to skip those writes."
+        ),
     )
     add_reconstruction_arguments(parser)
     parser.add_argument(
