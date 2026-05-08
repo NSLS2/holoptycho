@@ -113,6 +113,18 @@ def test_run_with_config_starts_app(client):
     mock_start.assert_called_once_with(state=state_module.state, config=_VALID_CONFIG)
 
 
+def test_run_with_fine_tune_flag_passes_through(client):
+    """`fine_tune: true` is an optional config field that controls whether the
+    pipeline writes the `<run>/diffraction/` subtree. Verify it round-trips
+    through /run -> runner.start without being stripped or coerced."""
+    config_with_flag = {**_VALID_CONFIG, "fine_tune": True}
+    with patch("holoptycho.server.runner.start") as mock_start:
+        resp = client.post("/run", json={"config": config_with_flag})
+    assert resp.status_code == 202
+    captured = mock_start.call_args.kwargs["config"]
+    assert captured["fine_tune"] is True
+
+
 def test_run_no_config_uses_last_config(client):
     state_module.state.update(last_config=_VALID_CONFIG)
     with patch("holoptycho.server.runner.start") as mock_start:

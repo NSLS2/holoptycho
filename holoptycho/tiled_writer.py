@@ -81,6 +81,9 @@ class TiledWriter:
         # Per-run container created lazily by start_run().
         self._run = None
         self._run_uid: str | None = None
+        # Diffraction buffer node, set by start_diffraction_buffer when
+        # fine_tune writes are enabled.
+        self._dp_node = None
         logger.info("TiledWriter connected: %s / %s", base_url, catalog_path)
 
     # ------------------------------------------------------------------
@@ -200,6 +203,90 @@ class TiledWriter:
             self._write_or_overwrite_array(self._run, "positions_um", positions_um)
         except Exception:
             logger.exception("TiledWriter.write_positions failed")
+
+    # ------------------------------------------------------------------
+    # Fine-tuning writes — only used when config.fine_tune=True
+    # ------------------------------------------------------------------
+
+    def start_diffraction_buffer(
+        self,
+        nz: int,
+        frame_shape: tuple[int, int],
+        dtype=np.uint16,
+    ) -> None:
+        """Pre-allocate the per-run diffraction buffer for fine-tuning data.
+
+        Creates a zero-filled ``(nz, H, W)`` array under
+        ``<run>/diffraction/dp``; subsequent ``write_diffraction_chunk`` calls
+        slice into it. Pre-allocating keeps the schema knowable from the start
+        so the dashboard / loader can size their views without waiting for the
+        first chunk to land.
+        """
+        if self._run is None:
+            logger.warning("start_diffraction_buffer before start_run; skipping")
+            return
+        try:
+            diffraction = _get_or_create(self._run, "diffraction")
+            empty = np.zeros((nz,) + tuple(frame_shape), dtype=dtype)
+            self._write_or_overwrite_array(diffraction, "dp", empty)
+            self._dp_node = diffraction["dp"]
+            logger.info(
+                "TiledWriter.start_diffraction_buffer run=%s shape=%s dtype=%s",
+                self._run_uid, empty.shape, empty.dtype,
+            )
+        except Exception:
+            logger.exception("TiledWriter.start_diffraction_buffer failed")
+            self._dp_node = None
+
+    def write_diffraction_chunk(
+        self,
+        indices: np.ndarray,
+        frames: np.ndarray,
+    ) -> None:
+        """Write a chunk of detector-frame intensity into ``<run>/diffraction/dp``.
+
+        ``indices`` is a ``(B,)`` array of global frame indices in scan order;
+        ``frames`` is ``(B, H, W)`` matching the buffer's dtype. The upstream
+        batching produces contiguous indices per chunk, so we use a single
+        slice assignment; non-contiguous chunks fall back to per-row writes.
+        """
+        if self._dp_node is None:
+            return
+        try:
+            indices = np.asarray(indices)
+            if len(indices) == 0:
+                return
+            start = int(indices[0])
+            end = int(indices[-1]) + 1
+            if end - start == len(indices) and np.all(np.diff(indices) == 1):
+                self._dp_node[start:end] = frames
+            else:
+                for i, idx in enumerate(indices):
+                    self._dp_node[int(idx) : int(idx) + 1] = frames[i : i + 1]
+        except Exception:
+            logger.exception("TiledWriter.write_diffraction_chunk failed")
+
+    def write_probe_positions_m(
+        self,
+        x_m: np.ndarray,
+        y_m: np.ndarray,
+    ) -> None:
+        """Overwrite the per-frame probe positions in meters.
+
+        Sibling to ``write_positions`` (which writes microns under the run
+        root); this writes the SI-unit form ptycho-vit's loader expects, under
+        ``<run>/diffraction/probe_position_x_m`` and ``..._y_m``. Only called
+        when fine-tuning writes are enabled.
+        """
+        if self._run is None:
+            logger.warning("write_probe_positions_m before start_run; skipping")
+            return
+        try:
+            diffraction = _get_or_create(self._run, "diffraction")
+            self._write_or_overwrite_array(diffraction, "probe_position_x_m", x_m)
+            self._write_or_overwrite_array(diffraction, "probe_position_y_m", y_m)
+        except Exception:
+            logger.exception("TiledWriter.write_probe_positions_m failed")
 
     def write_vit(
         self,

@@ -22,7 +22,9 @@ Holoptycho is a streaming pipeline: it receives diffraction patterns from the Ei
 - **`PtychoRecon`** — iterative DM/ML reconstruction on GPU 0
 - **`PtychoViTInferenceOp`** — parallel neural network inference on GPU 1
 
-Each pipeline run produces a fresh container under `hxn/processed/holoptycho/{run_uid}/` (a per-run UUID; the catalog root is overrideable via `TILED_CATALOG_PATH`), tagged with the `synaps_project` spec. Container metadata records the raw scan it was reconstructed from (`raw_uid`, `scan_id`, `scan_num`, `started_at`, `recon_mode`).
+Each pipeline run produces a fresh container under `hxn/processed/holoptycho/{run_uid}/` (a per-run UUID; the catalog root is overrideable via `TILED_CATALOG_PATH`), tagged with the `synaps_project` spec. Container metadata records the raw scan it was reconstructed from (`raw_uid`, `scan_id`, `scan_num`, `started_at`, `recon_mode`, `xray_energy_kev`, `wavelength_m`, `distance_m`, plus `fine_tune` for runs flagged as fine-tuning samples).
+
+When the per-run config has `fine_tune: true`, holoptycho additionally writes a `<run>/diffraction/` subtree containing detector-frame intensity (`dp`, `(nz, H, W) uint16`) and meter-unit probe positions (`probe_position_x_m`, `probe_position_y_m`). This is what ptycho-vit's training loader consumes; defaults off so routine reconstructions don't generate gigabyte-scale writes.
 
 ---
 

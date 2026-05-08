@@ -390,7 +390,33 @@ def SaveResult(output):
         num_points=np.array(output[2]),
     )
     print('Saving results done.')
-    
+
+
+class FrameWriterOp(Operator):
+    """Persist detector-frame intensity to Tiled when config.fine_tune=True.
+
+    Subscribes to ImagePreprocessorOp's ``intensity`` tap — chunks of
+    ``(B, H, W)`` uint16 in detector-frame orientation (after bad-pixel
+    inpaint, before rot90/fftshift/floor/sqrt). Each chunk is written into
+    ``<run>/diffraction/dp[start:stop]`` via
+    ``TiledWriter.write_diffraction_chunk``. This is the model *input* — what
+    ptycho-vit's training loader consumes — so it has to be intensity in
+    detector orientation, not the rot/shifted amplitude the live ViT op sees.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def setup(self, spec: OperatorSpec):
+        spec.input("intensity").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
+        spec.input("image_indices").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
+
+    def compute(self, op_input, op_output, context):
+        frames = op_input.receive("intensity")
+        indices = op_input.receive("image_indices")
+        _writer.write_diffraction_chunk(np.asarray(indices), np.asarray(frames))
+
+
 class PtychoApp(Application):
     def __init__(self, *args, config_path=None, config_overrides=None, engine_path=None, **kwargs):
         super().__init__(*args,**kwargs)
@@ -567,6 +593,12 @@ class PtychoApp(Application):
         # per-frame ViT predictions into a global mosaic. Done after
         # reset_for_scan so x_pixel_m is populated from the engine.
         self.run_uid = uuid.uuid4().hex
+        # Per-run "is this run intended as a fine-tuning sample?" flag. When
+        # true, holoptycho persists the detector-frame intensity buffer
+        # (<run>/diffraction/dp) plus meter-unit probe positions so ptycho-vit
+        # can use the run as a labelled training sample. Defaults off so
+        # routine reconstructions don't generate gigabyte-scale writes.
+        enable_fine_tune_writes = bool(getattr(self.param, "fine_tune", False))
         run_metadata = {
             "scan_num": str(self.param.scan_num),
             "raw_uid": str(getattr(self.param, "raw_uid", "") or ""),
@@ -583,8 +615,18 @@ class PtychoApp(Application):
             "y_range_um": float(np.abs(self.param.y_range)),
             "x_direction": float(self.param.x_direction),
             "y_direction": float(self.param.y_direction),
+            "xray_energy_kev": float(getattr(self.param, "xray_energy_kev", 0.0)),
+            "wavelength_m": float(self.pty.recon.lambda_nm) * 1e-9,
+            "distance_m": float(getattr(self.param, "z_m", 0.0)),
+            "fine_tune": enable_fine_tune_writes,
         }
         _writer.start_run(self.run_uid, metadata=run_metadata)
+        if enable_fine_tune_writes:
+            _writer.start_diffraction_buffer(
+                nz=int(x_num * y_num),
+                frame_shape=(int(self.param.nx), int(self.param.ny)),
+                dtype=np.uint16,
+            )
 
         # --- PtychoViT inference (parallel to iterative recon) ---
         # Prefer a second GPU for PyCUDA/TRT when available, but fall back to
@@ -614,14 +656,27 @@ class PtychoApp(Application):
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
-        self.positions_writer = PositionsWriterOp(self, name="positions_writer")
+        self.positions_writer = PositionsWriterOp(
+            self,
+            enable_fine_tune_writes=enable_fine_tune_writes,
+            name="positions_writer",
+        )
         if enable_batch_writes:
             self.batch_writer = BatchWriterOp(self, name="batch_writer")
+        if enable_fine_tune_writes:
+            self.frame_writer = FrameWriterOp(self, name="frame_writer")
 
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
         self.add_flow(self.image_batch, self.image_proc, {("image_batch", "image_batch"), ("image_indices", "image_indices_in")})
         self.add_flow(self.image_proc, self.image_send, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
+        if enable_fine_tune_writes:
+            # Tap detector-frame intensity (pre-rot/shift) into the Tiled
+            # diffraction buffer for downstream ptycho-vit fine-tuning.
+            self.add_flow(self.image_proc, self.frame_writer, {
+                ("intensity", "intensity"),
+                ("image_indices", "image_indices"),
+            })
 
         self.add_flow(self.pos_rx, self.point_proc, {("pointRx_out", "pointOp_in")})
         self.add_flow(self.image_send, self.point_proc, {("image_indices_out", "pointOp_in")})

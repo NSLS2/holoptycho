@@ -117,6 +117,9 @@ class ImagePreprocessorOp(Operator):
         spec.input("image_indices_in").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.output("diff_amp")
         spec.output("image_indices")
+        # Detector-frame intensity tap, captured before rot90/fftshift/floor/sqrt.
+        # Consumed only by FrameWriterOp when fine_tune writes are enabled.
+        spec.output("intensity")
 
     def compute(self, op_input, op_output, context):
         t0 = time.perf_counter()
@@ -139,6 +142,12 @@ class ImagePreprocessorOp(Operator):
         # self.badpixels is shape (2, K) with rows=[row_indices, col_indices];
         # transpose to (K, 2) for inpaint_bad_pixels' coords format.
         inpaint_bad_pixels(processed_images, self.badpixels.T)
+
+        # Tap detector-frame intensity before rot90/fftshift — ptycho-vit's
+        # training loader expects intensity in detector orientation. Contiguous
+        # copy so downstream rot90 (returns a view) doesn't alias the emitted
+        # buffer.
+        op_output.emit(np.ascontiguousarray(processed_images), "intensity")
 
         # processed_images = processed_images[:, self.roi[0,0]:self.roi[0,1], self.roi[1,0]:self.roi[1,1]]
         processed_images = np.rot90(processed_images, axes=(2,1))
