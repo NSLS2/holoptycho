@@ -84,6 +84,7 @@ class TiledWriter:
         # Diffraction buffer node, set by start_diffraction_buffer when
         # fine_tune writes are enabled.
         self._dp_node = None
+        self._dp_chunk_size = 0
         logger.info("TiledWriter connected: %s / %s", base_url, catalog_path)
 
     # ------------------------------------------------------------------
@@ -213,30 +214,72 @@ class TiledWriter:
         nz: int,
         frame_shape: tuple[int, int],
         dtype=np.uint16,
+        frames_per_chunk: int = 64,
     ) -> None:
-        """Pre-allocate the per-run diffraction buffer for fine-tuning data.
+        """Register the per-run diffraction buffer structure for fine-tuning data.
 
-        Creates a zero-filled ``(nz, H, W)`` array under
-        ``<run>/diffraction/dp``; subsequent ``write_diffraction_chunk`` calls
-        slice into it. Pre-allocating keeps the schema knowable from the start
-        so the dashboard / loader can size their views without waiting for the
-        first chunk to land.
+        Registers a ``(nz, H, W)`` array under ``<run>/diffraction/dp`` *without*
+        uploading any data. Tiled records the array shape, dtype, and chunking
+        immediately; chunks are populated lazily by ``write_diffraction_chunk``
+        as frames arrive. The register-then-write-blocks split is essential —
+        the alternative ``write_array(np.zeros(...))`` path would upload 1.3 GB
+        of zeros up front, which times out over WAN before the first real
+        frame arrives.
+
+        Chunking is set so each block holds ``frames_per_chunk`` whole frames
+        (the natural batch boundary from ``ImageBatchOp``). Each
+        ``write_diffraction_chunk`` call writes exactly one block.
         """
         if self._run is None:
             logger.warning("start_diffraction_buffer before start_run; skipping")
             return
         try:
+            from tiled.structures.array import ArrayStructure, BuiltinDtype
+            from tiled.structures.core import StructureFamily
+            from tiled.structures.data_source import DataSource
+
             diffraction = _get_or_create(self._run, "diffraction")
-            empty = np.zeros((nz,) + tuple(frame_shape), dtype=dtype)
-            self._write_or_overwrite_array(diffraction, "dp", empty)
-            self._dp_node = diffraction["dp"]
+            h, w = int(frame_shape[0]), int(frame_shape[1])
+            dtype_np = np.dtype(dtype)
+
+            # Frame chunking matches ImageBatchOp's batch size so each
+            # FrameWriterOp invocation maps to exactly one block_id.
+            n_full = nz // frames_per_chunk
+            rem = nz - n_full * frames_per_chunk
+            chunk_dim0 = (frames_per_chunk,) * n_full
+            if rem:
+                chunk_dim0 = chunk_dim0 + (rem,)
+            structure = ArrayStructure(
+                shape=(int(nz), h, w),
+                chunks=(chunk_dim0, (h,), (w,)),
+                data_type=BuiltinDtype.from_numpy_dtype(dtype_np),
+            )
+            data_source = DataSource(
+                structure=structure,
+                structure_family=StructureFamily.array,
+            )
+            # Replace any prior dp node so re-runs of the same run_uid
+            # (shouldn't happen — fresh uuid each compose — but defensive)
+            # don't fight an existing array.
+            if "dp" in diffraction:
+                del diffraction["dp"]
+            self._dp_node = diffraction.new(
+                StructureFamily.array,
+                [data_source],
+                key="dp",
+                specs=_SPECS,
+                access_tags=_ACCESS_TAGS,
+            )
+            self._dp_chunk_size = int(frames_per_chunk)
             logger.info(
-                "TiledWriter.start_diffraction_buffer run=%s shape=%s dtype=%s",
-                self._run_uid, empty.shape, empty.dtype,
+                "TiledWriter.start_diffraction_buffer run=%s shape=(%d,%d,%d) "
+                "dtype=%s chunks=%d frames",
+                self._run_uid, nz, h, w, dtype_np, frames_per_chunk,
             )
         except Exception:
             logger.exception("TiledWriter.start_diffraction_buffer failed")
             self._dp_node = None
+            self._dp_chunk_size = 0
 
     def write_diffraction_chunk(
         self,
@@ -246,9 +289,10 @@ class TiledWriter:
         """Write a chunk of detector-frame intensity into ``<run>/diffraction/dp``.
 
         ``indices`` is a ``(B,)`` array of global frame indices in scan order;
-        ``frames`` is ``(B, H, W)`` matching the buffer's dtype. The upstream
-        batching produces contiguous indices per chunk, so we use a single
-        slice assignment; non-contiguous chunks fall back to per-row writes.
+        ``frames`` is ``(B, H, W)`` matching the buffer's dtype. We write one
+        block per call. Misaligned or non-contiguous chunks are skipped with a
+        warning — block writes require batch boundaries to match the chunk
+        boundaries declared at ``start_diffraction_buffer``.
         """
         if self._dp_node is None:
             return
@@ -257,12 +301,24 @@ class TiledWriter:
             if len(indices) == 0:
                 return
             start = int(indices[0])
-            end = int(indices[-1]) + 1
-            if end - start == len(indices) and np.all(np.diff(indices) == 1):
-                self._dp_node[start:end] = frames
-            else:
-                for i, idx in enumerate(indices):
-                    self._dp_node[int(idx) : int(idx) + 1] = frames[i : i + 1]
+            n = len(indices)
+            chunk_size = getattr(self, "_dp_chunk_size", 0) or n
+            if start % chunk_size != 0:
+                logger.warning(
+                    "write_diffraction_chunk: misaligned start=%d "
+                    "(chunk_size=%d); skipping",
+                    start, chunk_size,
+                )
+                return
+            if not np.all(np.diff(indices) == 1):
+                logger.warning(
+                    "write_diffraction_chunk: non-contiguous indices "
+                    "[%d..%d]; skipping",
+                    start, int(indices[-1]),
+                )
+                return
+            block_id = (start // chunk_size, 0, 0)
+            self._dp_node.write_block(np.ascontiguousarray(frames), block=block_id)
         except Exception:
             logger.exception("TiledWriter.write_diffraction_chunk failed")
 
