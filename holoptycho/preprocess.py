@@ -278,7 +278,6 @@ class PointProcessorOp(Operator):
         self.angle_correction_flag = True
         self.angle = 0
 
-        self.upsample = 10
         self.buffer = []
         self.raw_data = np.zeros((2,0),dtype = np.int32)
         self.frame_id_list = np.zeros((0,),dtype = np.int32)
