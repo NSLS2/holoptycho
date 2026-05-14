@@ -776,22 +776,34 @@ def parse_args():
 def _auto_batch_offsets(frames: np.ndarray, nx: int, ny: int) -> tuple[int, int]:
     """Auto-detect detector ROI offsets from the diffraction pattern center.
 
-    Thin wrapper around :func:`ptychoml.preprocess.auto_detect_roi_offsets`.
-    Passes a saturation threshold derived from the input dtype so the
-    saturation-masking behaviour matches the original (uint16-saturated
-    pixels are excluded from the intensity-weighted COM).
+    Averages up to 50 frames, masks dtype-saturated pixels (which would
+    otherwise drag the COM off course), then computes the intensity-weighted
+    center of mass and returns (bx0, by0) such that an nx × ny crop is
+    centered on it. Returns (0, 0) if the masked frame has zero total
+    intensity.
 
     Verified on scan 404611: target was (135, 70), detected (137, 68) — 2px
     rounding noise after sat masking.
-    """
-    from ptychoml.preprocess import auto_detect_roi_offsets
 
+    Inlined verbatim from ptychoml.preprocess.auto_detect_roi_offsets so the
+    replay env doesn't need the private ptychoml repo.
+    """
+    n_sample = 50
     saturation_threshold = np.iinfo(frames.dtype).max - 1
-    return auto_detect_roi_offsets(
-        frames, nx, ny,
-        n_sample=50,
-        saturation_threshold=saturation_threshold,
-    )
+    sample = frames[:min(n_sample, len(frames))].astype(np.float64)
+    mean_frame = sample.mean(axis=0)
+    sat_mask = (sample > saturation_threshold).any(axis=0)
+    masked = np.where(sat_mask, 0.0, mean_frame)
+    total = masked.sum()
+    if total <= 0:
+        return 0, 0
+    ys, xs = np.indices(masked.shape)
+    cy = float((ys * masked).sum() / total)
+    cx = float((xs * masked).sum() / total)
+    h, w = mean_frame.shape
+    bx0 = max(0, min(w - nx, round(cx - nx / 2)))
+    by0 = max(0, min(h - ny, round(cy - ny / 2)))
+    return int(bx0), int(by0)
 
 
 def main():

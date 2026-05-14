@@ -92,7 +92,6 @@ matplotlib = ">=3.10.9,<4"
 tiled = {version = ">=0.1", extras = ["client"]}
 dectris-compression = ">=0.3"
 bitshuffle = "*"
-ptychoml = { git = "ssh://git@github.com/NSLS2/ptychoml.git", branch = "main" }
 
 [environments]
 default = { features = ["gpu", "mpi"], solve-group = "default" }
