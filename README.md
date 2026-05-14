@@ -10,7 +10,13 @@ For batch/offline reconstruction of completed scans, use [`NSLS2/ptycho`](https:
 
 A Docker image is built and pushed to Azure Container Registry on every merge to main. See [`.github/workflows/build-container.yml`](.github/workflows/build-container.yml).
 
-One-time setup on the compute node:
+On slurm clusters, first allocate a GPU node:
+
+```bash
+salloc --gres=gpu:1 --mem=64G --cpus-per-gpu=2 --account=staff
+```
+
+One-time setup on the allocated node:
 - `az login`, with permissions to read `genesisdemoskv` and pull from `genesisdemosacr`.
 - For personal Tiled writes (the default), cache a token on the host:
   ```bash
@@ -20,13 +26,7 @@ One-time setup on the compute node:
   ```
   Skip these if you'll always run with `--api-key`.
 
-On slurm clusters, first allocate a GPU node:
-
-```bash
-salloc --gres=gpu:1 --mem=64G --cpus-per-gpu=2 --account=staff
-```
-
-Then start the container:
+Start the container:
 
 ```bash
 ./start.sh                  # foreground, personal Tiled auth (default)
