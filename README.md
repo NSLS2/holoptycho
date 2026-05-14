@@ -27,7 +27,7 @@ The image is built and pushed to ACR on every merge to main ([`.github/workflows
    pixi run -e client tiled login --profile nsls2
    ```
 
-4. Start the container:
+4. Start the container — pick one:
    ```bash
    ./start.sh              # personal Tiled auth, foreground
    ./start.sh -d           # detached
