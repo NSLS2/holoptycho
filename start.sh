@@ -57,20 +57,21 @@ HOST_PORT=8000
 CONTAINER_NAME="holoptycho"
 
 # --- Podman runtime setup --------------------------------------------------
-# sbatch and other non-systemd shells don't get XDG_RUNTIME_DIR from logind.
-# Point it at a private /tmp path so podman has somewhere to write its
-# runtime state.
+# On compute nodes `docker` is an alias for rootless podman. sbatch and
+# other non-systemd shells don't get XDG_RUNTIME_DIR from logind, so point
+# it at a private /tmp path so podman has somewhere to write its runtime
+# state. Harmless on real-docker hosts (the dir just sits unused).
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
 # --- ACR login -------------------------------------------------------------
-# az acr login normally hands a token to the Docker daemon, but this cluster
-# uses rootless podman (no daemon). --expose-token prints the token instead
-# so we can pass it directly to podman login. The 00000000-... username is
-# ACR's documented sentinel value for token-based auth.
+# az acr login normally hands a token to the Docker daemon, but the compute
+# nodes use rootless podman (no daemon) via a `docker` alias. --expose-token
+# prints the token instead so we can pass it directly to `docker login`. The
+# 00000000-... username is ACR's documented sentinel value for token-based auth.
 ACR_TOKEN="$(az acr login --name "$ACR_NAME" --expose-token --query accessToken -o tsv)"
-podman login "${ACR_NAME}.azurecr.io" \
+docker login "${ACR_NAME}.azurecr.io" \
   --username 00000000-0000-0000-0000-000000000000 \
   --password "$ACR_TOKEN"
 
@@ -87,7 +88,7 @@ if [[ $USE_API_KEY -eq 1 ]]; then
 fi
 
 # --- Run the container -----------------------------------------------------
-podman rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 run_args=(
   --rm
@@ -119,11 +120,11 @@ fi
 
 if [[ $DETACH -eq 0 ]]; then
   # Foreground: logs stream here, Ctrl-C stops the container.
-  exec podman run "${run_args[@]}" "$IMAGE"
+  exec docker run "${run_args[@]}" "$IMAGE"
 fi
 
 # Detached: hand the user the commands they'll need to inspect/stop it.
-podman run -d "${run_args[@]}" "$IMAGE" >/dev/null
+docker run -d "${run_args[@]}" "$IMAGE" >/dev/null
 echo "Started ${CONTAINER_NAME} on http://127.0.0.1:${HOST_PORT}"
-echo "Logs:  podman logs -f ${CONTAINER_NAME}"
-echo "Stop:  podman stop ${CONTAINER_NAME}"
+echo "Logs:  docker logs -f ${CONTAINER_NAME}"
+echo "Stop:  docker stop ${CONTAINER_NAME}"
