@@ -48,10 +48,10 @@ ssh -L 8000:localhost:8000 <user>@<host>
 
 ## Development container
 
-On hosts with a glibc too old to run the pixi env directly (e.g. older RHEL), use [`start_dev.sh`](start_dev.sh) to drop into a minimal CUDA+pixi container with the repo bind-mounted. Edit, commit, and push from the host as normal; only run code inside the container.
+On hosts with a glibc too old to run the pixi env directly (e.g. older RHEL), use [`start_editable.sh`](start_editable.sh) to drop into a minimal CUDA+pixi container with the repo bind-mounted. Edit, commit, and push from the host as normal; only run code inside the container.
 
 ```bash
-./start_dev.sh
+./start_editable.sh
 ```
 
 The first run builds a small `cuda-dev` image (nvidia/cuda runtime + pixi) — about a minute. Subsequent runs reuse it. Inside the shell:
