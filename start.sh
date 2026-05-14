@@ -97,6 +97,11 @@ run_args=(
   --gpus all
   --shm-size=32g
   -p "127.0.0.1:${HOST_PORT}:8000"
+  # host-gateway resolves to the host's gateway IP from inside the
+  # container; works under both Docker Desktop (WSL2) and rootless podman
+  # (slurm). Lets the container reach the replay script's ZMQ publishers
+  # without --network host.
+  --add-host=host.docker.internal:host-gateway
   -e AZURE_TENANT_ID
   -e AZURE_CLIENT_ID
   -e AZURE_SUBSCRIPTION_ID
@@ -104,8 +109,8 @@ run_args=(
   -e AZURE_RESOURCE_GROUP="$RESOURCE_GROUP"
   -e AZURE_ML_WORKSPACE="$ML_WORKSPACE"
   -e TILED_BASE_URL="$TILED_BASE_URL"
-  -e SERVER_STREAM_SOURCE="tcp://localhost:5555"
-  -e PANDA_STREAM_SOURCE="tcp://localhost:5556"
+  -e SERVER_STREAM_SOURCE="tcp://host.docker.internal:5555"
+  -e PANDA_STREAM_SOURCE="tcp://host.docker.internal:5556"
 )
 
 if [[ $USE_API_KEY -eq 1 ]]; then
