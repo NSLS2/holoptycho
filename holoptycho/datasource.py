@@ -5,21 +5,15 @@ from argparse import ArgumentParser
 import sys
 import numpy as np
 import numpy.typing as npt
-import cupy as cp
 import json
 import cbor2
-import pprint
-import traceback
-import h5py
 import time
 import os
 
 import copy
 from dectris.compression import decompress
 
-from holoscan.core import Application, Operator, OperatorSpec, Tracker, ConditionType, IOSpec
-from holoscan.decorator import create_op
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
+from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 
 
 
@@ -208,7 +202,7 @@ class EigerZmqRxOp(Operator):
                     msg = self.socket.recv()
                     try: # skip messages that are not json
                         msg = json.loads(msg.decode())
-                    except:
+                    except Exception:
                         continue
                     if "frame" in msg:
                         break

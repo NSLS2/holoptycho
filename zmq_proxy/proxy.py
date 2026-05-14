@@ -14,7 +14,7 @@ def zmq_proxy():
     sock_snd2.setsockopt(zmq.SNDTIMEO, 1000)
 
     time.sleep(1)
-    print(f"0MQ Proxy is started successfully.")
+    print("0MQ Proxy is started successfully.")
 
     nmsg = 0
     while(True):
@@ -23,11 +23,11 @@ def zmq_proxy():
         #print(f"Processed message #{nmsg}")
         try:
             sock_snd1.send(msg, zmq.NOBLOCK)
-        except Exception as ex:
+        except Exception:
             pass
         try:
             sock_snd2.send(msg, zmq.NOBLOCK)
-        except Exception as ex:
+        except Exception:
             pass
 
 if __name__ == "__main__":

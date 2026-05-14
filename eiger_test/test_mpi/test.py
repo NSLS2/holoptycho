@@ -1,7 +1,9 @@
-from mpi4py import MPI
-comm = MPI.COMM_WORLD.Dup()
-import numpy as np
 import time
+
+import numpy as np
+from mpi4py import MPI
+
+comm = MPI.COMM_WORLD.Dup()
 
 ar = np.array([0],dtype=np.float32)
 

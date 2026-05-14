@@ -1,5 +1,3 @@
-import logging
-from time import sleep
 
 import numpy as np
 import cupy as cp
@@ -15,15 +13,13 @@ from nsls2ptycho2.core.ptycho.recon_ptycho_gui import recon_thread
 # from nsls2ptycho.core.ptycho.utils import parse_config
 # from nsls2ptycho.core.ptycho_param import Param
 
-from holoscan.core import Application, Operator, OperatorSpec
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
-from holoscan.logger import LogLevel, set_log_level
+from holoscan.core import Operator
+from holoscan.schedulers import MultiThreadScheduler
 from holoscan.decorator import create_op
 
 from pipeline_source import parse_args
 from pipeline_preprocess import PreprocAppBase
 
-import nvtx
 
 # class ReconOp(Operator):
 #     def __init__(self, *args, param=None, **kwargs):
@@ -171,8 +167,8 @@ class PtychoRecon(Operator):
         #cp.cuda.runtime.memcpy(self.recon.diff_d[0:self.recon.num_points_recon].data.ptr,diff_d.ctypes.data,diff_d.nbytes,cp.cuda.runtime.memcpyHostToDevice)
 
         diff_d = np.load('./ptycho_holo/diff_d.npy')
-        point_info_d = np.load('./ptycho_holo/point_info_d.npy')
         cp.cuda.runtime.memcpy(self.recon.diff_d.data.ptr,diff_d.ctypes.data,diff_d.nbytes,cp.cuda.runtime.memcpyHostToDevice)
+        # point_info_d = np.load('./ptycho_holo/point_info_d.npy')
         # cp.cuda.runtime.memcpy(self.recon.point_info_d.data.ptr,point_info_d.ctypes.data,point_info_d.nbytes,cp.cuda.runtime.memcpyHostToDevice)
 
         self.recon.live_update_plan_last()

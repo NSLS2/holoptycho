@@ -1,6 +1,3 @@
-import numpy as np
-import cupy as cp
-import matplotlib.pyplot as plt
 
 import sys
 sys.path.append('/ptycho_gui/')

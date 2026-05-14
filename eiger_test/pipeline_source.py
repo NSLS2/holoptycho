@@ -5,20 +5,17 @@ from argparse import ArgumentParser
 
 import numpy as np
 import numpy.typing as npt
-import cupy as cp
 
 from ptychoml.preprocess import crop_to_roi
 import json
 import cbor2
-import pprint
-import traceback
 import h5py
 
 from dectris.compression import decompress
 
-from holoscan.core import Application, Operator, OperatorSpec, Tracker
+from holoscan.core import Application, Operator, OperatorSpec
 from holoscan.decorator import create_op
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
+from holoscan.schedulers import MultiThreadScheduler
 
 supported_encodings = {"bs32-lz4<": "bslz4", "lz4<": "lz4", "bs16-lz4<": "bslz4"}
 supported_types = {"uint32": "uint32", "uint16": "uint16"}
@@ -126,7 +123,7 @@ class EigerZmqRxOp(Operator):
                     msg = self.socket.recv()
                     try: # skip messages that are not json
                         msg = json.loads(msg.decode())
-                    except:
+                    except Exception:
                         continue
                     if "frame" in msg:
                         break
@@ -233,7 +230,7 @@ class PositionRxOp(Operator):
         
     def compute(self, op_input, op_output, context):
         if self.simulate_position_data_stream:
-            data = np.asarray(op_input.receive("point_input"))
+            _ = op_input.receive("point_input")
             index = op_input.receive("index_input")
         else:
             try:

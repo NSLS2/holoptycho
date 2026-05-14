@@ -1,30 +1,17 @@
+import time
+
 import numpy as np
+from holoscan.core import Application, Operator, IOSpec
+from holoscan.decorator import create_op
+from holoscan.schedulers import MultiThreadScheduler
 from mpi4py import MPI
+
 comm = MPI.COMM_WORLD
 print(comm.Get_rank())
-comms = [0,0,0]
+comms = [0, 0, 0]
 comms[0] = comm
 comms[1] = comm.Dup()
 comms[2] = comm.Dup()
-
-import logging
-import socket
-import zmq
-from argparse import ArgumentParser
-
-import numpy as np
-import numpy.typing as npt
-import cupy as cp
-import json
-import cbor2
-import pprint
-import traceback
-import h5py
-import time
-
-from holoscan.core import Application, Operator, OperatorSpec, Tracker, IOSpec
-from holoscan.decorator import create_op
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
 
 class source1(Operator):
     def __init__(self,*args,**kwargs):

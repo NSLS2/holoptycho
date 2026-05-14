@@ -243,7 +243,7 @@ def get_logs(lines: int = 100):
         return {"lines": []}
     with log_path.open() as f:
         all_lines = f.readlines()
-    return {"lines": [l.rstrip("\n") for l in all_lines[-lines:]]}
+    return {"lines": [line.rstrip("\n") for line in all_lines[-lines:]]}
 
 
 @app.post("/logs/clear", status_code=200)

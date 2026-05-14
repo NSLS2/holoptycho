@@ -6,7 +6,6 @@ Uses Typer's CliRunner and mocks httpx so no real API server is needed.
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
 from typer.testing import CliRunner
 
 from holoptycho.cli.main import app

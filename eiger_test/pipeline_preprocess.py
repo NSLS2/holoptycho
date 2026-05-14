@@ -4,8 +4,7 @@ import numpy as np
 import cupy as cp
 
 from holoscan.core import Operator, OperatorSpec
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
-from holoscan.logger import LogLevel, set_log_level
+from holoscan.schedulers import MultiThreadScheduler
 from holoscan.decorator import create_op, Input
 
 from pipeline_source import EigerRxBase, parse_args

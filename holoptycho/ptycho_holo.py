@@ -1,13 +1,45 @@
-import logging
 import ast
+import logging
+import os
+import sys
 import threading
+import time
 import uuid
 from time import sleep
-import time
+from types import SimpleNamespace
 
-import sys
-import os
+import cupy as cp
+import numpy as np
+from numba import cuda
 
+try:
+    from hxntools.motor_info import motor_table
+except ModuleNotFoundError:
+    motor_table = None  # OK for simulate mode; live mode requires hxntools
+
+# Ptycho is imported purely as a library. The streaming-reconstruction
+# state machine lives locally in ``streaming_recon.StreamingPtychoRecon``
+# and uses ptycho only for stateless kernel libraries (cupy_util,
+# prop_class_asm, cupy_collection, numba_collection). See streaming_recon.py
+# for the architectural note.
+from ptycho.utils import parse_config as _ptycho_parse_config
+from .streaming_recon import StreamingPtychoRecon
+
+from holoscan.core import Application, Operator, OperatorSpec, ConditionType, IOSpec
+from holoscan.decorator import create_op
+from holoscan.schedulers import MultiThreadScheduler
+
+from .datasource import EigerZmqRxOp, PositionRxOp, EigerDecompressOp
+from .liverecon_utils import parse_scan_header
+from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
+from .tiled_writer import get_writer
+from .vit_inference import (
+    BatchWriterOp,
+    MosaicWriterOp,
+    PositionsWriterOp,
+    PtychoViTInferenceOp,
+    SaveViTResult,
+)
 
 # Set by runner.stop() to ask the running pipeline to flush, save final
 # results, and stop iterating. PtychoRecon.compute() checks this on each tick
@@ -29,27 +61,6 @@ _work_complete = threading.Event()
 # frames. Without this, ZMQ PUB silently drops frames sent before the SUB is
 # bound (~6 s after /run on a cold start).
 _pipeline_ready = threading.Event()
-
-import numpy as np
-import cupy as cp
-from numba import cuda
-
-try:
-    from hxntools.motor_info import motor_table
-except ModuleNotFoundError:
-    motor_table = None  # OK for simulate mode; live mode requires hxntools
-
-
-# Ptycho is imported purely as a library. The streaming-reconstruction
-# state machine lives locally in ``streaming_recon.StreamingPtychoRecon``
-# and uses ptycho only for stateless kernel libraries (cupy_util,
-# prop_class_asm, cupy_collection, numba_collection). See streaming_recon.py
-# for the architectural note.
-from types import SimpleNamespace
-
-from ptycho.utils import parse_config as _ptycho_parse_config
-
-from .streaming_recon import StreamingPtychoRecon
 
 
 def _coerce_config_value(value):
@@ -82,23 +93,6 @@ def parse_config(config_path, config_overrides=None):
     param = SimpleNamespace(gui=False)
     param = _ptycho_parse_config(config_path, param)
     return _apply_config_overrides(param, config_overrides)
-
-from holoscan.core import Application, Operator, OperatorSpec, ConditionType, IOSpec
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
-from holoscan.logger import LogLevel, set_log_level
-from holoscan.decorator import create_op
-
-from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressOp
-from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
-from .liverecon_utils import parse_scan_header
-from .vit_inference import (
-    PtychoViTInferenceOp,
-    SaveViTResult,
-    MosaicWriterOp,
-    PositionsWriterOp,
-    BatchWriterOp,
-)
-from .tiled_writer import get_writer
 
 class InitRecon(Operator):
     def __init__(self, *args, param, batchsize,min_points,scan_header_file, **kwargs):

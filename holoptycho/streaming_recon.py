@@ -225,8 +225,6 @@ class StreamingPtychoRecon:
         )
         from ptycho.cupy_collection import (
             cupy_mod,
-            dm_update_amp1_v2,
-            dm_update_amp2_v2,
             get_mod2,
             dm_update_mode_amp1_v2,
             dm_update_mode_amp2_v2,
@@ -622,7 +620,6 @@ class StreamingPtychoRecon:
           - ``init_product_gpu`` lines 2105-2112.
           - ``recon_dm_trans_cupy_single`` lines 2716-2779.
         """
-        import cupy as cp
 
         from ptycho.cupy_util import get_3d_block_grid_config
 

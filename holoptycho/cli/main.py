@@ -7,7 +7,6 @@ Override with --url or the HOLOPTYCHO_URL environment variable.
 """
 
 import json
-import sys
 import time
 from typing import Optional
 

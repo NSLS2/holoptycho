@@ -25,6 +25,6 @@ def parse_scan_header(filename):
 
         return p
         
-    except Exception as err:
+    except Exception:
         # print(err)
         return None

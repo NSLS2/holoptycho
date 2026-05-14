@@ -1,5 +1,4 @@
 import logging
-from time import sleep
 
 import numpy as np
 import cupy as cp
@@ -9,9 +8,8 @@ from nsls2ptycho.core.ptycho.recon_ptycho_gui import create_recon_object, deal_w
 from nsls2ptycho.core.ptycho.utils import parse_config
 from nsls2ptycho.core.ptycho_param import Param
 
-from holoscan.core import Application, Operator, OperatorSpec
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
-from holoscan.logger import LogLevel, set_log_level
+from holoscan.core import Operator, OperatorSpec
+from holoscan.schedulers import MultiThreadScheduler
 from holoscan.decorator import create_op
 
 from pipeline_source import parse_args

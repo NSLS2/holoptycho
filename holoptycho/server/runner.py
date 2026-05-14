@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Runs the Holoscan application (PtychoApp) in a subprocess and keeps
 AppState in sync with its lifecycle.
 
@@ -23,6 +21,8 @@ Stop semantics (three-stage):
 2. SIGTERM — fallback if soft signal didn't drain within the grace window.
 3. SIGKILL — last resort if the subprocess is wedged in C++ code.
 """
+
+from __future__ import annotations
 
 import json
 import logging

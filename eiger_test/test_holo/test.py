@@ -1,21 +1,10 @@
-import logging
-import socket
-import zmq
-from argparse import ArgumentParser
 
 import numpy as np
-import numpy.typing as npt
-import cupy as cp
-import json
-import cbor2
-import pprint
-import traceback
-import h5py
 import time
 
-from holoscan.core import Application, Operator, OperatorSpec, Tracker
+from holoscan.core import Application
 from holoscan.decorator import create_op
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
+from holoscan.schedulers import MultiThreadScheduler
 
 @create_op(outputs=("in1","in2"))
 def source():

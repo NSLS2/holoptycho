@@ -4,9 +4,6 @@ No GPU or Holoscan SDK required — the runner.start() call is mocked so the
 Holoscan app never actually launches.
 """
 
-import json
-import os
-import threading
 from unittest.mock import MagicMock, patch
 
 import pytest

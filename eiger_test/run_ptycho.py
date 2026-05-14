@@ -1,10 +1,10 @@
-gpus = [0]
-scannum = 257331
-
-from nsls2ptycho.core.ptycho.utils import parse_config,save_config
+from nsls2ptycho.core.ptycho.utils import parse_config, save_config
 from nsls2ptycho.core.ptycho_param import Param
 # import numpy as np
 import os
+
+gpus = [0]
+scannum = 257331
 
 if __name__=='__main__':
     # basedir = os.path.dirname(os.path.realpath(__file__))+'/'

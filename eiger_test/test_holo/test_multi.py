@@ -1,9 +1,8 @@
 import numpy as np
 import time
 
-from holoscan.core import Application, Operator, OperatorSpec, Tracker, IOSpec
-from holoscan.decorator import create_op
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
+from holoscan.core import Application, Operator, IOSpec
+from holoscan.schedulers import MultiThreadScheduler
 
 class source1(Operator):
     def __init__(self,*args,**kwargs):

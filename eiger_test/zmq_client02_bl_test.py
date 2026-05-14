@@ -3,7 +3,6 @@
 
 import time
 import zmq
-import random
 import json
 import pprint
 import numpy as np
@@ -27,13 +26,13 @@ def consumer():
 
     data_encoding, data_shape, data_type, next_is_frame = None, None, None, False
     n_frame = 0
-    print(f"Waiting for data ...")
+    print("Waiting for data ...")
 
     while True:
         try:
             msg = None
             msg = consumer_receiver.recv(flags=zmq.NOBLOCK)
-        except:
+        except zmq.Again:
             #print("No data, wait 0.1s")
             time.sleep(0.1)
         #n_messages += 1
@@ -63,9 +62,9 @@ def consumer():
                         #if not data_encoding_str:
                         #    raise RuntimeError(f"Encoding {data_encoding!r} is not supported")
                         
-                        supported_types = {"uint32": "uint32",  "uint16": "uint16"}
+                        # supported_types = {"uint32": "uint32", "uint16": "uint16"}
                         data_type_str = data_type
-                        #data_type_str = supported_types.get(data_type, None)
+                        # data_type_str = supported_types.get(data_type, None)
                         if not data_type_str:
                             raise RuntimeError(f"Encoding {data_type!r} is not supported")
 
@@ -93,7 +92,7 @@ def consumer():
                             print("total frame recv",n_frame)
                         result = f"Data frame is received. Image shape: {data.shape}"
 
-                    except Exception as ex:
+                    except Exception:
                         result = f"Failed to decode the received data frame. The frame size is {len(buffer)} bytes"
                         print(traceback.format_exc())
 

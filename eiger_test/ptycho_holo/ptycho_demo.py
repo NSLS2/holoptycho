@@ -1,10 +1,9 @@
 import numpy as np
 import cupy as cp
-import matplotlib.pyplot as plt
 
-from holoscan.core import Application, Operator, OperatorSpec, Tracker, IOSpec
+from holoscan.core import Application, Operator
 from holoscan.decorator import create_op
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
+from holoscan.schedulers import MultiThreadScheduler
 
 import sys
 sys.path.append('/ptycho_gui/')

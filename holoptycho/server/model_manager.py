@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Model management: local engine cache + optional Azure ML registry.
 
 Local cache
@@ -23,6 +21,8 @@ Returns a combined list of:
 - Local .engine files found in ENGINE_CACHE_DIR
 - Models registered in Azure ML (if Azure env vars are configured)
 """
+
+from __future__ import annotations
 
 import logging
 import os

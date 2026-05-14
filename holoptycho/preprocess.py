@@ -1,5 +1,4 @@
 import logging
-import sys
 import time
 
 import numpy as np
@@ -12,9 +11,6 @@ from ptychoml.preprocess import (
 )
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
-from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
-from holoscan.logger import LogLevel, set_log_level
-from holoscan.decorator import create_op, Input
 
 class ImageBatchOp(Operator):
     def __init__(self, *args, **kwargs):

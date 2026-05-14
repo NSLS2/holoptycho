@@ -14,7 +14,6 @@ Usage:
 
 import argparse
 import os
-import time
 from glob import glob
 
 import h5py
