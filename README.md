@@ -19,7 +19,6 @@ One-time setup on the compute node:
   pixi run -e client tiled login --profile nsls2
   ```
   Skip these if you'll always run with `--api-key`.
-- On slurm / non-systemd hosts, configure `~/.config/containers/storage.conf` for a shared graphroot (template at the top of [`scripts/slurm_start_holoptycho.sh`](scripts/slurm_start_holoptycho.sh)).
 
 On slurm clusters, first allocate a GPU node:
 
