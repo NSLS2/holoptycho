@@ -714,7 +714,10 @@ def parse_args():
         "--rate",
         type=float,
         default=200.0,
-        help="Target frame/message rate in Hz (default: 200)",
+        help="Informational target frame/message rate in Hz. Logged in the "
+             "startup banner but not enforced — the publisher dumps each "
+             "fetched chunk into ZMQ as fast as the SNDHWM and the receiver "
+             "drain allow.",
     )
     parser.add_argument(
         "--eiger-server-public-key",

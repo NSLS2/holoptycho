@@ -561,13 +561,13 @@ pixi run -e replay replay \
     --scan-id 404611 \
     --hp-start \
     --nx 256 --ny 256 \
-    --rate 1000 --chunk-size 1024 --skip-frames 64 \
+    --chunk-size 1024 --skip-frames 64 \
     --recon-mode vit
 ```
 
 Tune for your scan:
 * `--nx` / `--ny`: must match the detector ROI (256 for HXN scans, 128 for many older scans). See "Best practices for replay" below — these *must* be passed together.
-* `--rate`: publish frequency in Hz. 1000 matches the production HXN rate; lower values smoke out throughput regressions; higher values (e.g. 4000) stress-test the pipeline ceiling and surface frame drops.
+* `--rate`: informational only — the publisher dumps each chunk as fast as ZMQ drains and ignores this value. Set it for the startup banner if you want; it doesn't gate timing.
 * `--skip-frames`: drops the first N Eiger frames + matching encoder samples. Required for scans with settling/ramp-up rows.
 * `--recon-mode`: `vit` is the fastest path when iterating on `mosaic_stitch.py` / `SaveViTResult`; `iterative` exercises only DM/ML; `both` runs both branches in parallel.
 
@@ -576,7 +576,7 @@ Tune for your scan:
 Use this only when holoptycho is already running with a config that exactly matches the scan being replayed (same `nx`/`ny`/geometry). Most of the time you want `--hp-start`.
 
 ```bash
-pixi run -e replay replay --scan-id 404611 --rate 1000
+pixi run -e replay replay --scan-id 404611
 ```
 
 By default the replay script publishes plain ZMQ. To test CurveZMQ, also
@@ -725,7 +725,7 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   `holoptycho/datasource.py::decode_json_message` recognises this and
   reshapes the bytes directly, skipping decompression. Localhost ZMQ
   handles the ~10× larger wire size easily, so replay runs at the
-  requested `--rate`. Live mode is unaffected — the real Eiger detector
+  ZMQ-bound rate. Live mode is unaffected — the real Eiger detector
   never sets `encoding=raw`. Enable `--compress` only when explicitly
   verifying the decompression code path.
 

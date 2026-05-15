@@ -325,13 +325,13 @@ pixi run -e replay replay \
     --scan-id 404611 \
     --hp-start \
     --nx 256 --ny 256 \
-    --rate 1000 --chunk-size 1024 --skip-frames 64 \
+    --chunk-size 1024 --skip-frames 64 \
     --recon-mode vit
 
 # Variant: skip --hp-start when holoptycho is already running with a config
 # that exactly matches the scan being replayed. Most of the time, prefer the
 # command above.
-pixi run -e replay replay --scan-id 404611 --rate 1000
+pixi run -e replay replay --scan-id 404611
 # (then in another terminal, if needed)
 hp start '{"scan_num": "404611", ...}'
 ```
