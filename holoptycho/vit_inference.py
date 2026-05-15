@@ -259,6 +259,7 @@ class SaveViTResult(Operator):
         phase_channel_index: int = 1,
         overshoot_factor: float = 1.2,
         enable_batch_writes: bool = False,
+        transpose_patches: bool = True,
         **kwargs,
     ):
         # Holoscan's Operator.__init__ calls setup(spec), so any attribute
@@ -268,6 +269,12 @@ class SaveViTResult(Operator):
         super().__init__(fragment, *args, **kwargs)
         self.batch_num = 0
         self.max_index_seen = -1
+        # Transpose each predicted patch before stitching. Required for HXN
+        # data: the object-domain array axes are swapped relative to the
+        # probe/dp frame, so patches stitched without this transpose come
+        # out rotated 90° relative to the scan grid (matches Fix #9 in the
+        # offline run_inference.py).
+        self._transpose_patches = transpose_patches
         # Optional callable returning the latest (n, 2) per-frame positions
         # array (microns) — typically lambda: point_proc.positions_um. When
         # supplied, the snapshot is published alongside each ViT batch so
@@ -287,6 +294,10 @@ class SaveViTResult(Operator):
         # size (``pred.shape[-1]``). Reset on each new scan.
         self._mosaic: np.ndarray | None = None
         self._counts: np.ndarray | None = None
+        # Parallel amplitude mosaic — stitched in lockstep with phase so the
+        # dashboard can render either channel.
+        self._mosaic_amp: np.ndarray | None = None
+        self._counts_amp: np.ndarray | None = None
         self._canvas_origin_um: tuple[float, float] | None = None
         # Cropped half-patch dims (set when canvas is allocated). Used by
         # the grow path to compute the buffer that must surround the
@@ -314,6 +325,8 @@ class SaveViTResult(Operator):
     def _reset_mosaic(self) -> None:
         self._mosaic = None
         self._counts = None
+        self._mosaic_amp = None
+        self._counts_amp = None
         self._canvas_origin_um = None
         self._half_h = 0
         self._half_w = 0
@@ -383,6 +396,8 @@ class SaveViTResult(Operator):
 
         self._mosaic = np.zeros((canvas_h, canvas_w), dtype=np.float32)
         self._counts = np.zeros_like(self._mosaic)
+        self._mosaic_amp = np.zeros_like(self._mosaic)
+        self._counts_amp = np.zeros_like(self._mosaic)
         self._canvas_origin_um = (origin_y_um, origin_x_um)
         self._half_h = half_h
         self._half_w = half_w
@@ -413,10 +428,17 @@ class SaveViTResult(Operator):
         if not self._ensure_canvas(pred.shape[-1], pred.shape[-1], positions_um):
             return
 
-        phase = pred[:, self._phase_channel_index].astype(np.float32, copy=False)
-        if self._inner_crop > 0:
-            c = self._inner_crop
-            phase = phase[:, c:-c, c:-c]
+        def _extract_channel(ch_idx: int) -> np.ndarray:
+            patches = pred[:, ch_idx].astype(np.float32, copy=False)
+            if self._transpose_patches:
+                patches = patches.transpose(0, 2, 1)
+            if self._inner_crop > 0:
+                c = self._inner_crop
+                patches = patches[:, c:-c, c:-c]
+            return patches
+
+        phase = _extract_channel(self._phase_channel_index)
+        amp = _extract_channel(1 - self._phase_channel_index)
 
         # Map per-frame um → canvas px. positions_um columns: 0=x, 1=y.
         sub = positions_um[indices]
@@ -456,49 +478,99 @@ class SaveViTResult(Operator):
         positions_px[:, 0] = py[in_bounds]
         positions_px[:, 1] = px[in_bounds]
         finite_idx = np.where(finite)[0][in_bounds]
-        batch = phase[finite_idx]
+        phase_batch = phase[finite_idx]
+        amp_batch = amp[finite_idx]
 
         try:
             self._mosaic, self._counts = stitch_batch_into(
                 self._mosaic,
                 self._counts,
-                batch,
+                phase_batch,
                 positions_px,
                 pad=self._fourier_pad,
             )
         except Exception:
-            self._logger.exception("stitch_batch_into failed (skipping batch)")
+            self._logger.exception("stitch_batch_into (phase) failed (skipping batch)")
             return
 
-        # Compute the bounding box of the patches just placed (in canvas
-        # pixel coords). MosaicWriterOp uses this to patch only the affected
+        try:
+            self._mosaic_amp, self._counts_amp = stitch_batch_into(
+                self._mosaic_amp,
+                self._counts_amp,
+                amp_batch,
+                positions_px,
+                pad=self._fourier_pad,
+            )
+        except Exception:
+            self._logger.exception("stitch_batch_into (amp) failed")
+            self._mosaic_amp = None
+            self._counts_amp = None
+
+        # Bounding box of the patches just placed, in **uncropped** canvas
+        # pixel coords. MosaicWriterOp uses this to patch only the affected
         # subregion to Tiled, instead of pushing the full 36 MB canvas every
         # batch. Margin = half the cropped patch size + Fourier pad slop.
         canvas_h, canvas_w = self._mosaic.shape
-        ph, pw = batch.shape[-2:]
+        ph, pw = phase_batch.shape[-2:]
         margin_y = ph // 2 + self._fourier_pad + 1
         margin_x = pw // 2 + self._fourier_pad + 1
         py_min = int(np.floor(positions_px[:, 0].min())) - margin_y
         py_max = int(np.ceil(positions_px[:, 0].max())) + margin_y
         px_min = int(np.floor(positions_px[:, 1].min())) - margin_x
         px_max = int(np.ceil(positions_px[:, 1].max())) + margin_x
-        bbox = (
-            max(0, py_min),
-            min(canvas_h, py_max),
-            max(0, px_min),
-            min(canvas_w, px_max),
-        )
+
+        # Crop the canvas_pad border before handing off — the padding pixels
+        # are needed internally for FFT wrap-around safety but should not be
+        # shipped to Tiled (they'd show as a uniform median-fill border
+        # around the scan). Translate origin_um and bbox into cropped coords
+        # so pixel↔position mapping stays correct on the dashboard side.
+        cp = self._canvas_pad
+        if cp > 0:
+            cropped_h = canvas_h - 2 * cp
+            cropped_w = canvas_w - 2 * cp
+            mosaic_snap = self._mosaic[cp:cp + cropped_h, cp:cp + cropped_w].copy()
+            counts_snap = self._counts[cp:cp + cropped_h, cp:cp + cropped_w].copy()
+            mosaic_amp_snap = (
+                self._mosaic_amp[cp:cp + cropped_h, cp:cp + cropped_w].copy()
+                if self._mosaic_amp is not None else None
+            )
+            counts_amp_snap = (
+                self._counts_amp[cp:cp + cropped_h, cp:cp + cropped_w].copy()
+                if self._counts_amp is not None else None
+            )
+            oy_um, ox_um = self._canvas_origin_um
+            origin_snap = (oy_um + cp * ps * 1e6, ox_um + cp * ps * 1e6)
+            bbox = (
+                max(0, py_min - cp),
+                min(cropped_h, py_max - cp),
+                max(0, px_min - cp),
+                min(cropped_w, px_max - cp),
+            )
+        else:
+            mosaic_snap = self._mosaic.copy()
+            counts_snap = self._counts.copy()
+            mosaic_amp_snap = self._mosaic_amp.copy() if self._mosaic_amp is not None else None
+            counts_amp_snap = self._counts_amp.copy() if self._counts_amp is not None else None
+            origin_snap = self._canvas_origin_um
+            bbox = (
+                max(0, py_min),
+                min(canvas_h, py_max),
+                max(0, px_min),
+                min(canvas_w, px_max),
+            )
 
         # Hand off to MosaicWriterOp via a copy. The downstream operator runs
         # on its own scheduler thread and does the (heavier) normalize +
         # tiled write so this compute thread can return to the next ViT
-        # batch immediately. Copying ~3.5 MB total takes well under 1 ms.
+        # batch immediately. Copying ~7 MB total takes well under 2 ms.
         return (
-            self._mosaic.copy(),
-            self._counts.copy(),
+            mosaic_snap,
+            counts_snap,
+            mosaic_amp_snap,
+            counts_amp_snap,
             self.batch_num,
             self._pixel_size_m,
-            self._canvas_origin_um,
+            origin_snap,
             bbox,
         )
 
@@ -662,8 +734,8 @@ class MosaicWriterOp(Operator):
         if snap is None:
             return
         try:
-            (mosaic, counts, batch_num, pixel_size_m, canvas_origin_um,
-             bbox, total_batches, chunk_size) = snap
+            (mosaic, counts, mosaic_amp, counts_amp, batch_num, pixel_size_m,
+             canvas_origin_um, bbox, total_batches, chunk_size) = snap
             t0 = time.perf_counter()
 
             # Reset on new-scan detection: SaveViTResult resets batch_num to 0
@@ -676,17 +748,25 @@ class MosaicWriterOp(Operator):
             # Threshold counts at 0.5 (not 0) to suppress FFT-leakage tails
             # from the Fourier-shift placement, which deposit tiny non-zero
             # counts well outside the patch footprints.
-            valid = counts >= 0.5
+            def _normalise_full(m: np.ndarray, c: np.ndarray) -> np.ndarray:
+                valid = c >= 0.5
+                if valid.any():
+                    avg = m / np.where(valid, c, 1.0)
+                    fill = float(np.median(avg[valid]))
+                    return np.where(valid, avg, fill).astype(np.float32)
+                return np.zeros_like(m, dtype=np.float32)
+
+            def _normalise_sub(m: np.ndarray, c: np.ndarray) -> np.ndarray:
+                # Write avg_sub directly; unfilled pixels inside the bbox get
+                # the local average (close to the seeded fill), and the visual
+                # seam is negligible since the bbox tightly hugs new patches.
+                valid_sub = c >= 0.5
+                return (m / np.where(valid_sub, c, 1.0)).astype(np.float32)
 
             if not self._first_write_done:
                 # Full-canvas write seeds the buffer with the fill colour
                 # everywhere so unfilled regions don't render as black.
-                if valid.any():
-                    avg = mosaic / np.where(valid, counts, 1.0)
-                    fill = float(np.median(avg[valid]))
-                    normalised = np.where(valid, avg, fill).astype(np.float32)
-                else:
-                    normalised = np.zeros_like(mosaic, dtype=np.float32)
+                normalised = _normalise_full(mosaic, counts)
                 t_norm = time.perf_counter()
                 _writer.write_vit_mosaic(
                     normalised,
@@ -694,6 +774,13 @@ class MosaicWriterOp(Operator):
                     pixel_size_m=pixel_size_m,
                     canvas_origin_um=canvas_origin_um,
                 )
+                if mosaic_amp is not None and counts_amp is not None:
+                    _writer.write_vit_amp_mosaic(
+                        _normalise_full(mosaic_amp, counts_amp),
+                        batch_num=batch_num,
+                        pixel_size_m=pixel_size_m,
+                        canvas_origin_um=canvas_origin_um,
+                    )
                 t_done = time.perf_counter()
                 self._first_write_done = True
                 self._logger.info(
@@ -705,32 +792,23 @@ class MosaicWriterOp(Operator):
                 return
 
             # Incremental path: normalise + patch only the bbox of patches
-            # placed in this batch.
+            # placed in this batch (phase + amp in parallel).
             y0, y1, x0, x1 = bbox
             if y1 <= y0 or x1 <= x0:
                 return  # empty bbox; nothing to write
-            mosaic_sub = mosaic[y0:y1, x0:x1]
-            counts_sub = counts[y0:y1, x0:x1]
-            valid_sub = counts_sub >= 0.5
-            avg_sub = mosaic_sub / np.where(valid_sub, counts_sub, 1.0)
-            # Where the bbox covers never-stitched canvas pixels, keep the
-            # existing on-server fill rather than overwriting with whatever
-            # the local snapshot happened to compute. Achieved by reading
-            # back, but skipped for speed — the in-batch fill is the median
-            # of valid pixels in this snapshot, close enough to the seeded
-            # fill, and bbox edges that land on unfilled pixels stay at the
-            # seeded value because we only patch where valid_sub is True...
-            # Actually simpler: write avg_sub directly, and let unfilled
-            # pixels in the bbox be replaced by the local average — the
-            # visual seam at the bbox boundary is negligible since the bbox
-            # tightly hugs the just-placed patches.
-            normalised_sub = avg_sub.astype(np.float32)
+            normalised_sub = _normalise_sub(mosaic[y0:y1, x0:x1], counts[y0:y1, x0:x1])
             t_norm = time.perf_counter()
             _writer.patch_vit_mosaic(
                 normalised_sub,
                 offset_yx=(y0, x0),
                 batch_num=batch_num,
             )
+            if mosaic_amp is not None and counts_amp is not None:
+                _writer.patch_vit_amp_mosaic(
+                    _normalise_sub(mosaic_amp[y0:y1, x0:x1], counts_amp[y0:y1, x0:x1]),
+                    offset_yx=(y0, x0),
+                    batch_num=batch_num,
+                )
             t_done = time.perf_counter()
             self._logger.info(
                 "MosaicWriterOp: chunk %d/%d (%d frames) bbox=%dx%d "

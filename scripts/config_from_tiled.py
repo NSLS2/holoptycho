@@ -194,10 +194,23 @@ def _has_streams(run) -> bool:
 
 
 def get_stream(run, stream_name: str):
-    """Return the array-level node for a stream, handling all known layouts."""
-    keys = list(run)
-    node = run["streams"][stream_name] if "streams" in keys else run[stream_name]
-    return node["data"] if "data" in list(node) else node
+    """Return the array-level node for a stream, handling all known layouts.
+
+    Probes the layouts via direct key access (catching ``KeyError``) instead
+    of ``list(run)``: the migration catalog's tiled server validates the
+    ``sort=`` query parameter that ``list()`` sends and 422s on the empty
+    string. Direct ``run[key]`` access skips that endpoint.
+    """
+    # Newer migration layout: <run>/streams/<name>
+    try:
+        node = run["streams"][stream_name]
+    except KeyError:
+        node = run[stream_name]
+    # Newer raw layout: <stream>/data
+    try:
+        return node["data"]
+    except KeyError:
+        return node
 
 
 def lookup_uid_by_scan_id(tiled_url: str, scan_id) -> str:
@@ -251,32 +264,46 @@ def lookup_uid_by_scan_id(tiled_url: str, scan_id) -> str:
 
 
 def lookup_run(client, run_uid: str, tiled_url: str):
-    candidates = [client]
+    """Resolve a run UID to a tiled node, respecting the user's catalog choice.
 
-    # Also try descending from the tiled root, so a user passing
-    # --tiled-url .../hxn/migration can still find runs that only live in raw.
-    parsed = urlsplit(tiled_url)
-    root_url = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    The user-provided ``client`` (matching ``--tiled-url``) is tried first.
+    If the run is present there, it wins **even if its streams look like a
+    stub** — the user explicitly chose this catalog, and falling through to
+    another catalog can route data reads to entries that 500 on fetch (e.g.
+    raw's redirect-stub copies of migrated scans return their metadata fine
+    but error on ``primary/data/eiger1``).
+
+    Only when the run is absent from the user's catalog do we walk sibling
+    catalogs under the same tiled root (``hxn/migration`` then ``hxn/raw``),
+    preferring fully-populated entries over stubs.
+    """
+    # Honour the user's catalog choice unconditionally if the run exists there.
     try:
-        candidates.append(from_uri(root_url))
-    except Exception:
+        return client[run_uid]
+    except KeyError:
         pass
 
-    for candidate in list(candidates):
+    # Fallback: search sibling catalogs (migration then raw) under the same
+    # tiled server root.
+    parsed = urlsplit(tiled_url)
+    root_url = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    fallback_candidates = []
+    try:
+        root = from_uri(root_url)
+    except Exception:
+        root = None
+    if root is not None:
         for path_parts in (("hxn", "migration"), ("hxn", "raw")):
-            node = candidate
+            node = root
             try:
                 for path_part in path_parts:
                     node = node[path_part]
             except KeyError:
                 continue
-            candidates.append(node)
+            fallback_candidates.append(node)
 
-    # Prefer entries that actually expose primary + baseline data (any layout).
-    # Stub entries are deferred to fallback so we still return something usable
-    # if no fully-populated entry exists.
     fallback = None
-    for candidate in candidates:
+    for candidate in fallback_candidates:
         try:
             run = candidate[run_uid]
         except KeyError:

@@ -90,6 +90,8 @@ class TiledWriter:
         # ViT mosaic node, set by the first write_vit_mosaic so subsequent
         # patch_vit_mosaic calls don't have to re-walk the container.
         self._vit_mosaic_node = None
+        # Same caching for the parallel amp mosaic at <run>/vit/mosaic_amp.
+        self._vit_amp_mosaic_node = None
         logger.info("TiledWriter connected: %s / %s", base_url, catalog_path)
 
     # ------------------------------------------------------------------
@@ -118,6 +120,7 @@ class TiledWriter:
         self._dp_chunk_size = 0
         self._inference_node = None
         self._vit_mosaic_node = None
+        self._vit_amp_mosaic_node = None
         logger.info("TiledWriter.start_run uid=%s metadata=%s", run_uid, meta)
 
     # ------------------------------------------------------------------
@@ -148,10 +151,32 @@ class TiledWriter:
     # Public write methods — all require start_run() to have been called.
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _complex_to_amp_phase(arr: np.ndarray) -> np.ndarray:
+        """Convert a complex reconstruction array to ``(2, H, W)`` float32.
+
+        ``[0]`` is amplitude ``|arr|``, ``[1]`` is phase ``angle(arr)`` in
+        radians. Multi-mode inputs (``(modes, H, W)``) collapse to mode 0
+        — only the dominant mode is shipped to the dashboard.
+
+        The dashboard's TiledImageTile renderer expects this two-channel
+        layout (it picks an index to display); raw complex64 over the wire
+        was not decodable.
+        """
+        a = np.asarray(arr)
+        if a.ndim == 3:
+            a = a[0]
+        return np.stack([
+            np.abs(a).astype(np.float32),
+            np.angle(a).astype(np.float32),
+        ])
+
     def write_live(self, iteration: int, probe: np.ndarray, obj: np.ndarray) -> None:
         """Overwrite the live probe/object snapshots for the current run.
 
-        Called every ``display_interval`` iterations.
+        Called every ``display_interval`` iterations. Stored as ``(2, H, W)``
+        float32 (``[0]`` = amplitude, ``[1]`` = phase) so the dashboard can
+        display either channel with a simple slice index.
 
         If either array contains non-finite values (NaN/Inf), the write is
         skipped so the previous finite snapshot stays visible to consumers
@@ -162,7 +187,9 @@ class TiledWriter:
         if self._run is None:
             logger.warning("write_live called before start_run; skipping")
             return
-        if not np.isfinite(probe).all() or not np.isfinite(obj).all():
+        probe_ap = self._complex_to_amp_phase(probe)
+        obj_ap = self._complex_to_amp_phase(obj)
+        if not np.isfinite(probe_ap).all() or not np.isfinite(obj_ap).all():
             logger.warning(
                 "write_live skipped: non-finite values in probe/object at iter=%d "
                 "(keeping last finite snapshot)",
@@ -172,8 +199,8 @@ class TiledWriter:
         try:
             live = _get_or_create(self._run, "live")
             meta = {"iteration": iteration}
-            self._write_or_overwrite_array(live, "probe", probe, metadata=meta)
-            self._write_or_overwrite_array(live, "object", obj, metadata=meta)
+            self._write_or_overwrite_array(live, "probe", probe_ap, metadata=meta)
+            self._write_or_overwrite_array(live, "object", obj_ap, metadata=meta)
             logger.info("write_live run=%s iter=%d", self._run_uid, iteration)
         except Exception:
             logger.exception("TiledWriter.write_live failed")
@@ -185,14 +212,19 @@ class TiledWriter:
         timestamps: np.ndarray,
         num_points: np.ndarray,
     ) -> None:
-        """Write final reconstruction results when a scan completes."""
+        """Write final reconstruction results when a scan completes.
+
+        Stores ``probe`` and ``obj`` as ``(2, H, W)`` float32 (amp, phase) —
+        same layout as ``write_live`` — so offline consumers and the
+        dashboard share a single decode path.
+        """
         if self._run is None:
             logger.warning("write_final called before start_run; skipping")
             return
         try:
             final = _get_or_create(self._run, "final")
-            self._write_or_overwrite_array(final, "probe", probe)
-            self._write_or_overwrite_array(final, "object", obj)
+            self._write_or_overwrite_array(final, "probe", self._complex_to_amp_phase(probe))
+            self._write_or_overwrite_array(final, "object", self._complex_to_amp_phase(obj))
             self._write_or_overwrite_array(final, "timestamps", timestamps)
             self._write_or_overwrite_array(final, "num_points", num_points)
             logger.info("write_final run=%s", self._run_uid)
@@ -630,6 +662,61 @@ class TiledWriter:
             node.update_metadata(metadata={"batch_num": int(batch_num)})
         except Exception:
             logger.exception("TiledWriter.patch_vit_mosaic failed")
+
+    def write_vit_amp_mosaic(
+        self,
+        mosaic: np.ndarray,
+        *,
+        batch_num: int,
+        pixel_size_m: float,
+        canvas_origin_um: tuple[float, float],
+    ) -> None:
+        """Seed the server-side ViT amplitude mosaic at ``<run>/vit/mosaic_amp``.
+
+        Parallel sibling to ``write_vit_mosaic`` (phase). First write of each
+        run paints fill colour across the full canvas; subsequent batches
+        go through ``patch_vit_amp_mosaic``.
+        """
+        if self._run is None:
+            logger.warning("write_vit_amp_mosaic called before start_run; skipping")
+            return
+        try:
+            vit = _get_or_create(self._run, "vit")
+            meta = {
+                "batch_num": batch_num,
+                "pixel_size_m": float(pixel_size_m),
+                "canvas_origin_um": [float(canvas_origin_um[0]), float(canvas_origin_um[1])],
+            }
+            self._write_or_overwrite_array(vit, "mosaic_amp", mosaic, metadata=meta)
+            self._vit_amp_mosaic_node = vit["mosaic_amp"]
+        except Exception:
+            logger.exception("TiledWriter.write_vit_amp_mosaic failed")
+
+    def patch_vit_amp_mosaic(
+        self,
+        subregion: np.ndarray,
+        *,
+        offset_yx: tuple[int, int],
+        batch_num: int,
+    ) -> None:
+        """Patch a sub-region of the amp mosaic in place. Sibling of
+        ``patch_vit_mosaic`` (phase); same offset semantics."""
+        if self._run is None:
+            logger.warning("patch_vit_amp_mosaic called before start_run; skipping")
+            return
+        node = getattr(self, "_vit_amp_mosaic_node", None)
+        if node is None:
+            try:
+                node = self._run["vit"]["mosaic_amp"]
+                self._vit_amp_mosaic_node = node
+            except Exception:
+                logger.exception("patch_vit_amp_mosaic: failed to resolve mosaic_amp node")
+                return
+        try:
+            node.patch(np.ascontiguousarray(subregion), offset=(int(offset_yx[0]), int(offset_yx[1])))
+            node.update_metadata(metadata={"batch_num": int(batch_num)})
+        except Exception:
+            logger.exception("TiledWriter.patch_vit_amp_mosaic failed")
 
 # Module-level singleton — shared by all callers within the same process.
 _writer_instance: "TiledWriter | None" = None
