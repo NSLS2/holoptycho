@@ -48,6 +48,118 @@ ssh -L 8000:localhost:8000 <user>@<host>
 
 ---
 
+## Testing with the replay script
+
+To test holoptycho end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. It reads a real scan from Tiled and publishes it over ZMQ on the same node as holoptycho, in the exact Eiger and PandA wire formats. Both the replay script and holoptycho must run on the **same machine** — ZMQ traffic stays local.
+
+### On the compute node
+
+```bash
+# 1. Authenticate with Tiled and install the replay env (once)
+tiled profile create https://tiled.nsls2.bnl.gov --name nsls2
+tiled login --profile nsls2
+pixi install -e replay
+
+# 2. If holoptycho has no selected engine yet, choose one before --hp-start
+hp model set run042901
+hp model status
+
+# 3. Run the replay. Use --scan-id to look up the run automatically (newest
+#    run with that scan_id wins — scan_id is not unique), or pass --uid
+#    directly if you already have a UUID. The --tiled-url, --hp-url, and
+#    --eiger/panda-endpoint flags all default to the HXN-typical values.
+pixi run -e replay replay --scan-id 404611 --mode vit
+```
+
+By default the replay script publishes plain ZMQ. To test CurveZMQ, also
+pass the full Eiger key set: `--eiger-server-public-key`,
+`--eiger-server-secret-key`, and `--eiger-client-public-key`.
+
+The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`. By default, leave `SERVER_PUBLIC_KEY`, `CLIENT_PUBLIC_KEY`, and `CLIENT_SECRET_KEY` unset so holoptycho subscribes without CurveZMQ. To test CurveZMQ, set all three in the container and pass the matching Eiger publisher keys to `scripts/replay_from_tiled.py`. Partial auth configuration is rejected on both sides. Control holoptycho from your local machine as normal via the `8000` SSH tunnel.
+
+`--tiled-url` may be either the Tiled server root (`https://tiled.nsls2.bnl.gov`) or a catalog path (`https://tiled.nsls2.bnl.gov/hxn/migration`). The replay and config loaders resolve either form.
+
+When `--hp-start` is used, the replay script builds the run config from the
+same run metadata and chooses `/run` or `/restart` automatically based on the
+current holoptycho server state before publishing. If `hp model status` shows
+no selected engine, run `hp model set <model-name>` once first.
+
+For same-node testing with the replay script, `localhost` only works if the
+container is started with `--network host`. With bridge networking, `localhost`
+inside the container refers to the container itself, not the Slurm node host.
+
+### Useful replay flags
+
+These flags only take effect when `--hp-start` is used (they're written into
+the config the replay script POSTs to holoptycho):
+
+- **`--mode {iterative,vit,both}`** — which reconstruction branches the
+  pipeline wires up. `iterative` runs only the DM/ML solver, `vit` runs only
+  the ViT inference network, and `both` (default) runs them in parallel.
+  Useful for isolating GPU-contention issues on single-GPU nodes or for
+  comparing the two outputs side by side in Tiled (`live/` + `final/` come
+  from iterative; `vit/` comes from the ViT branch).
+- **`--n-iterations N`** — caps the iterative solver at `N` ticks
+  (default 500). Once the iteration counter hits the cap, holoptycho trips
+  the natural-termination path: `SaveResult` writes the final
+  probe/object/timestamps to Tiled, then `fragment.stop_execution()`
+  releases the run loop and the pipeline subprocess exits. Use a small
+  value (50–100) for end-to-end smoke tests; use the production value
+  (~500) for real reconstructions.
+- **`--max-frames N`** — only publishes the first `N` frames of the scan,
+  trimming positions to match. Handy for quick tests on big scans where
+  downloading and replaying every frame would take too long.
+- **`--skip-frames N`** — drops the first `N` Eiger frames (and aligned
+  encoder samples) before publishing. Useful when a scan's initial rows
+  overshoot the commanded extent during settling/ramp-up and crash the
+  iterative recon, or when the first row of ViT predictions ends up in the
+  wrong canvas region.
+- **`--chunk-size N`** — number of frames per tiled fetch during streaming
+  (default 256). The replay script pulls frames from tiled lazily rather
+  than loading the whole scan up front, so replay starts publishing within
+  seconds even for multi-GB scans. Smaller chunks = lower startup latency
+  and lower peak memory; larger = fewer round-trips.
+- **`--compress`** — opt in to bslz4 compression and publish frames in the
+  same wire format the live Eiger uses. **Off by default**, because
+  `dectris-compression 0.3.1` removed the C `compress` entrypoint and the
+  pure-Python `bitshuffle` fallback gates publish throughput at ~15 fps. The
+  default raw-bytes path uses a `"raw"` encoding header that holoptycho's
+  receiver recognises; localhost ZMQ handles the ~10× larger wire size
+  easily. Enable only when explicitly testing the decompression code path.
+
+### Best practices
+
+- **`--nx` / `--ny` must match the selected engine's input dimensions.**
+  These set the detector-frame crop size fed into the pipeline; the
+  default of 256×256 matches the current HXN engines
+  (`ptycho_vit_amp_phase_b64`, `run042901`). A mismatch with the engine
+  input raises `ValueError: could not broadcast input array from shape
+  (256,128) into shape (128,256)` at pipeline startup. The detector frame
+  can be larger — the pipeline crops down — but it must be at least
+  `nx × ny`.
+- **Run only one replay at a time.** Concurrent `--hp-start` replays
+  mid-stream the pipeline: the second run's `/restart` interrupts the first
+  while it's publishing, leaving PandA and Eiger out of sync. Positions
+  stay NaN and the dashboard hangs. Kill any running replay
+  (`pkill -f replay_from_tiled`) before launching a new one.
+- **Use `--skip-frames` for scans with settling/ramp-up rows.** Some scans
+  (e.g. 404611) have the first ~10 rows where encoder readings overshoot
+  the commanded scan range by several × and crash the iterative recon's
+  pre-allocated object grid. The ViT branch tolerates them but stitches
+  them into the wrong canvas region. Drop those rows.
+- **Default to `--mode vit`** when iterating on ViT/mosaic code —
+  fastest cycle and the iterative branch can't crash the run.
+- **`--max-frames N` plus `--n-iterations 50–100`** gets you a full
+  end-to-end cycle (config → stream → recon → final write) in under a
+  minute for quick smoke tests on big scans.
+- **Leave compression off** (the default). With the current
+  `dectris-compression` package the C `compress` is missing, so enabling
+  `--compress` falls back to Python `bitshuffle` and gates the pipeline at
+  ~15 frames/sec. Enable only when you specifically need to test the
+  decompression path.
+
+---
+
 ## Development container
 
 On hosts with a glibc too old to run the pixi env directly (e.g. older RHEL), use [`start_editable.sh`](start_editable.sh) to drop into a minimal CUDA+pixi container with the repo bind-mounted. Edit, commit, and push from the host as normal; only run code inside the container.
@@ -298,118 +410,6 @@ sbatch scripts/slurm_start_holoptycho.sh
 ```
 
 > **Note:** The script resolves Azure credentials at job start time using `az` CLI. Make sure you have run `az login` on the cluster before submitting — credentials are stored in `~/.azure/` which is available on compute nodes via the shared home directory.
-
----
-
-## Testing with the replay script
-
-To test holoptycho end-to-end without a live beamline, use `scripts/replay_from_tiled.py`. It reads a real scan from Tiled and publishes it over ZMQ on the same node as holoptycho, in the exact Eiger and PandA wire formats. Both the replay script and holoptycho must run on the **same machine** — ZMQ traffic stays local.
-
-### On the compute node
-
-```bash
-# 1. Authenticate with Tiled and install the replay env (once)
-tiled profile create https://tiled.nsls2.bnl.gov --name nsls2
-tiled login --profile nsls2
-pixi install -e replay
-
-# 2. If holoptycho has no selected engine yet, choose one before --hp-start
-hp model set run042901
-hp model status
-
-# 3. Run the replay. Use --scan-id to look up the run automatically (newest
-#    run with that scan_id wins — scan_id is not unique), or pass --uid
-#    directly if you already have a UUID. The --tiled-url, --hp-url, and
-#    --eiger/panda-endpoint flags all default to the HXN-typical values.
-pixi run -e replay replay --scan-id 404611 --mode vit
-```
-
-By default the replay script publishes plain ZMQ. To test CurveZMQ, also
-pass the full Eiger key set: `--eiger-server-public-key`,
-`--eiger-server-secret-key`, and `--eiger-client-public-key`.
-
-The container must be started with `SERVER_STREAM_SOURCE=tcp://localhost:5555` and `PANDA_STREAM_SOURCE=tcp://localhost:5556`. By default, leave `SERVER_PUBLIC_KEY`, `CLIENT_PUBLIC_KEY`, and `CLIENT_SECRET_KEY` unset so holoptycho subscribes without CurveZMQ. To test CurveZMQ, set all three in the container and pass the matching Eiger publisher keys to `scripts/replay_from_tiled.py`. Partial auth configuration is rejected on both sides. Control holoptycho from your local machine as normal via the `8000` SSH tunnel.
-
-`--tiled-url` may be either the Tiled server root (`https://tiled.nsls2.bnl.gov`) or a catalog path (`https://tiled.nsls2.bnl.gov/hxn/migration`). The replay and config loaders resolve either form.
-
-When `--hp-start` is used, the replay script builds the run config from the
-same run metadata and chooses `/run` or `/restart` automatically based on the
-current holoptycho server state before publishing. If `hp model status` shows
-no selected engine, run `hp model set <model-name>` once first.
-
-For same-node testing with the replay script, `localhost` only works if the
-container is started with `--network host`. With bridge networking, `localhost`
-inside the container refers to the container itself, not the Slurm node host.
-
-### Useful replay flags
-
-These flags only take effect when `--hp-start` is used (they're written into
-the config the replay script POSTs to holoptycho):
-
-- **`--mode {iterative,vit,both}`** — which reconstruction branches the
-  pipeline wires up. `iterative` runs only the DM/ML solver, `vit` runs only
-  the ViT inference network, and `both` (default) runs them in parallel.
-  Useful for isolating GPU-contention issues on single-GPU nodes or for
-  comparing the two outputs side by side in Tiled (`live/` + `final/` come
-  from iterative; `vit/` comes from the ViT branch).
-- **`--n-iterations N`** — caps the iterative solver at `N` ticks
-  (default 500). Once the iteration counter hits the cap, holoptycho trips
-  the natural-termination path: `SaveResult` writes the final
-  probe/object/timestamps to Tiled, then `fragment.stop_execution()`
-  releases the run loop and the pipeline subprocess exits. Use a small
-  value (50–100) for end-to-end smoke tests; use the production value
-  (~500) for real reconstructions.
-- **`--max-frames N`** — only publishes the first `N` frames of the scan,
-  trimming positions to match. Handy for quick tests on big scans where
-  downloading and replaying every frame would take too long.
-- **`--skip-frames N`** — drops the first `N` Eiger frames (and aligned
-  encoder samples) before publishing. Useful when a scan's initial rows
-  overshoot the commanded extent during settling/ramp-up and crash the
-  iterative recon, or when the first row of ViT predictions ends up in the
-  wrong canvas region.
-- **`--chunk-size N`** — number of frames per tiled fetch during streaming
-  (default 256). The replay script pulls frames from tiled lazily rather
-  than loading the whole scan up front, so replay starts publishing within
-  seconds even for multi-GB scans. Smaller chunks = lower startup latency
-  and lower peak memory; larger = fewer round-trips.
-- **`--compress`** — opt in to bslz4 compression and publish frames in the
-  same wire format the live Eiger uses. **Off by default**, because
-  `dectris-compression 0.3.1` removed the C `compress` entrypoint and the
-  pure-Python `bitshuffle` fallback gates publish throughput at ~15 fps. The
-  default raw-bytes path uses a `"raw"` encoding header that holoptycho's
-  receiver recognises; localhost ZMQ handles the ~10× larger wire size
-  easily. Enable only when explicitly testing the decompression code path.
-
-### Best practices
-
-- **`--nx` / `--ny` must match the selected engine's input dimensions.**
-  These set the detector-frame crop size fed into the pipeline; the
-  default of 256×256 matches the current HXN engines
-  (`ptycho_vit_amp_phase_b64`, `run042901`). A mismatch with the engine
-  input raises `ValueError: could not broadcast input array from shape
-  (256,128) into shape (128,256)` at pipeline startup. The detector frame
-  can be larger — the pipeline crops down — but it must be at least
-  `nx × ny`.
-- **Run only one replay at a time.** Concurrent `--hp-start` replays
-  mid-stream the pipeline: the second run's `/restart` interrupts the first
-  while it's publishing, leaving PandA and Eiger out of sync. Positions
-  stay NaN and the dashboard hangs. Kill any running replay
-  (`pkill -f replay_from_tiled`) before launching a new one.
-- **Use `--skip-frames` for scans with settling/ramp-up rows.** Some scans
-  (e.g. 404611) have the first ~10 rows where encoder readings overshoot
-  the commanded scan range by several × and crash the iterative recon's
-  pre-allocated object grid. The ViT branch tolerates them but stitches
-  them into the wrong canvas region. Drop those rows.
-- **Default to `--mode vit`** when iterating on ViT/mosaic code —
-  fastest cycle and the iterative branch can't crash the run.
-- **`--max-frames N` plus `--n-iterations 50–100`** gets you a full
-  end-to-end cycle (config → stream → recon → final write) in under a
-  minute for quick smoke tests on big scans.
-- **Leave compression off** (the default). With the current
-  `dectris-compression` package the C `compress` is missing, so enabling
-  `--compress` falls back to Python `bitshuffle` and gates the pipeline at
-  ~15 frames/sec. Enable only when you specifically need to test the
-  decompression path.
 
 ---
 
