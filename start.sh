@@ -74,7 +74,18 @@ CONTAINER_NAME="holoptycho"
 # other non-systemd shells don't get XDG_RUNTIME_DIR from logind, so point
 # it at a private /tmp path so podman has somewhere to write its runtime
 # state. Harmless on real-docker hosts (the dir just sits unused).
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/xdg-$(id -u)}"
+#
+# Also fall back when the inherited value points at a path we can't write
+# to: slurm sessions sometimes inherit XDG_RUNTIME_DIR=/run/user/<uid>
+# from the login shell, but logind doesn't mount /run/user/<uid> on batch
+# nodes (no PAM session unless `loginctl enable-linger` is set), so the
+# path doesn't exist and we can't create it ourselves. ``-w`` returns
+# false for missing paths, so this covers both "exists but unwritable"
+# and "doesn't exist" in one check.
+if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -w "${XDG_RUNTIME_DIR:-}" ]]; then
+  XDG_RUNTIME_DIR="/tmp/xdg-$(id -u)"
+fi
+export XDG_RUNTIME_DIR
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
 
