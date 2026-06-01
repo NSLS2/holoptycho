@@ -19,11 +19,7 @@ WORKDIR /app
 COPY pixi.toml pixi.lock pyproject.toml set-ld-path.sh ./
 COPY holoptycho/ ./holoptycho/
 
-# SSH forwarding for private ptycho repo during pixi install.
-# Requires: docker build --ssh default ...
-RUN mkdir -p ~/.ssh && \
-    ssh-keyscan github.com >> ~/.ssh/known_hosts
-RUN --mount=type=ssh pixi install && \
+RUN pixi install && \
     rm -rf ~/.cache/rattler
 
 # Generate shell activation hook (no pixi binary needed at runtime)

@@ -15,19 +15,114 @@ Usage:
 
 import logging
 import os
+import re
 import time
+from pathlib import Path
 
 import numpy as np
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
-from .mosaic_stitch import stitch_batch_into
+from ptychoml.preprocess import apply_d4, D4_NAMES
+from .mosaic_stitch import stitch_batch_livestitch_into, stitch_batch_nearest
 from .tiled_writer import get_writer
 
 # Module-level writer shared with ptycho_holo.py operators.
 _writer = get_writer()
 
 
-def read_engine_batch_size(engine_path: str) -> int:
+def find_onnx_for_engine(engine_path: str) -> Path | None:
+    """Return the ONNX path corresponding to a compiled .engine file, or None.
+
+    Convention (set by model_manager.py):
+        engine:  {ENGINE_CACHE_DIR}/{model_name}_v{version}.engine
+        onnx:    {ENGINE_CACHE_DIR}/onnx/{model_name}/{version}/*.onnx
+    """
+    ep = Path(engine_path)
+    # Parse model_name and version from e.g. "run042901_v5.engine"
+    m = re.fullmatch(r"(.+?)_v(\d+)\.engine", ep.name)
+    if not m:
+        return None
+    model_name, version = m.group(1), m.group(2)
+    onnx_dir = ep.parent / "onnx" / model_name / version
+    onnx_files = sorted(onnx_dir.glob("*.onnx"))
+    return onnx_files[0] if onnx_files else None
+
+
+def inner_crop_from_onnx(onnx_path: str | Path, threshold: float = 0.50) -> int | None:
+    """Derive ``inner_crop`` from the probe stored in an ONNX model.
+
+    The probe defines which pixels in each output patch carry meaningful
+    reconstruction signal.  For a circular probe of radius R pixels the
+    largest axis-aligned square that fits inside the circle has half-side
+    R / sqrt(2), so the appropriate inner crop is::
+
+        inner_crop = patch_size // 2 - floor(R / sqrt(2))
+
+    Probe tensors are identified by name (``probe_real`` / ``probe_imag``)
+    when available, falling back to any graph outputs beyond ``output`` that
+    are also initializers (constants baked into the model).
+
+    Parameters
+    ----------
+    onnx_path : path to the .onnx file
+    threshold : fraction of peak amplitude defining the probe boundary.
+                Default 0.50 (FWHM of the amplitude, i.e. half-maximum).
+
+    Returns
+    -------
+    inner_crop : int, or None if the ONNX cannot be loaded / probe not found
+    """
+    try:
+        import onnx
+        import onnx.numpy_helper as nph
+    except ImportError:
+        return None
+
+    try:
+        model = onnx.load(str(onnx_path))
+    except Exception:
+        return None
+
+    init_map = {i.name: nph.to_array(i) for i in model.graph.initializer}
+    out_names = [o.name for o in model.graph.output]
+
+    # Prefer explicitly named probe tensors.
+    if "probe_real" in init_map and "probe_imag" in init_map:
+        p_re = init_map["probe_real"]
+        p_im = init_map["probe_imag"]
+    else:
+        # Fall back: any graph output (other than 'output') that is also a
+        # constant initializer and has 2-D spatial shape.
+        probe_cands = [
+            init_map[n] for n in out_names
+            if n != "output" and n in init_map and init_map[n].ndim == 2
+        ]
+        if len(probe_cands) < 2:
+            return None
+        p_re, p_im = probe_cands[0], probe_cands[1]
+
+    if p_re.shape != p_im.shape or p_re.ndim != 2:
+        return None
+
+    amp = np.sqrt(p_re.astype(np.float64) ** 2 + p_im.astype(np.float64) ** 2)
+    patch_h, patch_w = amp.shape
+    cy, cx = patch_h / 2.0, patch_w / 2.0
+    y_idx, x_idx = np.ogrid[:patch_h, :patch_w]
+    r = np.sqrt((y_idx - cy) ** 2 + (x_idx - cx) ** 2)
+
+    support = r[amp >= threshold * amp.max()]
+    if not len(support):
+        return None
+
+    radius = float(support.max())
+    # Inscribed square half-side: r / sqrt(2)
+    inscribed_half = radius / np.sqrt(2)
+    inner_crop = int(np.floor(min(patch_h, patch_w) / 2.0 - inscribed_half))
+    # Clamp: non-negative, and never more than patch_size // 4
+    return max(0, min(inner_crop, min(patch_h, patch_w) // 4))
+
+
+
     """Return the batch dim of the input tensor for a TensorRT .engine file.
 
     Used by the pipeline composer to size frame batches to match the model,
@@ -65,11 +160,16 @@ class PtychoViTInferenceOp(Operator):
         vit_result: tuple(pred, indices) where pred is [B, 2, H, W] or [B, H, W]
 
     Parameters:
-        engine_path:       Path to .engine file (must match batch size B)
-        gpu:               CUDA device ordinal (default 1; leave 0 for PtychoRecon)
-        output_save_dir:   Directory for saving predictions (default /data/users/Holoscan)
-        data_is_shifted:   If True, input diff_amp has been fftshift'd and
-                           should be undone before inference.
+        engine_path:     Path to .engine file (must match batch size B)
+        gpu:             CUDA device ordinal (default 1; leave 0 for PtychoRecon)
+        output_save_dir: Directory for saving predictions (default /data/users/Holoscan)
+        fftshift:        DC-convention override for the session. Default
+                         ``None`` lets ptychoml auto-detect the central beam
+                         location per batch (via
+                         ``ptychoml.detect_dc_at_corner``) and shift only when
+                         needed — robust against an upstream op changing its
+                         own fftshift policy. Pass ``True``/``False`` to force
+                         a fixed convention (rarely needed).
     """
 
     def __init__(
@@ -79,7 +179,10 @@ class PtychoViTInferenceOp(Operator):
         engine_path: str,
         gpu: int = 1,
         output_save_dir: str = "/data/users/Holoscan",
-        data_is_shifted: bool = False,
+        fftshift: bool | None = None,
+        image_proc=None,
+        positions_provider=None,
+        preprocess_kwargs: dict | None = None,
         **kwargs,
     ):
         super().__init__(fragment, *args, **kwargs)
@@ -87,7 +190,17 @@ class PtychoViTInferenceOp(Operator):
         self.engine_path = engine_path
         self.gpu = gpu
         self.output_save_dir = output_save_dir
-        self._data_is_shifted = data_is_shifted
+        self._fftshift = fftshift
+
+        # Orientation auto-detect: references set by compose() so the session
+        # can call ptychoml.autodetect_orientation on the first batch that has
+        # enough finite scan positions, then update image_proc.dp_orient in place.
+        self._image_proc = image_proc
+        self._positions_provider = positions_provider
+        # preprocess_kwargs forwarded to preprocess_diffraction inside the
+        # sweep: must NOT include dp_orient (that's the sweep variable).
+        self._preprocess_kwargs = dict(preprocess_kwargs) if preprocess_kwargs else {}
+        self._orient_detect_pending = image_proc is not None
 
         # Lazy-initialized on first compute()
         self._session = None
@@ -108,17 +221,27 @@ class PtychoViTInferenceOp(Operator):
 
         if self.gpu == 0:
             self._logger.warning(
-                "VIT running on GPU 0 — same as PtychoRecon (CuPy). "
-                "PyCUDA + CuPy on the same GPU from different threads can cause "
-                "CUDA context crashes. Use gpu=1 on multi-GPU systems."
+                "VIT running on GPU 0. On multi-GPU systems, prefer gpu=1 to "
+                "keep PyCUDA (ViT) and CuPy (PtychoRecon) on separate devices."
             )
-        self._session = PtychoViTInference(
-            engine_path=self.engine_path,
-            gpu=self.gpu,
-            data_is_shifted=self._data_is_shifted,
-        )
-        self._session._init_engine()
-        self.engine_batch_size = int(self._session.expected_input_shape[0])
+        # fftshift=None (default) tells ptychoml to auto-detect the DC
+        # convention per batch. The model is trained on central-beam-at-
+        # center data; ImagePreprocessorOp now also auto-detects, so the
+        # session typically sees DC-already-at-center and no-ops. Auto is
+        # idempotent and cheap (~one ndarray.sum), so leaving it on here
+        # gives us defense-in-depth without forcing the pipeline to track
+        # which upstream stage settled the convention.
+        try:
+            self._session = PtychoViTInference(
+                engine_path=self.engine_path,
+                gpu=self.gpu,
+                fftshift=self._fftshift,
+            )
+            self._session._init_engine()
+            self.engine_batch_size = int(self._session.expected_input_shape[0])
+        except Exception:
+            self._session = None
+            raise
         self._logger.info(
             "ptychoml.PtychoViTInference ready: engine=%s gpu=%d engine_batch=%d",
             self.engine_path,
@@ -136,10 +259,95 @@ class PtychoViTInferenceOp(Operator):
         spec.output("vit_result").condition(ConditionType.NONE)
 
     def start(self):
-        # Load the TRT engine before the scheduler starts dispatching data so
-        # the first ViT batch doesn't pay the ~1–2 s engine load latency.
-        if self._session is None:
-            self._init_session()
+        # NOTE: Engine is loaded lazily in _compute_inner() on the first call,
+        # NOT here. PyCUDA contexts are thread-local: creating the context in
+        # start() (framework startup thread) makes it unavailable in compute()
+        # (MultiThreadScheduler worker thread), causing SIGABRT in predict().
+        # The ~1–2 s TRT deserialize cost is paid on the first batch instead.
+        pass
+
+    def _try_autodetect_orientation(self):
+        """Run one-shot dp_orient sweep via ptychoml.autodetect_orientation.
+
+        Requires:
+          - session is initialised (called after _init_session)
+          - session.baked_probe is not None (engine exported with --probe)
+          - image_proc._autodetect_buf has frames with finite scan positions
+
+        On success: sets image_proc.dp_orient to the winning D4 name and
+        signals image_proc._autodetect_done = True so the buffer stops growing.
+        On failure or missing probe: logs and disables future attempts.
+        """
+        from ptychoml import autodetect_orientation
+
+        if self._session.baked_probe is None:
+            self._logger.info(
+                "Orientation autodetect: engine has no baked probe — cannot sweep. "
+                "Keeping dp_orient=%s. Re-export engine with --probe to enable.",
+                self._image_proc.dp_orient,
+            )
+            self._orient_detect_pending = False
+            self._image_proc._autodetect_done = True
+            return
+
+        buf = self._image_proc._autodetect_buf
+        if not buf:
+            return  # buffer not yet populated
+
+        # Concatenate all buffered (frames, indices) pairs.
+        all_frames = np.concatenate([f for f, _ in buf], axis=0)
+        all_indices = np.concatenate([i for _, i in buf], axis=0)
+
+        # Need finite scan positions for the frames we're about to use.
+        if self._positions_provider is None:
+            self._orient_detect_pending = False
+            self._image_proc._autodetect_done = True
+            return
+        positions_um = self._positions_provider()
+        if positions_um is None:
+            return
+        positions_um = positions_um.copy()  # snapshot before PointProcessorOp can mutate
+
+        valid_mask = np.array([
+            int(idx) < len(positions_um) and np.isfinite(positions_um[int(idx)]).all()
+            for idx in all_indices
+        ])
+        n_valid = int(valid_mask.sum())
+        if n_valid < 64:
+            return  # wait for PandA positions to catch up
+
+        valid_frames = all_frames[valid_mask]
+        # positions_um convention: col 0 = slow axis (INENC3), col 1 = fast axis (INENC2).
+        # autodetect_orientation (and detect_orientation.py) expects col 0 = x (fast axis),
+        # col 1 = y (slow axis) — swap the columns so the sweep uses the correct geometry.
+        valid_positions = np.stack([positions_um[int(idx)][[1, 0]] for idx in all_indices[valid_mask]])
+
+        try:
+            report = autodetect_orientation(
+                valid_frames,
+                valid_positions,
+                session=self._session,
+                probe=self._session.baked_probe,
+                preprocess_kwargs=self._preprocess_kwargs,
+            )
+            best = report.best.candidate.dp_orient
+            ranking = [(r.candidate.dp_orient, f"{r.score:.4f}") for r in report.ranked]
+            self._logger.info(
+                "Orientation autodetect: winner=%s (score=%.4f) from %d frames. "
+                "Full ranking: %s",
+                best, report.best.score, n_valid, ranking,
+            )
+            self._image_proc.dp_orient = best
+        except Exception:
+            self._logger.exception(
+                "Orientation autodetect failed; keeping dp_orient=%s",
+                self._image_proc.dp_orient,
+            )
+
+        # Done — clear the buffer and stop collecting.
+        self._orient_detect_pending = False
+        self._image_proc._autodetect_done = True
+        self._image_proc._autodetect_buf.clear()
 
     def compute(self, op_input, op_output, context):
         try:
@@ -156,6 +364,15 @@ class PtychoViTInferenceOp(Operator):
 
         if diff_amp is None:
             return
+
+        # --- One-shot orientation auto-detect ---
+        # Runs once after the session is loaded and the engine has a baked
+        # probe. Reads raw pre-D4 frames buffered by ImagePreprocessorOp,
+        # sweeps all 8 D4 candidates via ptychoml.autodetect_orientation,
+        # and updates image_proc.dp_orient with the winner. All subsequent
+        # batches use the correct orientation.
+        if self._orient_detect_pending:
+            self._try_autodetect_orientation()
 
         # --- Hot-swap engine reload via sentinel file ---
         reload_file = os.path.join(
@@ -254,12 +471,13 @@ class SaveViTResult(Operator):
         x_range_um: float | None = None,
         y_range_um: float | None = None,
         inner_crop: int | None = None,
-        canvas_pad: int = 64,
+        canvas_pad: int = 0,
         fourier_pad: int = 32,
+        min_overlap_count: float = 0.5,
         phase_channel_index: int = 1,
         overshoot_factor: float = 1.2,
         enable_batch_writes: bool = False,
-        antidiag_flip_patches: bool = False,
+        patch_flip: str = 'identity',
         **kwargs,
     ):
         # Holoscan's Operator.__init__ calls setup(spec), so any attribute
@@ -269,12 +487,18 @@ class SaveViTResult(Operator):
         super().__init__(fragment, *args, **kwargs)
         self.batch_num = 0
         self.max_index_seen = -1
-        # Anti-diagonal flip per predicted patch before stitching. Required
-        # for HXN data: the object-domain array axes are reflected across the
-        # anti-diagonal relative to the probe/dp frame, so patches stitched
-        # without this correction come out mirrored relative to the scan grid.
-        # Equivalent to ``transpose(0, 2, 1)[:, ::-1, ::-1]``.
-        self._antidiag_flip_patches = antidiag_flip_patches
+        # D4 transform applied to each predicted patch before stitching, to
+        # map model-output frame → canvas/object frame. 'identity' = no-op.
+        # Historical HXN default was 'antitranspose' (transpose ∘ flip(both))
+        # because the model's output axes were reflected across the anti-
+        # diagonal relative to the probe/dp frame. The orientation
+        # auto-detector ([[ptychoml.autodetect_orientation]]) picks the
+        # right D4 from the data; this is the static fallback.
+        if patch_flip not in D4_NAMES:
+            raise ValueError(
+                f"patch_flip must be one of {D4_NAMES}; got {patch_flip!r}"
+            )
+        self._patch_flip = patch_flip
         # Optional callable returning the latest (n, 2) per-frame positions
         # array (microns) — typically lambda: point_proc.positions_um. When
         # supplied, the snapshot is published alongside each ViT batch so
@@ -287,6 +511,7 @@ class SaveViTResult(Operator):
         self._inner_crop = inner_crop
         self._canvas_pad = canvas_pad
         self._fourier_pad = fourier_pad
+        self._min_overlap_count = max(0.5, float(min_overlap_count))
         self._phase_channel_index = phase_channel_index
         self._overshoot_factor = overshoot_factor
 
@@ -304,6 +529,11 @@ class SaveViTResult(Operator):
         # bounding box of all positions.
         self._half_h: int = 0
         self._half_w: int = 0
+        # Frames whose positions_um were NaN at stitch time. Stored as
+        # (pred_2hw, frame_idx) and merged into the next batch once their
+        # positions arrive. Prevents rows from being permanently missing when
+        # PointProcessorOp is momentarily behind the ViT branch.
+        self._pending_frames: list[tuple[np.ndarray, int]] = []
         # Whether stitching is even possible (requires scan-grid params and a
         # positions provider). If not, we still write the per-batch arrays
         # so an offline analyst has the raw data.
@@ -330,6 +560,7 @@ class SaveViTResult(Operator):
         self._canvas_origin_um = None
         self._half_h = 0
         self._half_w = 0
+        self._pending_frames.clear()
 
     def _ensure_canvas(self, patch_h: int, patch_w: int, positions_um: np.ndarray) -> bool:
         """Allocate canvas + counts on first batch. Returns True if ready."""
@@ -379,10 +610,50 @@ class SaveViTResult(Operator):
         y_max_um = float(np.nanmax(positions_um[finite, 1]))
         x_obs_um = x_max_um - x_min_um
         y_obs_um = y_max_um - y_min_um
-        x_range_um = max(x_obs_um, self._x_range_um * self._overshoot_factor)
-        y_range_um = max(y_obs_um, self._y_range_um * self._overshoot_factor)
-        x_mid_um = 0.5 * (x_min_um + x_max_um)
-        y_mid_um = 0.5 * (y_min_um + y_max_um)
+        if self._overshoot_factor >= 1.0:
+            # Safety mode: canvas is at least as large as the observed range
+            # so no frames are dropped due to encoder overshoot.
+            x_range_um = max(x_obs_um, self._x_range_um * self._overshoot_factor)
+            y_range_um = max(y_obs_um, self._y_range_um * self._overshoot_factor)
+        else:
+            # Crop mode: canvas is intentionally smaller than the commanded
+            # range; frames that land outside are dropped with a warning.
+            # Use this to trim the low-coverage border from the mosaic.
+            x_range_um = self._x_range_um * self._overshoot_factor
+            y_range_um = self._y_range_um * self._overshoot_factor
+
+        # When the canvas is allocated before the slow axis has traversed
+        # more than half its commanded range (e.g. at the start of a raster
+        # scan the slow/y axis barely moves during the first
+        # PointProcessorOp batch), the naive midpoint of observed positions
+        # is biased toward the scan start.  This shifts the canvas origin so
+        # that the far end of the scan falls outside the canvas.
+        #
+        # Fix: infer the scan direction from the sign of the last-minus-first
+        # finite value along each axis, then project the canvas centre to the
+        # midpoint of the *commanded* range, not the observed one.
+        def _estimate_mid(obs_min, obs_max, obs_range, cmd_range, finite_vals):
+            if obs_range >= cmd_range * 0.5 or cmd_range <= 0:
+                return 0.5 * (obs_min + obs_max)
+            # Only a fraction of the commanded range is visible.  Infer scan
+            # direction from the available positions and compute the midpoint.
+            direction = float(np.sign(finite_vals[-1] - finite_vals[0])) or -1.0
+            start = obs_max if direction < 0 else obs_min
+            return start + direction * cmd_range / 2.0
+
+        x_finite_vals = positions_um[finite, 0]
+        y_finite_vals = positions_um[finite, 1]
+        x_mid_um = _estimate_mid(x_min_um, x_max_um, x_obs_um,
+                                  self._x_range_um, x_finite_vals)
+        y_mid_um = _estimate_mid(y_min_um, y_max_um, y_obs_um,
+                                  self._y_range_um, y_finite_vals)
+        self._logger.info(
+            "ViT mosaic canvas centring: "
+            "x(slow): obs=[%.3f..%.3f]µm range=%.3f cmd=%.3f mid=%.3f | "
+            "y(fast): obs=[%.3f..%.3f]µm range=%.3f cmd=%.3f mid=%.3f",
+            x_min_um, x_max_um, x_obs_um, self._x_range_um, x_mid_um,
+            y_min_um, y_max_um, y_obs_um, self._y_range_um, y_mid_um,
+        )
         canvas_h = (
             int(np.ceil(y_range_um * 1e-6 / ps))
             + 2 * half_h + 2 + 2 * self._canvas_pad
@@ -425,13 +696,40 @@ class SaveViTResult(Operator):
         positions_um = self._positions_provider()
         if positions_um is None:
             return
+        # Snapshot to avoid race with PointProcessorOp writing rows concurrently.
+        positions_um = positions_um.copy()
+
+        # Merge any buffered frames (from previous batches where positions
+        # were NaN) that now have finite positions into this batch.
+        if self._pending_frames:
+            now_ready = [
+                (p, i) for p, i in self._pending_frames
+                if i < len(positions_um) and np.isfinite(positions_um[i]).all()
+            ]
+            self._pending_frames = [
+                (p, i) for p, i in self._pending_frames
+                if not (i < len(positions_um) and np.isfinite(positions_um[i]).all())
+            ]
+            if now_ready:
+                self._logger.debug(
+                    "ViT mosaic: re-stitching %d previously-buffered frames",
+                    len(now_ready),
+                )
+                extra_pred = np.stack([p for p, _ in now_ready], axis=0)
+                extra_idx = np.array([i for _, i in now_ready], dtype=indices.dtype)
+                pred = np.concatenate([pred, extra_pred], axis=0)
+                indices = np.concatenate([indices, extra_idx])
+
         if not self._ensure_canvas(pred.shape[-1], pred.shape[-1], positions_um):
+            # Canvas not ready yet (no finite positions) — buffer everything.
+            for i in range(len(indices)):
+                self._pending_frames.append((pred[i].copy(), int(indices[i])))
             return
 
         def _extract_channel(ch_idx: int) -> np.ndarray:
             patches = pred[:, ch_idx].astype(np.float32, copy=False)
-            if self._antidiag_flip_patches:
-                patches = patches.transpose(0, 2, 1)[:, ::-1, ::-1]
+            if self._patch_flip != 'identity':
+                patches = apply_d4(patches, self._patch_flip)
             if self._inner_crop > 0:
                 c = self._inner_crop
                 patches = patches[:, c:-c, c:-c]
@@ -443,6 +741,22 @@ class SaveViTResult(Operator):
         # Map per-frame um → canvas px. positions_um columns: 0=x, 1=y.
         sub = positions_um[indices]
         finite = np.isfinite(sub).all(axis=1)
+
+        # Buffer frames with NaN positions for retry on the next batch.
+        if not finite.all():
+            n_drop = int((~finite).sum())
+            self._logger.debug(
+                "ViT mosaic: %d/%d frames have NaN positions — buffering for retry",
+                n_drop, len(indices),
+            )
+            for i in np.where(~finite)[0]:
+                self._pending_frames.append((pred[i].copy(), int(indices[i])))
+            if len(self._pending_frames) > 500:
+                self._logger.warning(
+                    "ViT mosaic: pending buffer has %d frames — "
+                    "positions may be permanently missing (PandA data lost?)",
+                    len(self._pending_frames),
+                )
         if not finite.any():
             return
 
@@ -464,15 +778,30 @@ class SaveViTResult(Operator):
             & (px >= margin_x) & (px < canvas_w - margin_x)
         )
         if not in_bounds.any():
+            # Log the first bad frame's position against canvas bounds to help diagnose misconfig.
+            bad_x, bad_y = float(x_um[0]), float(y_um[0])
+            canvas_x_min = ox_um + margin_x * ps * 1e6
+            canvas_x_max = ox_um + (canvas_w - margin_x) * ps * 1e6
+            canvas_y_min = oy_um + margin_y * ps * 1e6
+            canvas_y_max = oy_um + (canvas_h - margin_y) * ps * 1e6
             self._logger.warning(
                 "ViT mosaic: all %d frames in batch fall outside canvas — "
-                "increase overshoot_factor", int(finite.sum()),
+                "increase overshoot_factor. "
+                "Sample frame: x(slow)=%.3fµm canvas_x=[%.3f..%.3f] "
+                "y(fast)=%.3fµm canvas_y=[%.3f..%.3f]",
+                int(finite.sum()),
+                bad_x, canvas_x_min, canvas_x_max,
+                bad_y, canvas_y_min, canvas_y_max,
             )
             return
         if not in_bounds.all():
+            n_out = int((~in_bounds).sum())
+            out_mask = ~in_bounds
             self._logger.warning(
-                "ViT mosaic: %d/%d frames in batch fall outside canvas — clipping",
-                int((~in_bounds).sum()), int(finite.sum()),
+                "ViT mosaic: %d/%d frames in batch fall outside canvas — clipping. "
+                "First outside: x(slow)=%.3fµm y(fast)=%.3fµm",
+                n_out, int(finite.sum()),
+                float(x_um[out_mask][0]), float(y_um[out_mask][0]),
             )
         positions_px = np.empty((int(in_bounds.sum()), 2), dtype=np.float64)
         positions_px[:, 0] = py[in_bounds]
@@ -481,43 +810,63 @@ class SaveViTResult(Operator):
         phase_batch = phase[finite_idx]
         amp_batch = amp[finite_idx]
 
+        # Diagnostic: log pixel positions so we can verify the mapping.
+        if self.batch_num == 0:
+            self._logger.info(
+                "Stitch batch 0: canvas=%dx%d, "
+                "x(slow)=[%.3f..%.3f]µm -> col=[%.1f..%.1f]px, "
+                "y(fast)=[%.3f..%.3f]µm -> row=[%.1f..%.1f]px",
+                canvas_h, canvas_w,
+                float(x_um.min()), float(x_um.max()),
+                float(positions_px[:, 1].min()), float(positions_px[:, 1].max()),
+                float(y_um.min()), float(y_um.max()),
+                float(positions_px[:, 0].min()), float(positions_px[:, 0].max()),
+            )
+            for k in range(min(5, len(positions_px))):
+                self._logger.info(
+                    "  frame %d: y(fast)=%.4fµm->row=%.1f  x(slow)=%.4fµm->col=%.1f",
+                    int(finite_idx[k]),
+                    float(y_um[in_bounds][k]), float(positions_px[k, 0]),
+                    float(x_um[in_bounds][k]), float(positions_px[k, 1]),
+                )
+        else:
+            self._logger.debug(
+                "Stitch batch %d: x(slow)=[%.3f..%.3f]µm col=[%.1f..%.1f]px "
+                "y(fast)=[%.3f..%.3f]µm row=[%.1f..%.1f]px covered=%.1f%%",
+                self.batch_num,
+                float(x_um.min()), float(x_um.max()),
+                float(positions_px[:, 1].min()), float(positions_px[:, 1].max()),
+                float(y_um.min()), float(y_um.max()),
+                float(positions_px[:, 0].min()), float(positions_px[:, 0].max()),
+                100.0 * float((self._counts >= 0.5).mean()),
+            )
+
         try:
-            self._mosaic, self._counts = stitch_batch_into(
+            self._mosaic, self._counts, _bbox = stitch_batch_livestitch_into(
                 self._mosaic,
                 self._counts,
                 phase_batch,
                 positions_px,
-                pad=self._fourier_pad,
             )
         except Exception:
-            self._logger.exception("stitch_batch_into (phase) failed (skipping batch)")
+            self._logger.exception("stitch_batch_livestitch_into (phase) failed (skipping batch)")
             return
 
         try:
-            self._mosaic_amp, self._counts_amp = stitch_batch_into(
+            self._mosaic_amp, self._counts_amp, _ = stitch_batch_livestitch_into(
                 self._mosaic_amp,
                 self._counts_amp,
                 amp_batch,
                 positions_px,
-                pad=self._fourier_pad,
             )
         except Exception:
-            self._logger.exception("stitch_batch_into (amp) failed")
+            self._logger.exception("stitch_batch_livestitch_into (amp) failed")
             self._mosaic_amp = None
             self._counts_amp = None
 
-        # Bounding box of the patches just placed, in **uncropped** canvas
-        # pixel coords. MosaicWriterOp uses this to patch only the affected
-        # subregion to Tiled, instead of pushing the full 36 MB canvas every
-        # batch. Margin = half the cropped patch size + Fourier pad slop.
+        # Bounding box comes directly from the livestitch return value.
         canvas_h, canvas_w = self._mosaic.shape
-        ph, pw = phase_batch.shape[-2:]
-        margin_y = ph // 2 + self._fourier_pad + 1
-        margin_x = pw // 2 + self._fourier_pad + 1
-        py_min = int(np.floor(positions_px[:, 0].min())) - margin_y
-        py_max = int(np.ceil(positions_px[:, 0].max())) + margin_y
-        px_min = int(np.floor(positions_px[:, 1].min())) - margin_x
-        px_max = int(np.ceil(positions_px[:, 1].max())) + margin_x
+        py_min, py_max, px_min, px_max = _bbox
 
         # Crop the canvas_pad border before handing off — the padding pixels
         # are needed internally for FFT wrap-around safety but should not be
@@ -572,6 +921,7 @@ class SaveViTResult(Operator):
             self._pixel_size_m,
             origin_snap,
             bbox,
+            self._min_overlap_count,
         )
 
     def setup(self, spec: OperatorSpec):
@@ -588,21 +938,19 @@ class SaveViTResult(Operator):
             spec.output("vit_batch").condition(ConditionType.NONE)
 
     def start(self):
-        # Numba JIT-compiles ``stitch_batch_into`` (and its FFT helpers) on
-        # the first call — ~1–2 s on the very first batch otherwise. Burn
-        # that cost here with a 2-frame dummy so the first real batch hits a
-        # warm cache.
+        # Warm up stitch_batch_nearest on the first call to avoid a JIT
+        # compile delay on the first real batch.
         try:
-            dummy_canvas = np.zeros((16, 16), dtype=np.float32)
+            dummy_canvas = np.zeros((32, 32), dtype=np.float32)
             dummy_counts = np.zeros_like(dummy_canvas)
-            dummy_patches = np.zeros((1, 4, 4), dtype=np.float32)
-            dummy_positions = np.array([[8.0, 8.0]], dtype=np.float64)
-            stitch_batch_into(
-                dummy_canvas, dummy_counts, dummy_patches, dummy_positions, pad=2,
+            dummy_patches = np.zeros((1, 8, 8), dtype=np.float32)
+            dummy_positions = np.array([[16.0, 16.0]], dtype=np.float64)
+            stitch_batch_nearest(
+                dummy_canvas, dummy_counts, dummy_patches, dummy_positions,
             )
-            self._logger.info("SaveViTResult: numba stitch kernel pre-compiled")
+            self._logger.info("SaveViTResult: stitch kernel pre-warmed")
         except Exception:
-            self._logger.exception("Numba pre-warm failed (non-fatal)")
+            self._logger.exception("Stitch pre-warm failed (non-fatal)")
 
     def compute(self, op_input, op_output, context):
         try:
@@ -635,6 +983,10 @@ class SaveViTResult(Operator):
             positions = None
             if self._positions_provider is not None:
                 positions = self._positions_provider()
+                if positions is not None:
+                    # Snapshot once — n_finite and the emitted array must see
+                    # the same state; PointProcessorOp writes concurrently.
+                    positions = positions.copy()
                 if positions is not None and chunk_size > 0:
                     n_finite = int(np.isfinite(positions[:, 0]).sum())
                     total_batches = (n_finite + chunk_size - 1) // chunk_size
@@ -646,7 +998,7 @@ class SaveViTResult(Operator):
             # from keeping up with the 200 Hz publish rate.
             t_pos_start = time.perf_counter()
             if positions is not None:
-                op_output.emit(positions.copy(), "positions_snapshot")
+                op_output.emit(positions, "positions_snapshot")  # already copied above
             t_pos_end = time.perf_counter()
 
             # Per-batch pred + indices export is opt-in (config field
@@ -707,13 +1059,23 @@ class MosaicWriterOp(Operator):
     def __init__(self, fragment, *args, **kwargs):
         super().__init__(fragment, *args, **kwargs)
         self._logger = logging.getLogger("holoptycho.MosaicWriterOp")
-        # First write of a run goes through the full-canvas path so the fill
-        # colour gets painted across the whole buffer (including never-stitched
-        # regions). Subsequent writes patch only the bbox of newly-placed
-        # patches, which is ~30-100× cheaper over WAN. Reset on new-scan
-        # detection in SaveViTResult (smallest index < max seen).
-        self._first_write_done = False
+        # Every write goes through the full-canvas path.  The accumulated
+        # mosaic (self._mosaic in SaveViTResult) contains ALL patches from
+        # batches 0..N, so a full-canvas write always reflects the complete
+        # state without gaps.  The capacity=1+POP drop policy governs update
+        # rate: while a write is in progress the latest snapshot evicts older
+        # ones, so we write at whatever rate Tiled can keep up with.
+        #
+        # The prior bbox-only optimisation (patching only the newly-stitched
+        # region each batch) was ~10× cheaper per write but caused a staircase
+        # artifact: while the first full-canvas write ran (~30 s), ~100
+        # intermediate snapshots were dropped.  The early scan lines' low-row
+        # data fell exclusively in those dropped batches and was permanently
+        # absent from Tiled because the unidirectional scan never revisited
+        # those columns.
         self._last_seen_batch_num = -1
+        self._fill_value = 0.0
+        self._fill_value_amp = 0.0
 
     def setup(self, spec: OperatorSpec):
         # capacity=1 + POP gives single-slot, latest-wins semantics: while
@@ -735,86 +1097,54 @@ class MosaicWriterOp(Operator):
             return
         try:
             (mosaic, counts, mosaic_amp, counts_amp, batch_num, pixel_size_m,
-             canvas_origin_um, bbox, total_batches, chunk_size) = snap
+             canvas_origin_um, bbox, min_overlap_count, total_batches, chunk_size) = snap
             t0 = time.perf_counter()
 
             # Reset on new-scan detection: SaveViTResult resets batch_num to 0
-            # at the start of each scan. We mirror that here so the next first
-            # write goes through the full-canvas path again.
+            # at the start of each scan.
             if batch_num < self._last_seen_batch_num:
-                self._first_write_done = False
+                self._fill_value = 0.0
+                self._fill_value_amp = 0.0
             self._last_seen_batch_num = batch_num
 
-            # Threshold counts at 0.5 (not 0) to suppress FFT-leakage tails
-            # from the Fourier-shift placement, which deposit tiny non-zero
-            # counts well outside the patch footprints.
-            def _normalise_full(m: np.ndarray, c: np.ndarray) -> np.ndarray:
-                valid = c >= 0.5
+            # Always write the full canvas.  The mosaic handed to us is the
+            # *cumulative* accumulation from SaveViTResult (patches 0..N), so
+            # a full-canvas write is always a complete, correct snapshot
+            # regardless of which intermediate snapshots the POP queue dropped.
+            # This prevents the staircase artifact caused by the bbox-only
+            # optimisation: while a full-canvas write is in progress (~30 s),
+            # all intermediate bbox snapshots were evicted by the drop policy,
+            # permanently losing early-scan-line data that fell in those batches.
+            def _normalise_full(m: np.ndarray, c: np.ndarray):
+                valid = c >= min_overlap_count
                 if valid.any():
                     avg = m / np.where(valid, c, 1.0)
                     fill = float(np.median(avg[valid]))
-                    return np.where(valid, avg, fill).astype(np.float32)
-                return np.zeros_like(m, dtype=np.float32)
+                    out = np.where(valid, avg, np.nan).astype(np.float32)
+                    return fill, out
+                return 0.0, np.full_like(m, np.nan, dtype=np.float32)
 
-            def _normalise_sub(m: np.ndarray, c: np.ndarray) -> np.ndarray:
-                # Write avg_sub directly; unfilled pixels inside the bbox get
-                # the local average (close to the seeded fill), and the visual
-                # seam is negligible since the bbox tightly hugs new patches.
-                valid_sub = c >= 0.5
-                return (m / np.where(valid_sub, c, 1.0)).astype(np.float32)
-
-            if not self._first_write_done:
-                # Full-canvas write seeds the buffer with the fill colour
-                # everywhere so unfilled regions don't render as black.
-                normalised = _normalise_full(mosaic, counts)
-                t_norm = time.perf_counter()
-                _writer.write_vit_mosaic(
-                    normalised,
+            self._fill_value, normalised = _normalise_full(mosaic, counts)
+            t_norm = time.perf_counter()
+            _writer.write_vit_mosaic(
+                normalised,
+                batch_num=batch_num,
+                pixel_size_m=pixel_size_m,
+                canvas_origin_um=canvas_origin_um,
+            )
+            if mosaic_amp is not None and counts_amp is not None:
+                self._fill_value_amp, norm_amp = _normalise_full(mosaic_amp, counts_amp)
+                _writer.write_vit_amp_mosaic(
+                    norm_amp,
                     batch_num=batch_num,
                     pixel_size_m=pixel_size_m,
                     canvas_origin_um=canvas_origin_um,
                 )
-                if mosaic_amp is not None and counts_amp is not None:
-                    _writer.write_vit_amp_mosaic(
-                        _normalise_full(mosaic_amp, counts_amp),
-                        batch_num=batch_num,
-                        pixel_size_m=pixel_size_m,
-                        canvas_origin_um=canvas_origin_um,
-                    )
-                t_done = time.perf_counter()
-                self._first_write_done = True
-                self._logger.info(
-                    "MosaicWriterOp: chunk %d/%d (%d frames) FULL "
-                    "normalize=%.0f ms write=%.0f ms",
-                    batch_num + 1, total_batches, chunk_size,
-                    (t_norm - t0) * 1000, (t_done - t_norm) * 1000,
-                )
-                return
-
-            # Incremental path: normalise + patch only the bbox of patches
-            # placed in this batch (phase + amp in parallel).
-            y0, y1, x0, x1 = bbox
-            if y1 <= y0 or x1 <= x0:
-                return  # empty bbox; nothing to write
-            normalised_sub = _normalise_sub(mosaic[y0:y1, x0:x1], counts[y0:y1, x0:x1])
-            t_norm = time.perf_counter()
-            _writer.patch_vit_mosaic(
-                normalised_sub,
-                offset_yx=(y0, x0),
-                batch_num=batch_num,
-            )
-            if mosaic_amp is not None and counts_amp is not None:
-                _writer.patch_vit_amp_mosaic(
-                    _normalise_sub(mosaic_amp[y0:y1, x0:x1], counts_amp[y0:y1, x0:x1]),
-                    offset_yx=(y0, x0),
-                    batch_num=batch_num,
-                )
             t_done = time.perf_counter()
             self._logger.info(
-                "MosaicWriterOp: chunk %d/%d (%d frames) bbox=%dx%d "
+                "MosaicWriterOp: chunk %d/%d (%d frames) FULL "
                 "normalize=%.0f ms write=%.0f ms",
                 batch_num + 1, total_batches, chunk_size,
-                y1 - y0, x1 - x0,
                 (t_norm - t0) * 1000, (t_done - t_norm) * 1000,
             )
         except Exception:

@@ -87,6 +87,7 @@ python = ">=3.12"
 numpy = ">=1.20"
 pyzmq = ">=26.0"
 matplotlib = ">=3.10.9,<4"
+h5py = ">=3.12"
 
 [feature.replay.pypi-dependencies]
 tiled = {version = ">=0.1", extras = ["client"]}
@@ -108,8 +109,8 @@ Cython = ">=3.0.11"
 pyFFTW = ">=0.15"
 pyqt5 = "*"
 holoptycho = { path = ".", editable = true }
-ptycho = { git = "ssh://git@github.com/NSLS2/ptycho.git", branch = "master" }
-ptychoml = { git = "ssh://git@github.com/NSLS2/ptychoml.git", branch = "main" }
+ptycho = { path = "../ptycho", editable = true }
+ptychoml = { path = "../ptychoml", editable = true }
 fastapi = ">=0.110"
 uvicorn = {version = ">=0.29", extras = ["standard"]}
 httpx = ">=0.27"
@@ -127,3 +128,4 @@ api = "bash -c 'SERVER_STREAM_SOURCE=${SERVER_STREAM_SOURCE:-tcp://localhost:555
 
 [feature.replay.tasks]
 replay = "python scripts/replay_from_tiled.py"
+dump-scan-h5 = "python scripts/dump_scan_h5.py"
