@@ -799,12 +799,24 @@ replay because the ViT branch was hard-coded to `gpu=1`. Fixed builds fall back
 to GPU 0 when only one configured GPU is available.
 
 On single-GPU nodes with `recon_mode='vit'`, older builds crash with `rc=-6`
-(SIGABRT) immediately after auto-centering. Root cause: `PtychoRecon.__init__`
-called `gpu_setup()` unconditionally, creating a CuPy CUDA context on GPU 0
-even in vit-only mode. When `PtychoViTInferenceOp` then opened a PyCUDA context
-on the same GPU from a different thread, the two contexts clashed. Fixed by
-guarding `PtychoRecon` instantiation behind `recon_mode in ("iterative", "both")`
-and computing pixel sizes directly from config params in the vit-only path.
+(SIGABRT) immediately after auto-centering. The crash appears to be a context
+clash but is actually **one PyCUDA context on the wrong thread**. Root cause:
+`PtychoViTInferenceOp.start()` called `_init_session()` eagerly, creating a
+PyCUDA CUDA context on the Holoscan framework startup thread. Holoscan's
+`MultiThreadScheduler` then runs `compute()` on a worker thread, which has no
+CUDA context attached — PyCUDA contexts are thread-local. When `predict()` is
+called in `compute()`, the missing context causes a CUDA assertion → SIGABRT.
+Fixed by removing the eager `_init_session()` from `start()`. The lazy
+`_init_session()` call already present in `_compute_inner()` creates the
+context on the correct worker thread and is now the only initialization path.
+This fix applies to all `recon_mode` values, not just `vit`.
+
+Note: an earlier theory blamed a CuPy + PyCUDA cross-thread clash when both
+`PtychoRecon` and `PtychoViTInferenceOp` ran on the same GPU. That guard
+(`recon_mode in ("iterative", "both")` before `PtychoRecon` creation) remains
+correct and prevents a separate class of issue, but the SIGABRT in vit-only
+mode had a different root cause (wrong-thread context) that the guard alone
+did not fix.
 
 If replay publishes successfully but `hp status` reports an error like
 `New scan dimensions (...x...) exceed pre-allocated maximum (...x...)`, the
@@ -842,22 +854,18 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   dashboard hangs. Kill any running replay (`pkill -f replay_from_tiled`)
   before launching a new one.
 
-* **`--no-hp-start` now polls for pipeline readiness.** Older versions started
-  publishing immediately, racing against the ZMQ SUB connection and dropping
-  the first N frames — causing `FrameWriterOp: first batch starts at scan
-  frame N, expected 0` and aborting the run. The replay script now calls
-  `_wait_for_pipeline_ready()` in the `--no-hp-start` path, which polls
-  `GET /status` until `pipeline_ready: true` before publishing. The same
-  readiness gate (`_pipeline_ready` event → sentinel file → `/run` unblocks)
-  is used by `--hp-start` (server-side blocking); `--no-hp-start` mirrors it
-  client-side.
+* **The Eiger PUB socket is pre-bound in both `--hp-start` and `--no-hp-start`.**
+  The replay script binds the PUB socket *before* calling `/run`/`/restart`
+  (in `--hp-start`) or *before* calling `_wait_for_pipeline_ready` (in
+  `--no-hp-start`). This ensures `EigerZmqRxOp.connect()` always finds a live
+  endpoint, so the ZMQ SUBSCRIBE handshake completes well before the first
+  frame is published. In `--no-hp-start`, binding before the wait gives the
+  full `pipeline_ready` poll window for the handshake to finish — critical
+  when the pipeline has been running for a while and ZMQ's reconnect backoff
+  would exceed the 0.5 s sleep that was previously the only guard against the
+  slow-joiner race.
 
-  In the `--hp-start` path, the replay script now also binds the Eiger PUB
-  socket **before** calling `/run` or `/restart`. This ensures
-  `EigerZmqRxOp.connect()` (which fires during `compose()`) finds a live
-  endpoint and the ZMQ SUBSCRIBE handshake completes during the startup
-  window — before any frames are published. This eliminates the slow-joiner
-  race entirely for the `--hp-start` path, which is the default.
+* **`--tiled-workers` (default 4) — parallel tiled HTTP fetchers.** The script uses a `ThreadPoolExecutor` to prefetch frame chunks from the Tiled server concurrently. All workers share the same httpx connection pool (typically ~10 connections). Values above ~8 cause `httpx.PoolTimeout` crashes when all pool slots are held by long-running fetches and new requests time out waiting for a free connection. The default of 4 is conservative but reliable; raise to 6–8 on fast networks if chunks arrive too slowly. Transient `PoolTimeout` errors are retried with exponential backoff (2 → 4 → 8 → 16 → 32 s, up to 5 retries) before aborting.
 
 * **`panda_upsample` (config field, default 1) — raw encoder samples per
   detector frame.** `PointProcessorOp` averages each group of this many raw
@@ -865,30 +873,45 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   use 1 (no averaging); the replay script auto-detects the ratio from
   `len(encoder_array) // n_frames` and forwards it via the hp config. The
   beamline's prod config is currently set to 10, matching a historical
-  assumption that HXN PandA oversamples 10×. **Open question:** the 10×
-  story hasn't been verified against current PandA firmware — if the real
-  beamline emits 1:1 or some other ratio today, position averaging is
-  either redundant or wrong. Worth confirming with the beamline team and
-  potentially reducing pipeline complexity.
+  assumption that HXN PandA oversamples 10×. `config_from_tiled.py` also
+  auto-detects this from the encoder/detector array shapes so that
+  `hp start "$(config-from-tiled --scan-id N)"` always sets the right value;
+  missing it causes the y-axis to compress by exactly the upsample factor
+  (e.g. `panda_upsample=1` for a 10× scan → y span shrinks 10×, mosaic
+  appears as a narrow horizontal strip).
 
-* **`auto_center_dp` (config field, default `true`) — one-shot diffraction
+* **`auto_center_dp` (config field, default `false`) — one-shot diffraction
   centering via scipy segmentation.** `ImagePreprocessorOp` averages the
   first batch (typically 64 frames), masks hot pixels at detector
   saturation, thresholds at 5% of peak, runs `scipy.ndimage.label` to find
   connected components, takes the centroid of the largest one, and shifts
   every subsequent batch (and the intensity tap) so that centroid lands
-  at the canvas centre. Averaging over the first batch protects against
-  the odd empty/saturated first frame. If no object passes the threshold
-  (truly blank first batch), no shift is applied. Set to `false` if the
-  operator has already centered manually via `batch_x0`/`batch_y0`.
+  at the canvas centre. **Disabled by default** because this shift is not
+  part of ptychoml's preprocessing pipeline and displaces the beam from
+  the position the model was trained on. Enable only when the detector ROI
+  is too far off-centre to correct via `batch_x0`/`batch_y0`.
+
+* **`patch_flip` (config field, default `'identity'`) — D4 transform applied to each ViT output patch before stitching.** The default `'identity'` applies no transform. The `stitch_batch_livestitch_into` function additionally applies a `patches[:, ::-1, :]` vertical flip (inherited intentionally from the Fourier-shift path for coordinate system reasons). `patch_flip` is an extra transform on top of that flip. Set to a D4 name (`'flipud'`, `'fliplr'`, `'rot90_cw'`, etc.) only when a specific model requires additional axis correction beyond the built-in flip.
+
+* **Mosaic stitching: staircase artifact (FIXED in `vit_inference.py` — `MosaicWriterOp`).** The first `MosaicWriterOp` write (full-canvas seed) takes ~30 s for a typical HXN mosaic (~5 MB over WAN). During that 30 s, the `capacity=1 + QueuePolicy.POP` queue evicts ~100 intermediate snapshots. Those dropped snapshots were the only ones that covered the **second half of early scan lines** (the low-row / early fast-axis frames of the first-scanned slow-axis columns). Since the scan is unidirectional, those columns are never revisited by any later bbox write, so their low-row data is permanently absent from Tiled → **staircase** where first-scanned columns (rightmost canvas) are missing their top ~40–50 % rows. **Root cause: the bbox-only optimisation for batches 2+ was unsound** — a bbox patch for batch N covers only the region *newly* stitched by batch N, not any cumulative data from the dropped batches 1..N-1. **Fix: always write the full accumulated canvas** (remove the `_first_write_done` bbox branch). The cumulative `self._mosaic` in `SaveViTResult` already contains all patches from batches 0..N, so a full-canvas write always produces a complete, staircase-free mosaic. Update rate is now ~1 write per Tiled PUT latency (~30 s) instead of ~1 per batch, which is acceptable for live display.
+
+* **Mosaic stitching: canvas centring bias (FIXED in `vit_inference.py`).** When `_ensure_canvas` is first called, `PointProcessorOp` (with `min_points=300`) has only computed positions for the first ~300 frames — roughly the first 2-3 rows of a raster scan.  For the **slow (y) axis** this means only ~0.2 µm of a 16 µm commanded range is visible.  The naive midpoint `0.5 * (y_min + y_max)` of those positions sits at the very top of the scan (e.g. +7.9 µm) instead of the true centre (~0 µm), so the canvas origin is shifted ~10 µm too high.  Frames from the bottom ~60 % of the scan fall above canvas row 0 and are clipped, producing horizontal banding from the incoherent overlap of misplaced patches.  **Fix (in `_ensure_canvas`):** when the observed range along an axis is less than half the commanded range, infer the scan direction from the sign of the last-minus-first finite value and project the canvas centre to `scan_start + direction × cmd_range / 2`. This correctly centres the canvas on the full scan from the very first allocation, regardless of how few rows have been seen.
+
+* **Mosaic stitching: NaN-position race condition (FIXED in `vit_inference.py`).** When `SaveViTResult._stitch_batch()` processes a ViT batch, it looks up `positions_um[indices]` from the array written by `PointProcessorOp`. If `PointProcessorOp` is momentarily behind (PandA messages not yet processed), some entries are still NaN. Previously those frames were silently dropped and never re-stitched, causing **inconsistent horizontal banding** where affected rows appear empty or sparse — and the pattern varied between runs because it depends on scheduling timing. **Fix:** dropped frames are stored in `SaveViTResult._pending_frames` (as `(pred_2hw, frame_idx)` tuples) and merged into the next batch once their positions arrive. The buffer warns at 500 frames to catch cases where PandA data is permanently lost.
 
 * **`mosaic_overshoot_factor` (config field, default 1.2) — canvas safety
-  margin for the ViT mosaic.** Sized as `max(observed_range, commanded_range
-  × overshoot)`. 1.2 means the canvas is 20% bigger than the commanded
-  scan extent — fine for scans where encoders stay near commanded. HXN
-  scans with settling-row overshoot (e.g. 404611: commanded 2 µm → observed
-  6 µm) need a larger value (3.0). Off-canvas frames are dropped with a
-  warning, so under-sizing degrades the mosaic but doesn't crash the run.
+  margin for the ViT mosaic.** When `>= 1.0`: sized as `max(observed_range,
+  commanded_range × overshoot)` — the canvas is at least as large as the
+  observed scan extent, preventing edge frames from being dropped. 1.2 means
+  the canvas is 20% bigger than the commanded scan extent — fine for scans
+  where encoders stay near commanded. HXN scans with settling-row overshoot
+  (e.g. 404611: commanded 2 µm → observed 6 µm) need a larger value (3.0).
+  When `< 1.0`: **crop mode** — the canvas is sized to
+  `commanded_range × overshoot_factor` directly, with no observed-range floor.
+  Frames that fall outside the canvas are dropped with a warning. Use values
+  like 0.8–0.9 to trim the low-coverage border from the stitched mosaic.
+  Off-canvas frames are dropped with a warning, so under-sizing degrades the
+  mosaic but doesn't crash the run.
 
 * **`frame_write_stride` (config field, default 1000 for `recon_mode='vit'`,
   else 1) — detector-frame downsampling for tiled writes.** Persisting every
@@ -987,9 +1010,10 @@ hxn/processed/holoptycho/
       mosaic         ← server-side stitched phase mosaic, overwritten each
                        ViT batch (counts-normalised, Fourier-shift placed via
                        holoptycho.mosaic_stitch.place_patches_fourier_shift).
-                       Unfilled pixels are filled with the median of the valid
-                       region — tiled's PNG renderer treats NaN as 0, which
-                       wrecks contrast scaling.
+                       Unfilled and low-coverage pixels (below mosaic_min_overlap
+                       count threshold) are set to NaN; Tiled's PNG renderer
+                       maps NaN → 0, giving a dark unobtrusive border that does
+                       not inflate the colormap range of the actual scan data.
       batches/
         000000/      ← append-only per-batch history
           pred

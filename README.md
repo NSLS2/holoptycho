@@ -236,7 +236,8 @@ the config the replay script POSTs to holoptycho):
 
 ## Development container
 
-On hosts with a glibc too old to run the pixi env directly (e.g. older RHEL), use [`start_editable.sh`](start_editable.sh) to drop into a minimal CUDA+pixi container with the repo bind-mounted. Edit, commit, and push from the host as normal; only run code inside the container.
+On hosts with a glibc too old to run the pixi env directly (e.g. older RHEL), use [`export TILED_BASE_URL=https://tiled.nsls2.bnl.gov
+pixi run -e replay replay --scan-id 405667 --mode vit --no-hp-starttable.sh`](start_editable.sh) to drop into a minimal CUDA+pixi container with the repo bind-mounted. Edit, commit, and push from the host as normal; only run code inside the container.
 
 ```bash
 ./start_editable.sh

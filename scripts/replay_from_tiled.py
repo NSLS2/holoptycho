@@ -531,28 +531,27 @@ def setup_scan_from_tiled(
 
 def iter_frame_chunks(
     streams: dict, head_frames: np.ndarray, chunk_size: int,
-    n_workers: int = 16,
+    n_workers: int = 4,
 ):
     """Yield chunks of detector frames; tiled fetches run in a worker pool.
 
     Tiled HTTPS read tops out around 1-2 MB/s per connection. A single
     fetcher gates the replay at ~15-22 s per 128 MB chunk
-    (chunk_size=1024 × 256x256 uint16). Each parallel fetcher uses its own
-    httpx connection and tiled handles concurrent range requests fine, so
-    we get roughly n_workers× aggregate throughput up to the server cap.
+    (chunk_size=1024 × 256x256 uint16). Multiple parallel fetchers provide
+    throughput in excess of one connection's share, up to the tiled server
+    limit. The default of 4 workers stays well within the httpx connection
+    pool (typically ~10 connections) to avoid ``httpx.PoolTimeout`` when
+    all pool slots are held by long-running chunk fetches.
 
-    n_workers must be large enough that the in-flight chunks cover the
-    publisher's drain time. With 16 workers × ~1 s drain per chunk we
-    have ~16 s of buffered drain, which covers a single fetch even at the
-    slowest observed rate (~16 s/chunk). With only 4 workers the
-    publisher stalls for 15-17 s waiting for the next chunk roughly every
-    4 chunks, which manifests as 5-second-on / 15-second-off bursts at
-    the pipeline's ZMQ subscriber.
+    Increasing n_workers beyond the pool limit causes requests to pile up
+    waiting for a free connection; when they wait longer than the httpx
+    pool_timeout (5 s by default) they raise ``PoolTimeout`` and abort the
+    replay. Keep n_workers <= 8 unless you configure a larger httpx pool.
 
     Order is preserved with a sliding window: at most ``n_workers`` fetches
     are in flight, and ``yield`` waits on them in submission order. Memory
-    peak is ``n_workers * chunk_size * frame_bytes`` (~512 MB at the default
-    chunk_size=1024 with 16 workers; ~2 GB if you push n_workers to 64).
+    peak is ``n_workers * chunk_size * frame_bytes`` (~128 MB at the default
+    chunk_size=1024 with 4 workers).
 
     ``head_frames`` is the eager auto-detect read from
     :func:`setup_scan_from_tiled`; we yield it as-is to avoid re-reading
@@ -583,14 +582,46 @@ def iter_frame_chunks(
         # Prime the pool with up to n_workers pending fetches.
         while idx < len(ranges) and len(pending) < n_workers:
             s, e = ranges[idx]
-            pending.append(ex.submit(_fetch_frame_chunk, frames_node, frame_axis, s, e))
+            f = ex.submit(_fetch_frame_chunk, frames_node, frame_axis, s, e)
+            f._range = (s, e)
+            pending.append(f)
             idx += 1
         # Yield in submission order; submit a new fetch for each one we drain.
         while pending:
-            chunk = pending.popleft().result()
+            fut = pending.popleft()
+            # Retry on transient httpx.PoolTimeout (pool slot contention).
+            # Back off briefly and re-submit the same range rather than
+            # aborting the whole replay.
+            retries_left = 5
+            while True:
+                try:
+                    chunk = fut.result()
+                    break
+                except Exception as exc:
+                    if retries_left > 0 and "PoolTimeout" in type(exc).__name__:
+                        retries_left -= 1
+                        import time
+                        wait = 2 ** (5 - retries_left)  # 2, 4, 8, 16, 32 s
+                        print(
+                            f"[tiled] PoolTimeout fetching chunk — retrying in {wait}s "
+                            f"({retries_left} retries left)",
+                            flush=True,
+                        )
+                        time.sleep(wait)
+                        # Reuse the same range by re-submitting the failed future.
+                        # Find which range this was by peeking at chunk counters.
+                        # Simpler: keep (start, end) alongside each future.
+                        # We store them as fut._range below at submission.
+                        s2, e2 = fut._range
+                        fut = ex.submit(_fetch_frame_chunk, frames_node, frame_axis, s2, e2)
+                        fut._range = (s2, e2)
+                    else:
+                        raise
             if idx < len(ranges):
                 s, e = ranges[idx]
-                pending.append(ex.submit(_fetch_frame_chunk, frames_node, frame_axis, s, e))
+                f = ex.submit(_fetch_frame_chunk, frames_node, frame_axis, s, e)
+                f._range = (s, e)
+                pending.append(f)
                 idx += 1
             yield chunk
 
@@ -829,6 +860,16 @@ def parse_args():
              "interval (chunk_size / rate_hz) the stream stays smooth.",
     )
     parser.add_argument(
+        "--tiled-workers",
+        type=int,
+        default=4,
+        help="Number of parallel tiled HTTP fetches (default: 4). Each worker "
+             "uses one connection from the shared httpx pool. Raising this above "
+             "the pool limit (~10) causes httpx.PoolTimeout crashes; lower it "
+             "if you see pool timeouts, raise it on fast networks if chunks are "
+             "not arriving fast enough.",
+    )
+    parser.add_argument(
         "--compress",
         action="store_true",
         help="Bslz4-compress the published Eiger frames (matching the live "
@@ -920,31 +961,40 @@ def main():
             flush=True,
         )
 
+    # Pre-bind the Eiger PUB socket in both paths.  Binding before the
+    # pipeline starts (or before waiting for it to be ready) ensures
+    # EigerZmqRxOp.connect() always finds a live endpoint, so the ZMQ
+    # SUBSCRIBE handshake completes well before the first frame is published.
+    # In the --no-hp-start path the pipeline may have been running for
+    # an arbitrary time; if the PUB was bound only after _wait_for_pipeline_ready
+    # returned, ZMQ's reconnect backoff could exceed the 0.5 s sleep in
+    # publish_eiger and the slow-joiner race would drop the first N frames
+    # (causing FrameWriterOp to abort on the frame-0 check).
+    eiger_ctx = zmq.Context()
+    eiger_sock = eiger_ctx.socket(zmq.PUB)
+    eiger_sock.setsockopt(zmq.SNDHWM, 20000)
+    eiger_sock.bind(args.eiger_endpoint)
+    print(f"[eiger] pre-bound PUB on {args.eiger_endpoint}", flush=True)
+
     if args.hp_start:
-        # Bind the Eiger PUB socket NOW — before starting the pipeline — so
-        # that EigerZmqRxOp.connect() (which fires during compose()) finds a
-        # live endpoint. The ZMQ handshake completes during the startup window
-        # while /run blocks waiting for pipeline_ready. Publishing only starts
-        # after /run returns 200, by which time the subscription is fully
-        # established and no frames are dropped.
-        eiger_ctx = zmq.Context()
-        eiger_sock = eiger_ctx.socket(zmq.PUB)
-        eiger_sock.setsockopt(zmq.SNDHWM, 20000)
-        eiger_sock.bind(args.eiger_endpoint)
-        print(f"[eiger] pre-bound PUB on {args.eiger_endpoint} (before hp start)", flush=True)
         start_holoptycho_pipeline(args, panda_upsample=streams["panda_upsample"])
     else:
-        eiger_ctx = None
-        eiger_sock = None
-        # --no-hp-start: pipeline was started out-of-band. Still wait for the
-        # ZMQ SUB to be live before publishing — otherwise the slow-joiner race
-        # drops the first N frames and FrameWriterOp aborts on frame 0 check.
+        # --no-hp-start: pipeline was started out-of-band.  Wait for the ZMQ
+        # SUB to be live; the pre-bound PUB above gives it the full wait
+        # window to complete the handshake.
         _wait_for_pipeline_ready(args.hp_url)
+        # pipeline_ready may have been True before we even bound the PUB
+        # (e.g. user ran 'hp start' then ran replay separately). Give ZMQ
+        # time to complete the reconnect cycle after the PUB appeared.
+        # With ZMQ_RECONNECT_IVL_MAX=1000ms in datasource.py the SUB retries
+        # at most every 1 s, so 2 s is sufficient margin.
+        print("[eiger] waiting 2s for ZMQ SUB to reconnect to pre-bound PUB ...", flush=True)
+        time.sleep(2.0)
 
     # Run Eiger and PandA publishers concurrently. The Eiger thread pulls
     # chunks from tiled lazily — first chunk is the already-fetched head,
     # subsequent chunks are server-side-sliced via _fetch_frame_chunk.
-    chunks_iter = iter_frame_chunks(streams, streams["head_frames"], args.chunk_size)
+    chunks_iter = iter_frame_chunks(streams, streams["head_frames"], args.chunk_size, args.tiled_workers)
     eiger_thread = threading.Thread(
         target=publish_eiger,
         args=(

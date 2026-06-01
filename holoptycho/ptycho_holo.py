@@ -97,6 +97,8 @@ from .vit_inference import (
     MosaicWriterOp,
     PositionsWriterOp,
     BatchWriterOp,
+    find_onnx_for_engine,
+    inner_crop_from_onnx,
 )
 from .tiled_writer import get_writer
 
@@ -669,10 +671,12 @@ class PtychoApp(Application):
         self.image_batch = ImageBatchOp(self, name="image_batch")
         self.image_proc = ImagePreprocessorOp(self, name="image_proc")
         # Auto-center the diffraction pattern via scipy segmentation on the
-        # average of the first batch (default on). Set `auto_center_dp=false`
-        # in the config to disable (e.g. if the operator has already set
-        # batch_x0/batch_y0 manually and doesn't want extra refinement).
-        self.image_proc.auto_center = bool(getattr(self.param, "auto_center_dp", True))
+        # average of the first batch. Default off: this shift is not part of
+        # ptychoml's preprocessing pipeline and displaces the beam from the
+        # model's expected position. Enable via auto_center_dp=true in the
+        # scan JSON only when the detector ROI is too far off-centre to use
+        # batch_x0/batch_y0 correction instead.
+        self.image_proc.auto_center = bool(getattr(self.param, "auto_center_dp", False))
         # Geometry + normalization for the two output branches. See
         # ImagePreprocessorOp docstrings for what each does. Defaults reproduce
         # the prior hardcoded HXN chain for the D4 transforms (antidiag tap +
@@ -870,10 +874,23 @@ class PtychoApp(Application):
         # DC-convention handling is auto-detected end-to-end by ptychoml
         # (ImagePreprocessorOp's preprocess_diffraction + the session's
         # own check); no manual flag needed here.
+        # preprocess_kwargs is forwarded to ptychoml.autodetect_orientation's
+        # internal preprocess_diffraction calls so the sweep uses the same
+        # normalization/scale/hot-pixel settings as the live pipeline.
+        # dp_orient is intentionally excluded — it's the sweep variable.
+        _preprocess_kwargs = {
+            "normalization": float(self.image_proc.normalization),
+            "scale": float(self.image_proc.scale),
+            "hot_pixel_count_threshold": self.image_proc.hot_pixel_count_threshold,
+            "fftshift": self.image_proc.fftshift_dp,
+        }
         self.vit = PtychoViTInferenceOp(
             self,
             engine_path=self.engine_path,
             gpu=vit_gpu,
+            image_proc=self.image_proc,
+            positions_provider=lambda: self.point_proc.positions_um,
+            preprocess_kwargs=_preprocess_kwargs,
             name="vit_inference",
         )
         # SaveViTResult publishes positions_um alongside each batch and
@@ -888,15 +905,39 @@ class PtychoApp(Application):
         # 6 µm needs ≥3.0). Off-canvas frames trigger a warning in
         # SaveViTResult and are dropped.
         mosaic_overshoot = float(getattr(self.param, "mosaic_overshoot_factor", 1.2))
+        _inner_crop_cfg = int(getattr(self.param, "inner_crop", 0))
+        if _inner_crop_cfg > 0:
+            # Explicit config value wins.
+            _inner_crop = _inner_crop_cfg
+        else:
+            # Try to derive inner_crop from the probe baked into the ONNX.
+            # Falls back to None (auto-derive in SaveViTResult) when the ONNX
+            # is not available or the probe cannot be extracted.
+            _onnx_path = find_onnx_for_engine(self.engine_path)
+            if _onnx_path is not None:
+                _inner_crop = inner_crop_from_onnx(_onnx_path)
+                if _inner_crop is not None:
+                    import logging as _log
+                    _log.getLogger("holoptycho.PtychoApp").info(
+                        "inner_crop=%d derived from probe in %s",
+                        _inner_crop, _onnx_path.name,
+                    )
+                else:
+                    _inner_crop = None  # SaveViTResult will auto-derive
+            else:
+                _inner_crop = None  # SaveViTResult will auto-derive
+        _min_overlap = float(getattr(self.param, "mosaic_min_overlap", 0.5))
         self.vit_save = SaveViTResult(
             self,
             positions_provider=lambda: self.point_proc.positions_um,
             pixel_size_m=_x_pixel_m,
-            x_range_um=float(np.abs(self.param.x_range)),
-            y_range_um=float(np.abs(self.param.y_range)),
+            x_range_um=float(np.abs(self.param.y_range)),  # slow axis (INENC3) → col 0 → canvas width
+            y_range_um=float(np.abs(self.param.x_range)),  # fast axis (INENC2) → col 1 → canvas height
             overshoot_factor=mosaic_overshoot,
             enable_batch_writes=enable_batch_writes,
             patch_flip=str(getattr(self.param, "patch_flip", "identity")),
+            inner_crop=_inner_crop,
+            min_overlap_count=_min_overlap,
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")

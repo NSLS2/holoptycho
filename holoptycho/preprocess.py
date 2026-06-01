@@ -78,10 +78,19 @@ class ImageBatchOp(Operator):
 
         # For Eiger2 detector
         if self.flip_image:
-            image = np.flip(image,1)
-
-
-        image = crop_to_roi(image, self.roi)
+            image = np.flip(image, 1)
+            # roi[1] stores batch_x0 in raw-frame (ptycho_gui) column
+            # coordinates. np.flip(image, 1) reverses columns, so the raw
+            # col_start (measured from the left) must be mirrored to the
+            # equivalent position from the right using the actual post-flip
+            # frame width.  frame_width is only available here at compute
+            # time — not at compose() time when the ROI is set.
+            W = image.shape[1]
+            r0, r1 = int(self.roi[0, 0]), int(self.roi[0, 1])
+            c0_raw, c1_raw = int(self.roi[1, 0]), int(self.roi[1, 1])
+            image = image[r0:r1, W - c1_raw : W - c0_raw]
+        else:
+            image = crop_to_roi(image, self.roi)
 
         # Remove Bad pixels (-1 to unsigned int)
         image[image==np.iinfo(image.dtype).max] = 0
@@ -111,7 +120,11 @@ class ImagePreprocessorOp(Operator):
         # batch via scipy connected-component segmentation; same shift then
         # applied to every subsequent batch. ``None`` = not yet computed,
         # ``False`` = disabled by config. See ``_compute_centering_shift``.
-        self.auto_center = True
+        # Disabled by default: this shift is NOT part of ptychoml's preprocessing
+        # pipeline and moves the diffraction beam away from the position the model
+        # was trained on. Enable only if the detector ROI is uncalibrated and the
+        # beam is significantly off-centre.
+        self.auto_center = False
         self._center_shift: tuple[int, int] | None = None
         # Geometry knobs for the two output branches.
         #   tap_orient: D4 element applied to the intensity tap (saved /dp).
@@ -145,6 +158,15 @@ class ImagePreprocessorOp(Operator):
         # Photon-count threshold for hot-pixel zeroing (None = disabled).
         # 50000 matches hxn_to_vit.py's default.
         self.hot_pixel_count_threshold = None
+
+        # Raw-intensity buffer for orientation auto-detect. PtychoViTInferenceOp
+        # reads this to run ptychoml.autodetect_orientation on the first batch
+        # of frames that has enough finite scan positions, then updates dp_orient.
+        # Entries are (processed_images, indices) tuples of pre-D4 frames.
+        # Capped at _AUTODETECT_BUF_MAX_FRAMES total frames; cleared when done.
+        self._autodetect_buf: list = []
+        self._autodetect_done: bool = False
+        self._AUTODETECT_BUF_MAX_FRAMES: int = 256
         super().__init__(*args, **kwargs)
 
         # Per-second compute() throughput counters. See note in EigerZmqRxOp.
@@ -266,6 +288,13 @@ class ImagePreprocessorOp(Operator):
         if self._center_shift is not None:
             dy, dx = self._center_shift
             processed_images = self._apply_shift(processed_images, dy, dx)
+
+        # Buffer pre-D4 frames for one-shot orientation auto-detect.
+        # Once PtychoViTInferenceOp has run the sweep it sets _autodetect_done=True.
+        if not self._autodetect_done:
+            n_buffered = sum(f.shape[0] for f, _ in self._autodetect_buf)
+            if n_buffered < self._AUTODETECT_BUF_MAX_FRAMES:
+                self._autodetect_buf.append((processed_images.copy(), indices.copy()))
 
         # Tap branch: apply the configured D4 to put the saved intensity
         # into whatever orientation the operator wants to see on the
@@ -477,7 +506,10 @@ class PointProcessorOp(Operator):
                     end = min(p_total_num, self.positions_um.shape[0])
                     take = end - self.pos_loaded_num
                     if take > 0:
-                        col_x, col_y = (1, 0) if self.swap_xy else (0, 1)
+                        # hxn_to_vit convention (pos_map=-y,-x): col 0 = slow axis
+                        # (INENC3/pos1 = y_range), col 1 = fast axis (INENC2/pos0 = x_range).
+                        # swap_xy=True reverts to the old (fast→col0, slow→col1) assignment.
+                        col_x, col_y = (0, 1) if self.swap_xy else (1, 0)
                         self.positions_um[self.pos_loaded_num:end, col_x] = pos0[:take]
                         self.positions_um[self.pos_loaded_num:end, col_y] = pos1[:take]
 
