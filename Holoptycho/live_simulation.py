@@ -70,6 +70,7 @@ class InitSimul(Operator):
 
         self.counter = 0
         self.point_datapack_counter = 0
+        self._done_emitted = False
 
 
 
@@ -119,9 +120,9 @@ class InitSimul(Operator):
             self.point_datapack_counter += 1
             time.sleep(self.batchsize / 1000)
         else:
-            self.h5_header.close()
-            if self.h5_raw:
-                self.h5_raw.close()
-            self.stop_execution()
-            
-        # self.stop_execution()
+            if not self._done_emitted:
+                self.h5_header.close()
+                if self.h5_raw:
+                    self.h5_raw.close()
+                self._done_emitted = True
+            time.sleep(0.1)  # idle; PtychoRecon will stop the app after saves

@@ -7,6 +7,8 @@ import os
 
 import numpy as np
 import cupy as cp
+import threading
+_cuda_thread_local = threading.local()
 from numba import cuda
 
 from hxntools.motor_info import motor_table
@@ -66,11 +68,16 @@ class InitRecon(Operator):
                 nz = p.nz - p.nz%self.batchsize
 
                 if self.angle_correction_flag:
-                    # print('rescale x axis based on rotation angle...')
-                    if np.abs(p.angle) <= 45.:
-                        p.x_range *= np.abs(np.cos(p.angle*np.pi/180.))
-                    else:
-                        p.x_range *= np.abs(np.sin(p.angle*np.pi/180.))
+                    #if np.abs(p.angle) <= 45.:
+                    #    p.x_range *= np.abs(np.cos(p.angle*np.pi/180.))
+                    #else:
+                    #    p.x_range *= np.abs(np.sin(p.angle*np.pi/180.))
+                    if p.x_motor.lower().endswith('x'):
+                        print(f'rescale x axis in the real space (motor axis: {p.x_motor}) by {p.angle} degrees')
+                        p.x_range *= np.cos(p.angle*np.pi/180.)
+                    elif p.x_motor.lower().endswith('z'):
+                        print(f'rescale x axis in the real space (motor axis: {p.x_motor}) by {p.angle} degrees')
+                        p.x_range *= np.sin(p.angle*np.pi/180.)
 
                 # New scan
                 op_output.emit((motor_table[p.x_motor][2],motor_table[p.y_motor][2]),'flush_pos_rx')
@@ -120,12 +127,13 @@ class PtychoRecon(Operator):
         self.num_points_min = 300
         self.it = 0
         self.it_last_update = np.inf
-        self.it_ends_after = 30
+        self.it_ends_after = 10 # reduced from 30 because the next scan immediately follows the current one, and we want to save results before the next scan starts
         self.pos_ready_num = 0
         self.frame_ready_num = 0
         self.points_total = 0
         self.timestamp_iter = []
         self.num_points_recv_iter = []
+        self.simulation_mode = False  # set to True by PtychoSimulApp; controls stop_execution() after saves
     
     def flush(self,param):
 
@@ -168,7 +176,10 @@ class PtychoRecon(Operator):
         spec.output("output").condition(ConditionType.NONE)
 
     def compute(self,op_input,op_output,context):
-
+        if not getattr(_cuda_thread_local, "initialized", False):
+            cp.cuda.Device(self.recon.gpu).use()
+            cuda.select_device(self.recon.gpu)
+            _cuda_thread_local.initialized = True
         flush_param = op_input.receive('flush')
         if flush_param:
             self.flush(flush_param)
@@ -195,8 +206,6 @@ class PtychoRecon(Operator):
 
         ready_num = np.minimum(self.recon.num_points_l,ready_num)
 
-        cp.cuda.Device(self.recon.gpu).use()
-        cuda.select_device(self.recon.gpu)
         # cp.cuda.set_pinned_memory_allocator()
 
         if ready_num > self.recon.num_points_recon and self.num_points_min < np.inf:
@@ -235,6 +244,16 @@ class PtychoRecon(Operator):
         if self.it - self.it_last_update >= self.it_ends_after and self.num_points_min<np.inf:
             self.num_points_min = np.inf
             op_output.emit((self.recon,self.timestamp_iter,self.num_points_recv_iter),"output")
+            # Save directly here to guarantee saves happen before the app can stop
+            print('Live recon done! Saving results..')
+            self.recon.save_recon()
+            save_dir = self.recon.save_recon_flow()
+            np.save(save_dir+'/timestamp_iter', np.array(self.timestamp_iter))
+            np.save(save_dir+'/num_points_recv_iter', np.array(self.num_points_recv_iter))
+            print('Saving results done.')
+            if self.simulation_mode:
+                print('Simulation complete. Exiting process.', flush=True)
+                os._exit(0)
         sys.stdout.flush()
         sys.stderr.flush()
         
@@ -317,6 +336,7 @@ class PtychoSimulApp(Application):
         self.param.y_range += 5
         # self.init_recon = InitRecon(self)
         self.pty = PtychoRecon(self,param=self.param,name='pty')
+        self.pty.simulation_mode = True  # enables stop_execution() after saves
         # self.pty_ctrl = PtychoCtrl(self)
         self.param.x_range -= 5
         self.param.y_range -= 5
@@ -510,5 +530,7 @@ def main():
     app.scheduler(scheduler)
 
     app.run()
-    
-    
+
+    # Release CuPy memory pools so GPU memory is freed before the process exits
+    cp.get_default_memory_pool().free_all_blocks()
+    cp.get_default_pinned_memory_pool().free_all_blocks()

@@ -1,8 +1,11 @@
 import logging
 import sys
+import threading
 
 import numpy as np
 import cupy as cp
+
+_cuda_thread_local = threading.local()
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
@@ -283,6 +286,9 @@ class PointProcessorOp(Operator):
 
 
     def compute(self, op_input, op_output, context):
+        if not getattr(_cuda_thread_local, "initialized", False):
+            cp.cuda.Device(self.point_info_target.device.id).use()
+            _cuda_thread_local.initialized = True
 
         param = op_input.receive('flush')
         if param:
@@ -338,6 +344,9 @@ class ImageSendOp(Operator):
         spec.output("image_indices_out").condition(ConditionType.NONE)
 
     def compute(self, op_input, op_output, context):
+        if not getattr(_cuda_thread_local, "initialized", False):
+            cp.cuda.Device(self.diff_d_target.device.id).use()
+            _cuda_thread_local.initialized = True
 
         param = op_input.receive('flush')
         if param:
