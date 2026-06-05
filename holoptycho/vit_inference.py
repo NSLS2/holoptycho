@@ -20,7 +20,7 @@ import time
 import numpy as np
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
-from .mosaic_stitch import stitch_batch_into
+from ptychoml.stitch import stitch_batch_into
 from .tiled_writer import get_writer
 
 # Module-level writer shared with ptycho_holo.py operators.

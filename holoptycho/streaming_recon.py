@@ -33,6 +33,7 @@ NSLS-II HXN beamline.
 import logging
 
 import numpy as np
+from ptychoml import compute_sample_pixel_size
 
 logger = logging.getLogger(__name__)
 
@@ -256,11 +257,13 @@ class StreamingPtychoRecon:
         z_m = float(getattr(self.config, "z_m", 0.0))
         ccd_pixel_um = float(getattr(self.config, "ccd_pixel_um", 55.0))
         if z_m and ccd_pixel_um and self.nx_prb and self.ny_prb:
-            self.x_pixel_m = self.lambda_nm * 1e-9 * z_m / (
-                self.nx_prb * ccd_pixel_um * 1e-6
+            wavelength_m = self.lambda_nm * 1e-9
+            ccd_pixel_m = ccd_pixel_um * 1e-6
+            self.x_pixel_m = compute_sample_pixel_size(
+                wavelength_m, z_m, ccd_pixel_m, self.nx_prb
             )
-            self.y_pixel_m = self.lambda_nm * 1e-9 * z_m / (
-                self.ny_prb * ccd_pixel_um * 1e-6
+            self.y_pixel_m = compute_sample_pixel_size(
+                wavelength_m, z_m, ccd_pixel_m, self.ny_prb
             )
         else:
             # Not enough info — leave as zero; caller can set before use.
