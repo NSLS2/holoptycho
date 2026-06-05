@@ -22,6 +22,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 
+from ptychoml import compute_sample_pixel_size
+
 
 def load_scan_info(h5_path):
     """Load scan positions (microns) and pixel size from H5 file."""
@@ -31,7 +33,9 @@ def load_scan_info(h5_path):
         z_m = float(f["z_m"][()])
         nx = f["diffamp"].shape[1]
         ccd_pixel_um = float(f["ccd_pixel_um"][()])
-    pixel_size_m = lambda_nm * 1e-9 * z_m / (nx * ccd_pixel_um * 1e-6)
+    pixel_size_m = compute_sample_pixel_size(
+        lambda_nm * 1e-9, z_m, ccd_pixel_um * 1e-6, nx
+    )
     return points, pixel_size_m
 
 

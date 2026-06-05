@@ -10,6 +10,13 @@ TensorRT engine models.
 connects to live ZMQ streams from the Eiger detector and PandA box.
 For batch/offline reconstruction use `NSLS2/ptycho` or `NSLS2/ptychoml`.
 
+Generic, array-in/array-out ptychography code lives in `NSLS2/ptychoml` and
+is imported rather than duplicated here: mosaic patch placement
+(`ptychoml.stitch`, e.g. `stitch_batch_into`) and the far-field sample
+pixel size (`ptychoml.compute_sample_pixel_size`). Keep that boundary —
+new generic numpy helpers belong in ptychoml; holoptycho holds the
+Holoscan operators and pipeline wiring.
+
 ## Self-improvement protocol
 
 This file is a living document. Whenever you (the agent) discover any of the
@@ -764,7 +771,7 @@ Tune for your scan:
 * `--nx` / `--ny`: must match the selected engine's input dimensions (default 256, matching current HXN engines). See "Best practices for replay" below — they *must* be passed together if you override.
 * `--rate`: informational only — the publisher dumps each chunk as fast as ZMQ drains and ignores this value. Set it for the startup banner if you want; it doesn't gate timing.
 * `--skip-frames`: drops the first N Eiger frames + matching encoder samples. Required for scans with settling/ramp-up rows.
-* `--mode`: `vit` is the fastest path when iterating on `mosaic_stitch.py` / `SaveViTResult`; `iterative` exercises only DM/ML; `both` runs both branches in parallel.
+* `--mode`: `vit` is the fastest path when iterating on `ptychoml.stitch` / `SaveViTResult`; `iterative` exercises only DM/ML; `both` runs both branches in parallel.
 
 By default the replay script publishes plain ZMQ. To test CurveZMQ, also
 pass the full Eiger key set: `--eiger-server-public-key`,
@@ -901,7 +908,7 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   `iterative` to test the DM/ML solver without TRT competition, `vit` to
   test the ViT branch (and the server-side mosaic stitching) without
   iterative, or `both` to run them in parallel for comparison. `vit`-only
-  is the fastest path for verifying changes to `mosaic_stitch.py` /
+  is the fastest path for verifying changes to `ptychoml.stitch` /
   `SaveViTResult`.
 
 * **Leave compression off** (now the default). `dectris-compression 0.3.1`
@@ -958,7 +965,7 @@ hxn/processed/holoptycho/
       indices_latest ← overwritten each ViT batch (B,)
       mosaic         ← server-side stitched phase mosaic, overwritten each
                        ViT batch (counts-normalised, Fourier-shift placed via
-                       holoptycho.mosaic_stitch.place_patches_fourier_shift).
+                       ptychoml.stitch.place_patches_fourier_shift).
                        Unfilled pixels are filled with the median of the valid
                        region — tiled's PNG renderer treats NaN as 0, which
                        wrecks contrast scaling.
