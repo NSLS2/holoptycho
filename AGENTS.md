@@ -850,16 +850,40 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   either redundant or wrong. Worth confirming with the beamline team and
   potentially reducing pipeline complexity.
 
-* **`auto_center_dp` (config field, default `true`) — one-shot diffraction
+* **`auto_center_dp` (config field, default `false`) — one-shot diffraction
   centering via scipy segmentation.** `ImagePreprocessorOp` averages the
   first batch (typically 64 frames), masks hot pixels at detector
   saturation, thresholds at 5% of peak, runs `scipy.ndimage.label` to find
   connected components, takes the centroid of the largest one, and shifts
   every subsequent batch (and the intensity tap) so that centroid lands
-  at the canvas centre. Averaging over the first batch protects against
-  the odd empty/saturated first frame. If no object passes the threshold
-  (truly blank first batch), no shift is applied. Set to `false` if the
-  operator has already centered manually via `batch_x0`/`batch_y0`.
+  at the canvas centre. **Default off:** this shift is not part of
+  ptychoml's preprocessing pipeline and moves the beam away from the
+  position the model was trained on. Enable only when the detector ROI is
+  too far off-centre to fix with `batch_x0`/`batch_y0`.
+
+* **Diffraction geometry + normalization knobs (config fields).** The model
+  input branch of `ImagePreprocessorOp` delegates to
+  `ptychoml.preprocess_diffraction` (normalize → hot-pixel mask → sqrt →
+  D4 → fftshift); the intensity tap is oriented with `ptychoml.apply_d4`.
+  All are settable from the scan JSON:
+  * `tap_orient` (default `antitranspose`) — D4 element applied to the saved
+    intensity tap (`/dp`). The default reproduces the historical HXN
+    anti-diagonal flip; use `identity` to save raw detector frames.
+  * `dp_orient` (default `rot90_cw`) — D4 element on the model-input branch.
+    The default reproduces the prior hardcoded chain (verified equivalent);
+    orientation auto-detect will set this automatically once wired up.
+  * `fftshift_dp` (default unset → `None`) — DC convention for the model
+    input. `None` lets ptychoml auto-detect via `detect_dc_at_corner` and
+    shift only when the central beam sits at the corners. Override with
+    `true`/`false` only when a specific dataset misbehaves.
+  * `vit_normalization` (default `1e5`) — per-scan max intensity (hot pixels
+    excluded). In live mode the full DP stack isn't available, so this must
+    come from the scan JSON (precomputed offline, or via
+    `ptychoml.compute_intensity_normalization` on a representative subset).
+    Without the right value the amplitude scale drifts from training.
+  * `vit_scale` (default `1e4`) — model-input amplitude scale factor.
+  * `hot_pixel_count_threshold` (default unset → disabled) — photon-count
+    threshold for hot-pixel zeroing; matches `hxn_to_vit.py` when enabled.
 
 * **`mosaic_overshoot_factor` (config field, default 1.2) — canvas safety
   margin for the ViT mosaic.** Sized as `max(observed_range, commanded_range

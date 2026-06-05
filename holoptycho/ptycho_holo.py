@@ -650,16 +650,41 @@ class PtychoApp(Application):
         self.image_batch = ImageBatchOp(self, name="image_batch")
         self.image_proc = ImagePreprocessorOp(self, name="image_proc")
         # Auto-center the diffraction pattern via scipy segmentation on the
-        # average of the first batch (default on). Set `auto_center_dp=false`
-        # in the config to disable (e.g. if the operator has already set
-        # batch_x0/batch_y0 manually and doesn't want extra refinement).
-        self.image_proc.auto_center = bool(getattr(self.param, "auto_center_dp", True))
-        # Extra `np.transpose([0, 2, 1])` on the model-input branch after
-        # rot90 + fftshift (default on). Some model training runs expected
-        # the transposed orientation; flipping this knob is the fastest way
-        # to test "is the model getting garbage because the orientation is
-        # wrong?". Affects only the model input, not the saved dp.
-        self.image_proc.dp_transpose = bool(getattr(self.param, "dp_transpose", True))
+        # average of the first batch. Default off: this shift is not part of
+        # ptychoml's preprocessing pipeline and displaces the beam from the
+        # model's expected position. Enable via auto_center_dp=true in the
+        # scan JSON only when the detector ROI is too far off-centre to use
+        # batch_x0/batch_y0 correction instead.
+        self.image_proc.auto_center = bool(getattr(self.param, "auto_center_dp", False))
+        # Geometry + normalization for the two output branches. See
+        # ImagePreprocessorOp docstrings for what each does. Defaults reproduce
+        # the prior hardcoded HXN chain for the D4 transforms (antidiag tap +
+        # rot90_cw model branch); orientation auto-detect (when wired up) will
+        # set ``dp_orient`` automatically. ``fftshift_dp`` defaults to None so
+        # ptychoml's auto-detector picks the right DC convention per batch;
+        # override via the scan JSON only when a specific dataset misbehaves.
+        self.image_proc.tap_orient = str(getattr(self.param, "tap_orient", "antitranspose"))
+        self.image_proc.dp_orient = str(getattr(self.param, "dp_orient", "rot90_cw"))
+        _fftshift_dp = getattr(self.param, "fftshift_dp", None)
+        self.image_proc.fftshift_dp = (
+            bool(_fftshift_dp) if _fftshift_dp is not None else None
+        )
+        # Per-scan ViT normalization: the max intensity across all DPs in
+        # this scan, with hot pixels excluded. In live mode we don't have
+        # the full DP stack to compute it from, so it must come from the
+        # scan JSON (operator pre-computes it offline from a prior scan, or
+        # ptychoml.compute_intensity_normalization can produce it from a
+        # representative subset before the live run starts). Without it the
+        # amplitude scale drifts from what the model was trained against and
+        # predictions are systematically off-scale.
+        self.image_proc.normalization = float(getattr(self.param, "vit_normalization", 1.0e5))
+        self.image_proc.scale = float(getattr(self.param, "vit_scale", 1.0e4))
+        # Photon-count threshold for hot-pixel zeroing (None disables). Matches
+        # hxn_to_vit.py's default when enabled.
+        _hot_pix = getattr(self.param, "hot_pixel_count_threshold", None)
+        self.image_proc.hot_pixel_count_threshold = (
+            float(_hot_pix) if _hot_pix is not None else None
+        )
         self.image_send = ImageSendOp(self, name="image_send")
         self.point_proc = PointProcessorOp(
             self,
