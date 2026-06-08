@@ -828,12 +828,15 @@ class PtychoApp(Application):
         # Prefer a second GPU for PyCUDA/TRT when available, but fall back to
         # the recon GPU on single-GPU nodes instead of hard-failing.
         vit_gpu = self.param.gpus[1] if len(self.param.gpus) > 1 else self.param.gpus[0]
-        # Live mode: ImagePreprocessorOp applies fftshift — undo it for model
+        # DC-convention handling is auto-detected end-to-end by ptychoml
+        # (ImagePreprocessorOp's preprocess_diffraction centers the beam, and
+        # the session's own detect_dc_at_corner check verifies it), so no
+        # manual fftshift flag is needed here — leave fftshift at its default
+        # None.
         self.vit = PtychoViTInferenceOp(
             self,
             engine_path=self.engine_path,
             gpu=vit_gpu,
-            data_is_shifted=True,
             name="vit_inference",
         )
         # SaveViTResult publishes positions_um alongside each batch and
