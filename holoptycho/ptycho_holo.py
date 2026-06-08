@@ -851,6 +851,14 @@ class PtychoApp(Application):
         # 6 µm needs ≥3.0). Off-canvas frames trigger a warning in
         # SaveViTResult and are dropped.
         mosaic_overshoot = float(getattr(self.param, "mosaic_overshoot_factor", 1.2))
+        # Min fractional overlap for a mosaic pixel to count as "covered"
+        # when normalising canvas / counts; below this the pixel is filled
+        # with the valid-region median instead of a thin-coverage value.
+        _min_overlap = float(getattr(self.param, "mosaic_min_overlap", 0.5))
+        # D4 transform applied to each ViT output patch before stitching
+        # (via ptychoml.apply_d4). Default 'identity'; the orientation
+        # auto-detector will choose this once wired up.
+        _patch_flip = str(getattr(self.param, "patch_flip", "identity"))
         self.vit_save = SaveViTResult(
             self,
             positions_provider=lambda: self.point_proc.positions_um,
@@ -858,6 +866,8 @@ class PtychoApp(Application):
             x_range_um=float(self.pty.recon.x_range_um),
             y_range_um=float(self.pty.recon.y_range_um),
             overshoot_factor=mosaic_overshoot,
+            min_overlap_count=_min_overlap,
+            patch_flip=_patch_flip,
             enable_batch_writes=enable_batch_writes,
             name="vit_save",
         )

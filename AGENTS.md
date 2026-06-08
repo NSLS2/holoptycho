@@ -892,6 +892,41 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   scans with settling-row overshoot (e.g. 404611: commanded 2 µm → observed
   6 µm) need a larger value (3.0). Off-canvas frames are dropped with a
   warning, so under-sizing degrades the mosaic but doesn't crash the run.
+  `mosaic_overshoot_factor < 1.0` switches to *crop mode* — the canvas is
+  intentionally smaller than commanded to trim the low-coverage border.
+
+* **ViT mosaic stitching uses `ptychoml.stitch.stitch_batch_livestitch_into`
+  (nearest-integer placement) — `SaveViTResult` + `MosaicWriterOp`.**
+  `SaveViTResult` keeps a running `(canvas, counts)` sum; `MosaicWriterOp`
+  averages it each batch via `ptychoml.stitch.normalize_mosaic` (covered
+  pixels → `canvas / counts`, under-covered → NaN, plus a median fill value).
+  Three related behaviours worth knowing when debugging the live mosaic:
+  * **Staircase artifact → full-canvas writes.** `MosaicWriterOp` writes the
+    *entire* cumulative canvas every batch (latest-wins, capacity-1 + drop
+    policy), not just the bbox touched this batch. Writing only the bbox left
+    earlier rows stale on unidirectional scans (a staircase). The cumulative
+    canvas already contains all patches `0..N`, so a full write is always a
+    complete snapshot.
+  * **Centring bias → direction inference.** When the canvas is allocated
+    before the slow axis has moved (first `PointProcessorOp` batch), the
+    observed midpoint is biased toward the scan start. `estimate_canvas_mid`
+    (in `holoptycho/mosaic_canvas.py`) detects when the observed range is
+    < 50% of commanded and projects the centre to the midpoint of the
+    *commanded* range using the inferred scan direction. Tested in
+    `tests/test_mosaic_canvas.py`.
+  * **NaN-position race → pending-frame buffer.** ViT batches can arrive
+    before `PointProcessorOp` has filled the matching scan positions, so a
+    frame's position is NaN. Rather than drop it, `SaveViTResult` buffers it
+    in `_pending_frames` and re-stitches it on a later batch once the position
+    is known (capped at 500 frames). This prevents missing rows when the
+    position stream lags the ViT stream.
+
+* **`patch_flip` (config field, default `identity`) — D4 transform applied to
+  each ViT output patch before stitching** (via `ptychoml.apply_d4`). Use when
+  the model's patch orientation doesn't match the scan-position frame; the
+  orientation auto-detector will set it once wired up. **`mosaic_min_overlap`**
+  (default 0.5) is the minimum fractional coverage for a mosaic pixel to count
+  as filled; below it the pixel takes the valid-region median instead.
 
 * **`frame_write_stride` (config field, default 1000 for `recon_mode='vit'`,
   else 1) — detector-frame downsampling for tiled writes.** Persisting every
