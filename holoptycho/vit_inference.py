@@ -23,7 +23,6 @@ from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 from ptychoml.stitch import (
     normalize_mosaic,
     stitch_batch_livestitch_into,
-    stitch_batch_nearest,
 )
 from ptychoml.preprocess import apply_d4, D4_NAMES
 from .mosaic_canvas import estimate_canvas_mid, partition_pending
@@ -266,7 +265,6 @@ class SaveViTResult(Operator):
         y_range_um: float | None = None,
         inner_crop: int | None = None,
         canvas_pad: int = 0,
-        fourier_pad: int = 32,
         min_overlap_count: float = 0.5,
         phase_channel_index: int = 1,
         overshoot_factor: float = 1.2,
@@ -304,7 +302,6 @@ class SaveViTResult(Operator):
         self._y_range_um = y_range_um
         self._inner_crop = inner_crop
         self._canvas_pad = canvas_pad
-        self._fourier_pad = fourier_pad
         self._min_overlap_count = max(0.5, float(min_overlap_count))
         self._phase_channel_index = phase_channel_index
         self._overshoot_factor = overshoot_factor
@@ -717,21 +714,6 @@ class SaveViTResult(Operator):
         # branch when enabled.
         if self._enable_batch_writes:
             spec.output("vit_batch").condition(ConditionType.NONE)
-
-    def start(self):
-        # Warm up stitch_batch_nearest on the first call to avoid a JIT
-        # compile delay on the first real batch.
-        try:
-            dummy_canvas = np.zeros((32, 32), dtype=np.float32)
-            dummy_counts = np.zeros_like(dummy_canvas)
-            dummy_patches = np.zeros((1, 8, 8), dtype=np.float32)
-            dummy_positions = np.array([[16.0, 16.0]], dtype=np.float64)
-            stitch_batch_nearest(
-                dummy_canvas, dummy_counts, dummy_patches, dummy_positions,
-            )
-            self._logger.info("SaveViTResult: stitch kernel pre-warmed")
-        except Exception:
-            self._logger.exception("Stitch pre-warm failed (non-fatal)")
 
     def compute(self, op_input, op_output, context):
         try:
