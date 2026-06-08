@@ -65,7 +65,7 @@ class ImageBatchOp(Operator):
         self._diag_window_start = time.time()
         self._diag_calls = 0
         self._diag_batches_emitted = 0
-
+ 
     def flush(self,param):
         self.counter = 0
         self.roi = np.array(param)
