@@ -26,7 +26,7 @@ from ptychoml.stitch import (
     stitch_batch_nearest,
 )
 from ptychoml.preprocess import apply_d4, D4_NAMES
-from .mosaic_canvas import estimate_canvas_mid
+from .mosaic_canvas import estimate_canvas_mid, partition_pending
 from .tiled_writer import get_writer
 
 # Module-level writer shared with ptycho_holo.py operators.
@@ -488,14 +488,9 @@ class SaveViTResult(Operator):
         # Merge any buffered frames (from previous batches where positions
         # were NaN) that now have finite positions into this batch.
         if self._pending_frames:
-            now_ready = [
-                (p, i) for p, i in self._pending_frames
-                if i < len(positions_um) and np.isfinite(positions_um[i]).all()
-            ]
-            self._pending_frames = [
-                (p, i) for p, i in self._pending_frames
-                if not (i < len(positions_um) and np.isfinite(positions_um[i]).all())
-            ]
+            now_ready, self._pending_frames = partition_pending(
+                self._pending_frames, positions_um
+            )
             if now_ready:
                 self._logger.debug(
                     "ViT mosaic: re-stitching %d previously-buffered frames",
