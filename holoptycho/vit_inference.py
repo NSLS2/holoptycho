@@ -68,8 +68,13 @@ class PtychoViTInferenceOp(Operator):
         engine_path:       Path to .engine file (must match batch size B)
         gpu:               CUDA device ordinal (default 1; leave 0 for PtychoRecon)
         output_save_dir:   Directory for saving predictions (default /data/users/Holoscan)
-        data_is_shifted:   If True, input diff_amp has been fftshift'd and
-                           should be undone before inference.
+        fftshift:          DC-convention override for the session. Default
+                           ``None`` lets ptychoml auto-detect the central beam
+                           location per batch (via
+                           ``ptychoml.detect_dc_at_corner``) and shift only
+                           when needed — robust against an upstream op changing
+                           its own fftshift policy. Pass ``True``/``False`` to
+                           force a fixed convention (rarely needed).
     """
 
     def __init__(
@@ -79,7 +84,7 @@ class PtychoViTInferenceOp(Operator):
         engine_path: str,
         gpu: int = 1,
         output_save_dir: str = "/data/users/Holoscan",
-        data_is_shifted: bool = False,
+        fftshift: bool | None = None,
         **kwargs,
     ):
         super().__init__(fragment, *args, **kwargs)
@@ -87,7 +92,7 @@ class PtychoViTInferenceOp(Operator):
         self.engine_path = engine_path
         self.gpu = gpu
         self.output_save_dir = output_save_dir
-        self._data_is_shifted = data_is_shifted
+        self._fftshift = fftshift
 
         # Lazy-initialized on first compute()
         self._session = None
@@ -115,7 +120,7 @@ class PtychoViTInferenceOp(Operator):
         self._session = PtychoViTInference(
             engine_path=self.engine_path,
             gpu=self.gpu,
-            data_is_shifted=self._data_is_shifted,
+            fftshift=self._fftshift,
         )
         self._session._init_engine()
         self.engine_batch_size = int(self._session.expected_input_shape[0])

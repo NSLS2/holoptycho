@@ -6,15 +6,35 @@ import numpy as np
 import cupy as cp
 
 from ptychoml.preprocess import (
+    apply_d4,
     apply_intensity_floor,
     crop_to_roi,
     inpaint_bad_pixels,
+    preprocess_diffraction,
 )
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
 from holoscan.logger import LogLevel, set_log_level
 from holoscan.decorator import create_op, Input
+
+
+def crop_flipped_roi(image, roi):
+    """Crop a horizontally-flipped Eiger2 frame, mirroring the column ROI.
+
+    ``roi[1]`` stores the column window in raw-frame (pre-flip) coordinates,
+    measured from the left. ``np.flip(image, 1)`` reverses the columns, so
+    the raw col start/stop must be mirrored to positions measured from the
+    right of the flipped frame, using the actual post-flip frame width
+    (only known at compute time, not when the ROI is set at compose time).
+    Rows (``roi[0]``) are unaffected by the horizontal flip.
+    """
+    image = np.flip(image, 1)
+    W = image.shape[1]
+    r0, r1 = int(roi[0, 0]), int(roi[0, 1])
+    c0_raw, c1_raw = int(roi[1, 0]), int(roi[1, 1])
+    return image[r0:r1, W - c1_raw : W - c0_raw]
+
 
 class ImageBatchOp(Operator):
     def __init__(self, *args, **kwargs):
@@ -74,12 +94,11 @@ class ImageBatchOp(Operator):
         if self.roi is None:
             return
 
-        # For Eiger2 detector
+        # For Eiger2 detector: horizontal flip mirrors the column ROI.
         if self.flip_image:
-            image = np.flip(image,1)
-
-
-        image = crop_to_roi(image, self.roi)
+            image = crop_flipped_roi(image, self.roi)
+        else:
+            image = crop_to_roi(image, self.roi)
 
         # Remove Bad pixels (-1 to unsigned int)
         image[image==np.iinfo(image.dtype).max] = 0
@@ -109,15 +128,44 @@ class ImagePreprocessorOp(Operator):
         # batch via scipy connected-component segmentation; same shift then
         # applied to every subsequent batch. ``None`` = not yet computed,
         # ``False`` = disabled by config. See ``_compute_centering_shift``.
-        self.auto_center = True
+        # Disabled by default: this shift is NOT part of ptychoml's preprocessing
+        # pipeline and moves the diffraction beam away from the position the model
+        # was trained on. Enable only if the detector ROI is uncalibrated and the
+        # beam is significantly off-centre.
+        self.auto_center = False
         self._center_shift: tuple[int, int] | None = None
-        # Extra transpose on the model-input branch, applied AFTER rot90 +
-        # fftshift. Historical (was commented out); re-enabled as a knob
-        # because some training runs expected the transposed orientation
-        # and feeding the wrong one yields garbage predictions. Affects
-        # only the model input — the intensity tap (saved dp) stays in
-        # detector orientation.
-        self.dp_transpose = True
+        # Geometry knobs for the two output branches.
+        #   tap_orient: D4 element applied to the intensity tap (saved /dp).
+        #               Default 'antitranspose' matches the historical HXN
+        #               anti-diagonal flip applied to bring data into the
+        #               beamline operator's view; the saved DP looks how the
+        #               operator expects.
+        #   dp_orient:  D4 element on the model-input branch. Default
+        #               'rot90_cw' reproduces the old chain
+        #               (antidiag flip ∘ rot90 ∘ transpose) for backwards
+        #               compatibility; orientation auto-detect will overwrite
+        #               this once it's wired up.
+        #   fftshift_dp: model-input DC-convention control. ``None``
+        #               (default) lets ptychoml auto-detect via
+        #               ``detect_dc_at_corner`` and shift only when the
+        #               central beam is at the corners. Override with
+        #               ``True``/``False`` from the scan config if a
+        #               specific dataset misbehaves; otherwise leave alone.
+        # All three are settable from the scan config; see ptycho_holo.py.
+        self.tap_orient = 'antitranspose'
+        self.dp_orient = 'rot90_cw'
+        self.fftshift_dp: bool | None = None
+        # Intensity normalization passed straight through to
+        # ptychoml.preprocess_diffraction so each DP gets scaled by the
+        # same constant the offline pipeline used. ``normalization`` is the
+        # per-scan max intensity (hot pixels excluded) — see
+        # ptychoml.compute_intensity_normalization. The default of 1e5 is a
+        # placeholder; in production the scan JSON overrides it per-scan.
+        self.normalization = 1.0e5
+        self.scale = 1.0e4
+        # Photon-count threshold for hot-pixel zeroing (None = disabled).
+        # 50000 matches hxn_to_vit.py's default.
+        self.hot_pixel_count_threshold = None
         super().__init__(*args, **kwargs)
 
         # Per-second compute() throughput counters. See note in EigerZmqRxOp.
@@ -240,32 +288,33 @@ class ImagePreprocessorOp(Operator):
             dy, dx = self._center_shift
             processed_images = self._apply_shift(processed_images, dy, dx)
 
-        # Anti-diagonal flip per frame: HXN eiger data lands in the pipeline
-        # reflected across the anti-diagonal relative to the beamline
-        # operator's view. Applying the flip here means both the saved dp
-        # tap (next line) and the model-input branch downstream operate on
-        # data in the operator orientation, which is what the ViT model was
-        # trained on. Force a contiguous copy — the chain afterwards
-        # (rot90/fftshift/transpose/sqrt) is much slower on a strided view,
-        # which we saw back up ImagePreprocessorOp and starve point_proc.
-        processed_images = np.ascontiguousarray(
-            processed_images.transpose(0, 2, 1)[:, ::-1, ::-1]
-        )
+        # Tap branch: apply the configured D4 to put the saved intensity
+        # into whatever orientation the operator wants to see on the
+        # dashboard. Default 'antitranspose' reproduces the historical HXN
+        # anti-diagonal flip (transpose ∘ flip-both-axes); set
+        # tap_orient='identity' to save raw detector frames. Contiguous
+        # copy so the emitted buffer doesn't alias processed_images, which
+        # is mutated in place below.
+        tap = np.ascontiguousarray(apply_d4(processed_images, self.tap_orient))
+        op_output.emit(tap, "intensity")
 
-        # Tap detector-frame intensity before rot90/fftshift — ptycho-vit's
-        # training loader expects intensity in detector orientation. Contiguous
-        # copy so downstream rot90 (returns a view) doesn't alias the emitted
-        # buffer.
-        op_output.emit(np.ascontiguousarray(processed_images), "intensity")
-
-        # processed_images = processed_images[:, self.roi[0,0]:self.roi[0,1], self.roi[1,0]:self.roi[1,1]]
-        processed_images = np.rot90(processed_images, axes=(2,1))
-        processed_images = np.fft.fftshift(processed_images, axes=(1,2))
-        if self.dp_transpose:
-            processed_images = np.transpose(processed_images, [0, 2, 1])
+        # Model branch: delegate the entire normalize → mask → sqrt → D4 →
+        # fftshift sequence to ptychoml.preprocess_diffraction. Bad pixels
+        # are already inpainted above; the intensity floor (low-threshold)
+        # stays a holoptycho-side knob applied before the call because
+        # preprocess_diffraction doesn't expose it. fftshift=None (the
+        # default for this op) lets ptychoml auto-detect the central beam
+        # position and shift only when needed.
         if self.detmap_threshold > 0:
             apply_intensity_floor(processed_images, self.detmap_threshold)
-        diff_amp = np.sqrt(processed_images, dtype = np.float32 ,order='C')
+        diff_amp = preprocess_diffraction(
+            processed_images,
+            normalization=self.normalization,
+            scale=self.scale,
+            hot_pixel_count_threshold=self.hot_pixel_count_threshold,
+            dp_orient=self.dp_orient,
+            fftshift=self.fftshift_dp,
+        )
 
         op_output.emit(diff_amp, "diff_amp")
         op_output.emit(indices, "image_indices")
