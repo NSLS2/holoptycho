@@ -48,8 +48,6 @@ eiger_dir/live_test
 models/
 Holoptycho/edgePtychoViT/
 
-
-
 # reconstruction results
 recon_result/
 .ptycho*
