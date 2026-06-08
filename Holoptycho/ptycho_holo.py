@@ -30,6 +30,7 @@ from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressO
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
 from .liverecon_utils import parse_scan_header
 from .live_simulation import InitSimul
+from .vit_inference import PtychoViTInferenceOp, SaveViTResult
 
 class InitRecon(Operator):
     def __init__(self, *args, param, batchsize,min_points,scan_header_file, **kwargs):
@@ -64,6 +65,8 @@ class InitRecon(Operator):
 
                 print(f"New scan num: {p.scan_num}")
 
+                if self.scan_num is not None and hasattr(self, '_vit_save_op'):
+                    self._vit_save_op._save_final(self.scan_num)
                 self.scan_num = p.scan_num
                 nz = p.nz - p.nz%self.batchsize
 
@@ -173,7 +176,7 @@ class PtychoRecon(Operator):
         spec.input("frame_ready_num",policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
         #spec.input("ready_num")
         spec.output("save_live_result").condition(ConditionType.NONE)
-        spec.output("output").condition(ConditionType.NONE)
+        spec.output("output_iter").condition(ConditionType.NONE)
 
     def compute(self,op_input,op_output,context):
         if not getattr(_cuda_thread_local, "initialized", False):
@@ -243,13 +246,17 @@ class PtychoRecon(Operator):
         
         if self.it - self.it_last_update >= self.it_ends_after and self.num_points_min<np.inf:
             self.num_points_min = np.inf
-            op_output.emit((self.recon,self.timestamp_iter,self.num_points_recv_iter),"output")
+            op_output.emit((self.recon,self.timestamp_iter,self.num_points_recv_iter),"output_iter")
             # Save directly here to guarantee saves happen before the app can stop
             print('Live recon done! Saving results..')
             self.recon.save_recon()
             save_dir = self.recon.save_recon_flow()
             np.save(save_dir+'/timestamp_iter', np.array(self.timestamp_iter))
             np.save(save_dir+'/num_points_recv_iter', np.array(self.num_points_recv_iter))
+            recon_data_dir = os.path.join(self.recon.working_directory,
+                                          './recon_result/S' + self.recon.scan_num + '/' + self.recon.sign + '/recon_data/')
+            if hasattr(self, '_vit_save_op'):
+                self._vit_save_op._save_final(self.recon.scan_num)
             print('Saving results done.')
             if self.simulation_mode:
                 print('Simulation complete. Exiting process.', flush=True)
@@ -268,13 +275,13 @@ def SaveLiveResult(results):
     except:
         pass
 
-@create_op(inputs="output")
-def SaveResult(output):
+@create_op(inputs="output_iter")
+def SaveResult(output_iter):
     print('Live recon done! Saving results..')
-    output[0].save_recon()
-    save_dir = output[0].save_recon_flow()
-    np.save(save_dir+'/timestamp_iter',np.array(output[1]))
-    np.save(save_dir+'/num_points_recv_iter',np.array(output[2]))
+    output_iter[0].save_recon()
+    save_dir = output_iter[0].save_recon_flow()
+    np.save(save_dir+'/timestamp_iter',np.array(output_iter[1]))
+    np.save(save_dir+'/num_points_recv_iter',np.array(output_iter[2]))
     print('Saving results done.')
     return
     
@@ -284,7 +291,10 @@ class PtychoSimulApp(Application):
 
         self.config_path = config_path
         self.param = parse_config(self.config_path)
-        self.gpu = self.param.gpus[0]
+        self.gpu_iter = getattr(self.param, 'live_gpu_iterative', None)
+        self.gpu_ai = getattr(self.param, 'live_gpu_ai', None)
+        # Primary GPU for iterative path (or fallback)
+        self.gpu = self.gpu_iter if self.gpu_iter is not None else self.param.gpus[0]
 
     def config_ops(self,param):
 
@@ -312,6 +322,9 @@ class PtychoSimulApp(Application):
 
         self.point_proc.angle_correction_flag = param.angle_correction_flag
         self.init.angle_correction_flag = param.angle_correction_flag
+
+        # Allocate per-frame position buffer for ViT mosaic stitching (AI inference path)
+        self.point_proc.positions_um = np.full((nz, 2), np.nan, dtype=np.float64)
 
         self.pty.num_points_min = self.min_points
 
@@ -348,19 +361,56 @@ class PtychoSimulApp(Application):
 
         self.config_ops(self.param)
 
-        self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
-        
-        self.add_flow(self.init,self.point_proc,{("pointRx_out","pointOp_in")})
-        self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
+        # --- Iterative path (conditional on live_gpu_iterative) ---
+        if self.gpu_iter is not None:
+            self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
+            
+            self.add_flow(self.init,self.point_proc,{("pointRx_out","pointOp_in")})
+            self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
 
-        self.add_flow(self.image_send,self.pty,{("frame_ready_num","frame_ready_num")})
-        self.add_flow(self.point_proc,self.pty,{("pos_ready_num","pos_ready_num")})
+            self.add_flow(self.image_send,self.pty,{("frame_ready_num","frame_ready_num")})
+            self.add_flow(self.point_proc,self.pty,{("pos_ready_num","pos_ready_num")})
 
-        self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
-        self.add_flow(self.init,self.pty,{("flush_pty","flush")})
+            self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
+            self.add_flow(self.init,self.pty,{("flush_pty","flush")})
 
-        self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
-        self.add_flow(self.pty,self.o,{("output","output")})
+            self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
+            self.add_flow(self.pty,self.o,{("output_iter","output_iter")})
+        else:
+            # Still need to wire InitSimul -> image_send for config_ops to work
+            # but don't connect to PtychoRecon
+            self.add_flow(self.init,self.image_send,{("flush_image_send","flush"),("diff_amp","diff_amp"),("image_indices","image_indices")})
+            self.add_flow(self.init,self.point_proc,{("pointRx_out","pointOp_in")})
+            self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
+            self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
+
+        # --- AI/VIT path (conditional on live_gpu_ai) ---
+        if self.gpu_ai is not None:
+            vit_engine_path = getattr(self.param, 'vit_engine_path', '')
+            self.vit = PtychoViTInferenceOp(
+                self,
+                engine_path=vit_engine_path,
+                gpu=self.gpu_ai,
+                name="vit_inference",
+            )
+            self.vit_save = SaveViTResult(
+                self,
+                working_directory=self.param.working_directory,
+                sign=self.param.sign,
+                 positions_provider=lambda: self.point_proc.positions_um,
+                 pixel_size_m=self.pty.recon.x_pixel_m,
+                 x_range_um=self.pty.recon.y_range_um,  # slow axis (INENC3) → canvas width
+                 y_range_um=self.pty.recon.x_range_um,  # fast axis (INENC2) → canvas height
+                 name="vit_save")
+            # Fan-out from InitSimul's diff_amp_vit (ViT-normalised amplitude)
+            self.add_flow(self.init, self.vit, {("diff_amp_vit", "diff_amp"), ("image_indices", "image_indices")})
+            self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
+            if self.gpu_iter is not None:
+                self.pty._vit_save_op = self.vit_save
+            else:
+                # AI-only simulation: InitSimul triggers final save and exit
+                self.init._vit_save_op = self.vit_save
+                self.init._vit_scan_num = str(self.param.scan_num)
 
 
 
@@ -370,7 +420,10 @@ class PtychoApp(Application):
 
         self.config_path = config_path
         self.param = parse_config(self.config_path)
-        self.gpu = self.param.gpus[0]
+        self.gpu_iter = getattr(self.param, 'live_gpu_iterative', None)
+        self.gpu_ai = getattr(self.param, 'live_gpu_ai', None)
+        # Primary GPU for iterative path (or fallback)
+        self.gpu = self.gpu_iter if self.gpu_iter is not None else self.param.gpus[0]
 
     def config_ops(self,param):
 
@@ -410,6 +463,9 @@ class PtychoApp(Application):
         self.point_proc.angle_correction_flag = param.angle_correction_flag
         self.init.angle_correction_flag = param.angle_correction_flag
 
+        # Allocate per-frame position buffer for ViT mosaic stitching (AI inference path)
+        self.point_proc.positions_um = np.full((nz, 2), np.nan, dtype=np.float64)
+
         self.pty.num_points_min = self.min_points
 
 
@@ -446,46 +502,66 @@ class PtychoApp(Application):
 
         self.config_ops(self.param)
 
-
+        # --- Common data path: Eiger -> Decompress -> Batch -> Preprocess ---
         self.add_flow(self.eiger_zmq_rx,self.eiger_decompress,{("image_index_encoding","image_index_encoding")})
         self.add_flow(self.eiger_decompress,self.image_batch,{("decompressed_image","image"),("image_index","image_index")})
         self.add_flow(self.image_batch,self.image_proc,{("image_batch","image_batch"),("image_indices","image_indices_in")})
-        self.add_flow(self.image_proc,self.image_send,{("diff_amp","diff_amp"),("image_indices","image_indices")})
-        
-        self.add_flow(self.pos_rx,self.point_proc,{("pointRx_out","pointOp_in")})
-        self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
 
-        self.add_flow(self.image_send,self.pty,{("frame_ready_num","frame_ready_num")})
-        self.add_flow(self.point_proc,self.pty,{("pos_ready_num","pos_ready_num")})
+        # --- Iterative path (conditional on live_gpu_iterative) ---
+        if self.gpu_iter is not None:
+            self.add_flow(self.image_proc,self.image_send,{("diff_amp","diff_amp"),("image_indices","image_indices")})
+            
+            self.add_flow(self.pos_rx,self.point_proc,{("pointRx_out","pointOp_in")})
+            self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
 
-        self.add_flow(self.init,self.pos_rx,{("flush_pos_rx","flush")})
-        self.add_flow(self.init,self.image_batch,{("flush_image_batch","flush")})
-        self.add_flow(self.init,self.image_send,{("flush_image_send","flush")})
-        self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
-        self.add_flow(self.init,self.pty,{("flush_pty","flush")})
+            self.add_flow(self.image_send,self.pty,{("frame_ready_num","frame_ready_num")})
+            self.add_flow(self.point_proc,self.pty,{("pos_ready_num","pos_ready_num")})
 
-        # pool1 = self.make_thread_pool("pool1", 1)
-        # pool1.add(self.eiger_zmq_rx, True)
-    
-        # pool2 = self.make_thread_pool("pool2", 7)
-        # pool2.add(self.pos_rx, True)
-        # pool2.add(self.image_batch, True)
-        # pool2.add(self.image_proc, True)
-        # pool2.add(self.image_send, True)
-        # pool2.add(self.point_proc, True)
-        # pool2.add(self.pty, True)
-        # pool2.add(self.o, True)
-        
+            self.add_flow(self.init,self.pos_rx,{("flush_pos_rx","flush")})
+            self.add_flow(self.init,self.image_batch,{("flush_image_batch","flush")})
+            self.add_flow(self.init,self.image_send,{("flush_image_send","flush")})
+            self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
+            self.add_flow(self.init,self.pty,{("flush_pty","flush")})
 
-        # self.add_flow(self.init_recon,self.pty_ctrl,{("init","ctrl_input")})
-        # self.add_flow(self.image_send,self.pty_ctrl,{("frame_ready_num","ctrl_input")})
-        # self.add_flow(self.point_proc,self.pty_ctrl,{("pos_ready_num","ctrl_input")})
-        # self.add_flow(self.pty_ctrl,self.pty,{("ready_num","ready_num")})
-        # self.add_flow(self.pty,self.pty_ctrl,{("ctrl","ctrl_input")})
+            self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
+            self.add_flow(self.pty,self.o,{("output_iter","output_iter")})
+        else:
+            # Even without iterative, we need flush signals for data source operators
+            self.add_flow(self.image_proc,self.image_send,{("diff_amp","diff_amp"),("image_indices","image_indices")})
+            self.add_flow(self.pos_rx,self.point_proc,{("pointRx_out","pointOp_in")})
+            self.add_flow(self.image_send,self.point_proc,{("image_indices_out","pointOp_in")})
+            self.add_flow(self.init,self.pos_rx,{("flush_pos_rx","flush")})
+            self.add_flow(self.init,self.image_batch,{("flush_image_batch","flush")})
+            self.add_flow(self.init,self.image_send,{("flush_image_send","flush")})
+            self.add_flow(self.init,self.point_proc,{("flush_pos_proc","flush")})
 
-
-        self.add_flow(self.pty,self.live_result,{("save_live_result","results")})
-        self.add_flow(self.pty,self.o,{("output","output")})
+        # --- AI/VIT path (conditional on live_gpu_ai) ---
+        if self.gpu_ai is not None:
+            vit_engine_path = getattr(self.param, 'vit_engine_path', '')
+            self.vit = PtychoViTInferenceOp(
+                self,
+                engine_path=vit_engine_path,
+                gpu=self.gpu_ai,
+                name="vit_inference",
+            )
+            self.vit_save = SaveViTResult(
+                self,
+                working_directory=self.param.working_directory,
+                sign=self.param.sign,
+                 positions_provider=lambda: self.point_proc.positions_um,
+                 pixel_size_m=self.pty.recon.x_pixel_m,
+                 x_range_um=self.pty.recon.y_range_um,  # slow axis (INENC3) → canvas width
+                 y_range_um=self.pty.recon.x_range_um,  # fast axis (INENC2) → canvas height
+                 name="vit_save")
+            # Fan-out from ImagePreprocessorOp's diff_amp_vit (ViT-normalised amplitude,
+            # scale=10000, fftshift=False). ptychoml auto-detects DC convention.
+            self.add_flow(self.image_proc, self.vit, {("diff_amp_vit", "diff_amp"), ("image_indices", "image_indices")})
+            self.add_flow(self.vit, self.vit_save, {("vit_result", "results")})
+            if self.gpu_iter is not None:
+                self.pty._vit_save_op = self.vit_save
+            else:
+                # AI-only live: InitRecon triggers save on new scan detection
+                self.init._vit_save_op = self.vit_save
 
 
 def main():
@@ -497,10 +573,26 @@ def main():
     #config = parse_args()
 
     param = parse_config(config_path)
-    gpu = param.gpus[0]
+
+    # Determine process-wide GPU: iterative takes priority, else AI GPU
+    gpu_iter = getattr(param, 'live_gpu_iterative', None)
+    gpu_ai = getattr(param, 'live_gpu_ai', None)
+    if gpu_iter is not None:
+        gpu = gpu_iter
+    elif gpu_ai is not None:
+        gpu = gpu_ai
+    else:
+        gpu = param.gpus[0]  # fallback to first GPU in list
+
     cp.cuda.Device(gpu).use()
     cuda.select_device(gpu)
     cp.cuda.set_pinned_memory_allocator()
+
+    # Determine how many worker threads we need
+    # Base: 9 for iterative-only, +2 for AI path (vit_inference + vit_save)
+    n_workers = 9
+    if gpu_ai is not None:
+        n_workers = 11
 
     if len(sys.argv) >= 3 and sys.argv[2] == 'simulate':
         app = PtychoSimulApp(config_path=config_path)
@@ -509,18 +601,9 @@ def main():
     
     #app.config()
     
-    # scheduler = EventBasedScheduler(
-    #             app,
-    #             worker_thread_number=16,
-    #             stop_on_deadlock=True,
-    #             stop_on_deadlock_timeout=500,
-    #             name="event_based_scheduler",
-    #         )
-    # app.scheduler(scheduler)
-    
     scheduler = MultiThreadScheduler(
                 app,
-                worker_thread_number=9,
+                worker_thread_number=n_workers,
                 check_recession_period_ms=0.001,
                 stop_on_deadlock=True,
                 stop_on_deadlock_timeout=500,
@@ -530,6 +613,12 @@ def main():
     app.scheduler(scheduler)
 
     app.run()
+
+    # Save final VIT results if AI path was active (covers live mode shutdown)
+    if gpu_ai is not None and hasattr(app, 'vit_save') and hasattr(app, 'init'):
+        last_scan_num = getattr(app.init, 'scan_num', None)
+        if last_scan_num is not None:
+            app.vit_save._save_final(str(last_scan_num))
 
     # Release CuPy memory pools so GPU memory is freed before the process exits
     cp.get_default_memory_pool().free_all_blocks()

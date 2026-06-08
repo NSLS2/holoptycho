@@ -1,6 +1,7 @@
 import logging
 import sys
 import threading
+import time
 
 import numpy as np
 import cupy as cp
@@ -11,6 +12,40 @@ from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
 from holoscan.logger import LogLevel, set_log_level
 from holoscan.decorator import create_op, Input
+
+
+def _preprocess_diffraction(images, *, normalization=1.0, scale=1.0,
+                             hot_pixel_count_threshold=None, fftshift=True):
+    """Convert raw detector intensity to diffraction amplitude.
+
+    Steps (in order):
+      1. Hot-pixel zeroing  — counts > hot_pixel_count_threshold → 0  (AI inference;
+                              disabled by default so old behaviour is preserved)
+      2. sqrt((intensity / normalization) * scale) → float32 amplitude
+         normalization / scale are AI-inference knobs; defaults 1.0 / 1.0 reproduce
+         the old np.sqrt(images, dtype=float32) exactly.
+      3. np.rot90(amplitude, axes=(2,1))  — same as old hardcoded rot90; shared by
+         both iterative reconstruction and AI inference.
+      4. fftshift on last two axes        — same as old hardcoded fftshift; shared.
+
+    With all defaults the output is numerically equivalent to the previous chain:
+        np.rot90(images, axes=(2,1)) → fftshift(axes=(1,2)) → sqrt(float32)
+    """
+    working = np.asarray(images, dtype=np.float64)
+    # Step 1: hot-pixel ceiling (AI inference tuning; disabled by default)
+    if hot_pixel_count_threshold is not None:
+        working[working > float(hot_pixel_count_threshold)] = 0.0
+    # Step 2: amplitude
+    amplitude = np.sqrt(
+        (working / float(normalization)) * float(scale)
+    ).astype(np.float32)
+    # Step 3: rotation — rot90_cw == old np.rot90(images, axes=(2,1))
+    amplitude = np.ascontiguousarray(np.rot90(amplitude, axes=(2, 1)))
+    # Step 4: fftshift
+    if fftshift:
+        amplitude = np.fft.fftshift(amplitude, axes=(-2, -1))
+    return amplitude
+
 
 class ImageBatchOp(Operator):
     def __init__(self, *args, **kwargs):
@@ -26,6 +61,11 @@ class ImageBatchOp(Operator):
         self.images_to_add = None #np.zeros((self.batchsize, 256, 256))
         self.indices_to_add = None #np.zeros(self.batchsize, dtype=np.int32)
 
+        # Per-second throughput counters for diagnostic logging
+        self._diag_window_start = time.time()
+        self._diag_calls = 0
+        self._diag_batches_emitted = 0
+
     def flush(self,param):
         self.counter = 0
         self.roi = np.array(param)
@@ -38,6 +78,18 @@ class ImageBatchOp(Operator):
         spec.output("image_indices")
         
     def compute(self, op_input, op_output, context):
+        # Per-second diagnostic logging
+        self._diag_calls += 1
+        now = time.time()
+        if now - self._diag_window_start >= 1.0:
+            self.logger.debug(
+                "ImageBatchOp 1s: calls=%d batches_emitted=%d",
+                self._diag_calls, self._diag_batches_emitted,
+            )
+            self._diag_window_start = now
+            self._diag_calls = 0
+            self._diag_batches_emitted = 0
+
         param = op_input.receive('flush')
         if param:
             self.flush(param)
@@ -50,11 +102,17 @@ class ImageBatchOp(Operator):
 
         # For Eiger2 detector
         if self.flip_image:
-            image = np.flip(image,1)
-
-
-        image = image[self.roi[0, 0]:self.roi[0, 1],
-                    self.roi[1, 0]:self.roi[1, 1]]
+            image = np.flip(image, 1)
+            # After flipping along axis=1 the ROI column indices (measured on
+            # the un-flipped raw frame) must be mirrored so the crop picks the
+            # same physical region in the now-flipped frame.
+            W = image.shape[1]
+            r0, r1         = int(self.roi[0, 0]), int(self.roi[0, 1])
+            c0_raw, c1_raw = int(self.roi[1, 0]), int(self.roi[1, 1])
+            image = image[r0:r1, W - c1_raw : W - c0_raw]
+        else:
+            image = image[self.roi[0, 0]:self.roi[0, 1],
+                          self.roi[1, 0]:self.roi[1, 1]]
 
         # Remove Bad pixels (-1 to unsigned int)
         image[image==np.iinfo(image.dtype).max] = 0
@@ -70,44 +128,162 @@ class ImageBatchOp(Operator):
             op_output.emit(self.images_to_add.copy(), "image_batch")
             op_output.emit(self.indices_to_add.copy(), "image_indices")
             self.counter = 0
+            self._diag_batches_emitted += 1
             
 class ImagePreprocessorOp(Operator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args,**kwargs)
         self.logger = logging.getLogger("ImagePreprocessorOp")
         logging.basicConfig(level=logging.INFO)
-        # self.roi = np.array(roi)
         self.detmap_threshold = 0
         self.badpixels = None
-        super().__init__(*args, **kwargs)
+
+        # --- AI inference amplitude scaling ---
+        # normalization: per-scan max intensity (hot pixels excluded).
+        #   Default 1.0 → diff_amp = sqrt(images), identical to old behaviour.
+        #   Set to the actual per-scan max to enable ViT-style normalisation.
+        #   Does NOT affect iterative reconstruction (relative amplitudes only).
+        self.normalization = 1.0
+        # scale: global multiplicative factor after sqrt.
+        #   Default 1.0 → no change. ptycho-vit training uses 1e4; set to match
+        #   whatever value the ViT engine was trained with.
+        self.scale = 1.0
+        # hot_pixel_count_threshold: zero photon counts above this before sqrt.
+        #   Default None = disabled. Complements detmap_threshold (low-end floor).
+        #   Affects both iterative and AI paths via the shared diff_amp output.
+        self.hot_pixel_count_threshold = None
+
+        # --- Shared orientation / DC convention ---
+        # fftshift_dp: apply fftshift to diff_amp (shared by both paths).
+        #   True = always apply, matching the old hardcoded fftshift.
+        #   PtychoViTInferenceOp's data_is_shifted=True undoes this for ViT.
+        #   Keep True unless deliberately changing the DC convention.
+        self.fftshift_dp = True
+
+        # --- ViT normalization (computed online from first N frames) ---
+        # vit_normalization: per-scan max intensity used to scale diff_amp_vit.
+        #   None until computed. First vit_norm_frames raw frames are accumulated;
+        #   after that the max (excluding hot pixels) is set here and held for
+        #   the rest of the scan.  The first few batches use 1.0 as a placeholder.
+        self.vit_normalization = None
+        self.vit_normalization_guess = 1000
+        self._vit_norm_buffer = []          # raw frame accumulator (pre-transform)
+        self._vit_norm_seen = 0             # total frames accumulated so far
+        self._vit_norm_frames = 5         # compute once this many frames seen
+        self._vit_norm_hot_threshold = 50000.0  # exclude pixels above this count
+
+        # Per-second timing diagnostics
+        self._diag_window_start = time.time()
+        self._diag_calls = 0
+        self._diag_total_ms = 0.0
         
     def setup(self, spec: OperatorSpec):
         spec.input("image_batch").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.input("image_indices_in").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.output("diff_amp")
         spec.output("image_indices")
+        # ViT-specific amplitude: scale=10000, fftshift=False (AI inference path).
+        # ConditionType.NONE so the operator is not blocked when this port is
+        # not connected (iterative-only mode).
+        spec.output("diff_amp_vit").condition(ConditionType.NONE)
         
     def compute(self, op_input, op_output, context):
-        images = op_input.receive("image_batch")
+        t0 = time.perf_counter()
+        self._diag_calls += 1
+        now = time.time()
+        if now - self._diag_window_start >= 1.0:
+            self.logger.debug(
+                "ImagePreprocessorOp 1s: calls=%d total=%.1f ms",
+                self._diag_calls, self._diag_total_ms,
+            )
+            self._diag_window_start = now
+            self._diag_calls = 0
+            self._diag_total_ms = 0.0
+
+        images  = op_input.receive("image_batch")
         indices = op_input.receive("image_indices_in")
-        
+
+        # Reset vit_normalization at the start of each new scan so it is
+        # recomputed from fresh data.  Detecting scan boundary by frame index
+        # resetting to 0 is robust without requiring a flush port.
+        if int(indices[0]) == 0:
+            self.vit_normalization = None
+            self._vit_norm_buffer.clear()
+            self._vit_norm_seen = 0
+
         processed_images = np.asarray(images)
-        
-        for bd in self.badpixels.T:
-            x = int(bd[0])
-            y = int(bd[1])
-            processed_images[:, x, y] = np.median(processed_images[:, x-1:x+2, y-1:y+2], axis=(2, 1))
-        
-        # processed_images = processed_images[:, self.roi[0,0]:self.roi[0,1], self.roi[1,0]:self.roi[1,1]]
-        processed_images = np.rot90(processed_images, axes=(2,1))
-        processed_images = np.fft.fftshift(processed_images, axes=(1,2))
-        # processed_images = np.transpose(processed_images,[0,2,1])
+
+        # --- Bad pixel inpainting (BOTH paths) ---
+        # Border-clamped: fixes silent empty-window bug when a bad pixel sits
+        # at row 0 or col 0 (negative slice index in old code → empty window).
+        # Functionally identical to old loop for all interior pixels.
+        if self.badpixels is not None and self.badpixels.ndim == 2 and self.badpixels.shape[1] > 0:
+            h, w = processed_images.shape[-2], processed_images.shape[-1]
+            for bd in self.badpixels.T:
+                r, c = int(bd[0]), int(bd[1])
+                r0, r1 = max(r - 1, 0), min(r + 2, h)
+                c0, c1 = max(c - 1, 0), min(c + 2, w)
+                processed_images[:, r, c] = np.median(
+                    processed_images[:, r0:r1, c0:c1], axis=(2, 1)
+                )
+
+        # --- Noise floor threshold (BOTH paths; unchanged from old code) ---
         if self.detmap_threshold > 0:
-            processed_images[processed_images<self.detmap_threshold] = 0
-        diff_amp = np.sqrt(processed_images, dtype = np.float32 ,order='C')
+            processed_images = processed_images.copy()
+            processed_images[processed_images < self.detmap_threshold] = 0
+
+        # --- Reconstruction + model branch → diff_amp (BOTH paths) ---
+        # With all defaults this is numerically equivalent to the old chain:
+        #   np.rot90(images, axes=(2,1)) → fftshift(axes=(1,2)) → sqrt(float32)
+        # To enable ViT-style normalisation set self.normalization to the
+        # per-scan max intensity; self.scale to the training scale (e.g. 1e4).
+        # The iterative reconstruction is insensitive to constant amplitude
+        # scaling, so adjusting these does not affect iterative results.
+        diff_amp = _preprocess_diffraction(
+            processed_images,
+            normalization=self.normalization,
+            scale=self.scale,
+            hot_pixel_count_threshold=self.hot_pixel_count_threshold,
+            fftshift=self.fftshift_dp,
+        )
 
         op_output.emit(diff_amp, "diff_amp")
         op_output.emit(indices, "image_indices")
+
+        # --- ViT branch → diff_amp_vit (AI inference path only) ---
+        # Online vit_normalization: accumulate raw frames until vit_norm_frames
+        # seen, then compute max excluding hot pixels.  Before normalization is
+        # ready the first few batches use vit_norm=1.0 as a placeholder — this
+        # is a small fraction of a typical scan and acceptable for live display.
+        if self.vit_normalization is None:
+            self._vit_norm_buffer.append(processed_images.copy())
+            self._vit_norm_seen += processed_images.shape[0]
+            if self._vit_norm_seen >= self._vit_norm_frames:
+                all_raw = np.concatenate(self._vit_norm_buffer, axis=0)
+                mask = all_raw < self._vit_norm_hot_threshold
+                self.vit_normalization = (
+                    float(all_raw[mask].max()) if mask.any() else self.vit_normalization_guess
+                )
+                self._vit_norm_buffer.clear()
+                self.logger.info(
+                    "vit_normalization computed: %.1f from %d frames",
+                    self.vit_normalization, self._vit_norm_seen,
+                )
+        vit_norm = self.vit_normalization if self.vit_normalization is not None else self.vit_normalization_guess
+        # fftshift=False: DC stays at center (natural detector position after
+        # rot90). ptychoml.PtychoViTInference uses fftshift=None to auto-detect
+        # DC position, so it will correctly no-op here and the model sees
+        # DC at center — matching the 01Holoscan/holoptycho training convention.
+        diff_amp_vit = _preprocess_diffraction(
+            processed_images,
+            normalization=vit_norm,
+            scale=10000.0,
+            hot_pixel_count_threshold=self.hot_pixel_count_threshold,
+            fftshift=False,
+        )
+        op_output.emit(diff_amp_vit, "diff_amp_vit")
+
+        self._diag_total_ms += (time.perf_counter() - t0) * 1000.0
 
 class PointProcessorOp(Operator):
     def __init__(self, *args, x_direction = -1., y_direction = -1., **kwargs):
@@ -117,6 +293,18 @@ class PointProcessorOp(Operator):
 
         self.point_info = None
         self.point_info_target = None
+
+        # positions_um: (nz, 2) float64 array of per-frame scan positions in
+        # microns. Allocated externally in ptycho_holo.config_ops() once nz is
+        # known. Col 0 = slow axis (pos1/INENC3), col 1 = fast axis (pos0/INENC2).
+        # Filled by process_point_info() as PandA data arrives.
+        # Read by SaveViTResult to stitch ViT patches at real scan positions.
+        # None until allocated; position tracking silently disabled if None.
+        # AI inference path only — iterative path uses point_info/point_info_target.
+        self.positions_um = None
+        # swap_xy: exchange col 0 and col 1 in positions_um for non-standard
+        # axis conventions. False = default HXN (slow→col0, fast→col1).
+        self.swap_xy = False
 
         self.angle_correction_flag = True
         self.angle = 0
@@ -175,6 +363,10 @@ class PointProcessorOp(Operator):
         self.angle = param[5]
 
         self.simulate_positions = param[6]
+
+        # Reset positions_um to NaN for the new scan (AI inference path)
+        if self.positions_um is not None:
+            self.positions_um[:] = np.nan
 
         if self.simulate_positions: #Generate all positions at flush
             nx = int(param[7])
@@ -268,6 +460,23 @@ class PointProcessorOp(Operator):
                         self.point_info[i,:] = np.array([(int(points0[index] - self.nx_prb//2), int(points0[index] + self.nx_prb//2), \
                                         int(points1[index] - self.ny_prb//2), int(points1[index] + self.ny_prb//2))]\
                                         ,dtype = np.int32)
+
+                # Populate positions_um with freshly-converted per-frame
+                # positions in microns (AI inference path — mosaic stitching).
+                # Silent no-op if positions_um has not been allocated.
+                # Must run before pos_loaded_num is updated so the slice
+                # [pos_loaded_num:end] refers to the newly processed range.
+                if self.positions_um is not None:
+                    end  = min(p_total_num, self.positions_um.shape[0])
+                    take = end - self.pos_loaded_num
+                    if take > 0:
+                        # HXN convention: col 0 = slow axis (pos1/INENC3),
+                        #                 col 1 = fast axis (pos0/INENC2).
+                        # swap_xy=True reverses this for non-standard setups.
+                        col_fast, col_slow = (0, 1) if self.swap_xy else (1, 0)
+                        self.positions_um[self.pos_loaded_num:end, col_fast] = pos0[:take]
+                        self.positions_um[self.pos_loaded_num:end, col_slow] = pos1[:take]
+
                 self.pos_loaded_num = p_total_num
                 
     def send_points_to_recon(self):
@@ -358,7 +567,7 @@ class ImageSendOp(Operator):
         nframe = diff_d.shape[0]
 
 
-        if (self.frame_ready_num + nframe) < self.max_points:
+        if self.diff_d_target is not None and (self.frame_ready_num + nframe) < self.max_points:
             diff_d_target = self.diff_d_target[self.frame_ready_num:self.frame_ready_num+nframe]
             
             cp.cuda.runtime.memcpy(diff_d_target.data.ptr,diff_d.ctypes.data,diff_d.nbytes,cp.cuda.runtime.memcpyHostToDevice)

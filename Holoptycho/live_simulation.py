@@ -72,6 +72,28 @@ class InitSimul(Operator):
         self.point_datapack_counter = 0
         self._done_emitted = False
 
+        # Pre-compute vit_normalization from the first 200 raw frames so that
+        # diff_amp_vit is correctly scaled from the very first batch.
+        # Only possible for the raw-data path; preprocessed diffamp path uses 1.0.
+        self._vit_norm_hot_threshold = 50000.0
+        if self.h5_raw is not None:
+            n_sample = min(200, int(self.rawdata.shape[0]))
+            raw_sample = np.array(self.rawdata[:n_sample])
+            # Restrict to ROI before computing max so hot pixels outside the
+            # detection region don't inflate the normalization.
+            raw_sample = raw_sample[
+                :,
+                self.roi[0, 0]:self.roi[0, 1],
+                self.roi[1, 0]:self.roi[1, 1],
+            ]
+            mask = raw_sample < self._vit_norm_hot_threshold
+            self.vit_normalization = float(raw_sample[mask].max()) if mask.any() else 1.0
+        else:
+            # Preprocessed diffamp already in amplitude form; cannot derive
+            # original intensity normalization.
+            self.vit_normalization = 1.0
+        print(f"InitSimul: vit_normalization = {self.vit_normalization:.1f}")
+
 
 
     def setup(self,spec):
@@ -80,6 +102,7 @@ class InitSimul(Operator):
         spec.output("flush_pty").condition(ConditionType.NONE)
 
         spec.output("diff_amp").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
+        spec.output("diff_amp_vit").condition(ConditionType.NONE)
         spec.output("image_indices").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
 
         spec.output("pointRx_out")
@@ -106,13 +129,32 @@ class InitSimul(Operator):
                             detmap[iz,x,y] = np.median(detmap[iz,x-1:x+2,y-1:y+2])
                     
                 detmap = detmap[:,self.roi[0,0]:self.roi[0,1],self.roi[1,0]:self.roi[1,1]]
-                detmap = np.rot90(detmap,axes=(2,1))
-                detmap = np.fft.fftshift(detmap,axes=(1,2))
-                diff_l = np.sqrt(detmap,dtype = np.float32,order='C')
-            else:
-                diff_l = np.array(self.rawdata[i:i+self.batchsize],dtype = np.float32,order='C')
+                # rot90 only — fftshift applied separately per path
+                detmap_rot90 = np.rot90(detmap, axes=(2, 1))
 
-            op_output.emit(diff_l, "diff_amp")
+                # Iterative path: fftshift applied so DC is at corners (standard
+                # convention for the iterative DM algorithm)
+                diff_l = np.sqrt(
+                    np.fft.fftshift(detmap_rot90, axes=(1, 2)),
+                    dtype=np.float32, order='C',
+                )
+
+                # ViT path: no fftshift (DC stays at center); scale=10000 with
+                # per-scan normalization pre-computed in __init__.
+                # ptychoml.PtychoViTInference auto-detects DC position internally.
+                diff_l_vit = np.sqrt(
+                    detmap_rot90.astype(np.float64) / self.vit_normalization * 10000.0
+                ).astype(np.float32)
+            else:
+                # Preprocessed diffamp path: already in amplitude form.
+                diff_l = np.array(self.rawdata[i:i+self.batchsize], dtype=np.float32, order='C')
+                # Cannot recover original intensity normalization; emit zeros so
+                # the ViT output port is satisfied but inference results will be
+                # meaningless — use raw-data H5 for ViT simulation.
+                diff_l_vit = np.zeros_like(diff_l)
+
+            op_output.emit(diff_l,     "diff_amp")
+            op_output.emit(diff_l_vit, "diff_amp_vit")
             op_output.emit(np.arange(i,i+self.batchsize), "image_indices")
             op_output.emit((self.point_datapack_counter,self.points_simulate[:,i*10:(i+self.batchsize)*10]), "pointRx_out")
 
@@ -125,4 +167,8 @@ class InitSimul(Operator):
                 if self.h5_raw:
                     self.h5_raw.close()
                 self._done_emitted = True
+                if hasattr(self, '_vit_save_op'):
+                    self._vit_save_op._save_final(self._vit_scan_num)
+                    print('AI simulation complete. Exiting.', flush=True)
+                    os._exit(0)
             time.sleep(0.1)  # idle; PtychoRecon will stop the app after saves

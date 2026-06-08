@@ -45,6 +45,10 @@ venv/
 *.h5
 eiger_simulation/test_data/*
 eiger_dir/live_test
+models/
+Holoptycho/edgePtychoViT/
+
+
 
 # reconstruction results
 recon_result/

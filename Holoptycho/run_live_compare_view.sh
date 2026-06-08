@@ -1,0 +1,3 @@
+#python /nsls2/data2/hxn/legacy/home/home/tshimamur/HoloScanContainerAIInference/holoscan-framework/Holoptycho/live_compare_viewer.py /nsls2/data2/hxn/legacy/home/home/tshimamur/HoloScanContainerAIInference/holoscan-framework/eiger_test/h5_data/scan_320045.h5     --save-dir /nsls2/data2/hxn/legacy/home/home/tshimamur/HoloScanContainerAIInference/output     --interval 0.5
+python /nsls2/data2/hxn/legacy/home/home/tshimamur/HoloScanContainerAIInference/holoscan-framework/Holoptycho/live_compare_viewer.py /nsls2/data2/hxn/legacy/home/home/tshimamur/HoloScanContainerAIInference/holoscan-framework/eiger_test/h5_data/scan_320045.h5     --save-dir /nsls2/data2/hxn/legacy/users/Holoscan     --interval 0.5
+
