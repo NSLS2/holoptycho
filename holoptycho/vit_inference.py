@@ -20,7 +20,11 @@ import time
 import numpy as np
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
-from ptychoml.stitch import stitch_batch_livestitch_into, stitch_batch_nearest
+from ptychoml.stitch import (
+    normalize_mosaic,
+    stitch_batch_livestitch_into,
+    stitch_batch_nearest,
+)
 from ptychoml.preprocess import apply_d4, D4_NAMES
 from .mosaic_canvas import estimate_canvas_mid
 from .tiled_writer import get_writer
@@ -897,16 +901,9 @@ class MosaicWriterOp(Operator):
             # optimisation: while a full-canvas write is in progress (~30 s),
             # all intermediate bbox snapshots were evicted by the drop policy,
             # permanently losing early-scan-line data that fell in those batches.
-            def _normalise_full(m: np.ndarray, c: np.ndarray):
-                valid = c >= min_overlap_count
-                if valid.any():
-                    avg = m / np.where(valid, c, 1.0)
-                    fill = float(np.median(avg[valid]))
-                    out = np.where(valid, avg, np.nan).astype(np.float32)
-                    return fill, out
-                return 0.0, np.full_like(m, np.nan, dtype=np.float32)
-
-            self._fill_value, normalised = _normalise_full(mosaic, counts)
+            self._fill_value, normalised = normalize_mosaic(
+                mosaic, counts, min_overlap_count
+            )
             t_norm = time.perf_counter()
             _writer.write_vit_mosaic(
                 normalised,
@@ -915,7 +912,9 @@ class MosaicWriterOp(Operator):
                 canvas_origin_um=canvas_origin_um,
             )
             if mosaic_amp is not None and counts_amp is not None:
-                self._fill_value_amp, norm_amp = _normalise_full(mosaic_amp, counts_amp)
+                self._fill_value_amp, norm_amp = normalize_mosaic(
+                    mosaic_amp, counts_amp, min_overlap_count
+                )
                 _writer.write_vit_amp_mosaic(
                     norm_amp,
                     batch_num=batch_num,

@@ -898,8 +898,9 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
 * **ViT mosaic stitching uses `ptychoml.stitch.stitch_batch_livestitch_into`
   (nearest-integer placement) — `SaveViTResult` + `MosaicWriterOp`.**
   `SaveViTResult` keeps a running `(canvas, counts)` sum; `MosaicWriterOp`
-  writes `canvas / max(counts, 1)` each batch. Three related behaviours worth
-  knowing when debugging the live mosaic:
+  averages it each batch via `ptychoml.stitch.normalize_mosaic` (covered
+  pixels → `canvas / counts`, under-covered → NaN, plus a median fill value).
+  Three related behaviours worth knowing when debugging the live mosaic:
   * **Staircase artifact → full-canvas writes.** `MosaicWriterOp` writes the
     *entire* cumulative canvas every batch (latest-wins, capacity-1 + drop
     policy), not just the bbox touched this batch. Writing only the bbox left
