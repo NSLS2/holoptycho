@@ -870,8 +870,12 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
     intensity tap (`/dp`). The default reproduces the historical HXN
     anti-diagonal flip; use `identity` to save raw detector frames.
   * `dp_orient` (default `rot90_cw`) — D4 element on the model-input branch.
-    The default reproduces the prior hardcoded chain (verified equivalent);
-    orientation auto-detect will set this automatically once wired up.
+    The default reproduces the prior hardcoded chain (verified equivalent).
+    Determine the right value offline with `scripts/detect_orientation.py`
+    (reads a recorded scan HDF5 + the model engine, sweeps all 8 D4
+    candidates via `ptychoml.autodetect_orientation`, and writes a JSON
+    snippet with the winning `dp_orient` to merge into the scan config); the
+    in-pipeline live auto-detector sets it automatically once wired up.
   * `fftshift_dp` (default unset → `None`) — DC convention for the model
     input. `None` lets ptychoml auto-detect via `detect_dc_at_corner` and
     shift only when the central beam sits at the corners. Override with
