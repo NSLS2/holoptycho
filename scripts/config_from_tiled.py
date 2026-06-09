@@ -233,10 +233,10 @@ def lookup_uid_by_scan_id(tiled_url: str, scan_id) -> str:
     root_url = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
     root = open_tiled_node(root_url)
     try:
-        catalog = root["hxn"]["raw"]
+        catalog = root["hxn"]["migration"]
     except KeyError:
         print(
-            f"ERROR: tiled server at {root_url} has no hxn/raw catalog",
+            f"ERROR: tiled server at {root_url} has no hxn/migration catalog",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -250,11 +250,12 @@ def lookup_uid_by_scan_id(tiled_url: str, scan_id) -> str:
         )
         sys.exit(1)
 
-    results = catalog.search(Eq("scan_id", scan_id_int))
+    results = catalog.search(Eq("start.scan_id", scan_id_int))
     uids = list(results)
+    print ("DEBUG: Length of uids is ", len(uids), file=sys.stderr)
     if not uids:
         print(
-            f"ERROR: no run in hxn/raw with scan_id={scan_id_int}",
+            f"ERROR: no run in hxn/migration with scan_id={scan_id_int}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -501,6 +502,95 @@ def load_config_from_tiled(
     # remains in build_full_config() for those.
     z_m = scan_md.get("detector_distance")
 
+    # --- PandA upsample factor ---
+    # The PandA encoder sends N samples per detector frame (typically 10 at
+    # HXN). PointProcessorOp averages every `panda_upsample` encoder samples
+    # into one scan position. If the config omits this key it defaults to 1,
+    # which causes the y-axis to be compressed by exactly that factor (only
+    # the first n_frames raw encoder samples are consumed as if each were a
+    # separate frame). Auto-detect by comparing inenc array length to the
+    # detector frame count using only array shapes — no data downloaded.
+    panda_upsample = 1
+    try:
+        primary_stream = get_stream(run, "primary")
+        enc_key = next(
+            (k for k in ("inenc2_val", "inenc3_val", "inenc1_val") if k in primary_keys),
+            None,
+        )
+        det_key = detectorkind or next(
+            (k for k in primary_keys if k.endswith("_image")), None
+        )
+        if enc_key and det_key:
+            enc_shape = primary_stream[enc_key].structure().shape
+            det_shape = primary_stream[det_key].structure().shape
+            # det_shape is (1, n_frames, H, W) or (n_frames, H, W)
+            n_frames = det_shape[-3] if len(det_shape) >= 3 else det_shape[0]
+            n_enc = enc_shape[-1] if len(enc_shape) >= 2 else enc_shape[0]
+            if n_frames > 0:
+                ratio = n_enc // n_frames
+                if ratio > 1:
+                    panda_upsample = int(ratio)
+    except Exception as exc:
+        print(
+            f"WARNING: could not auto-detect panda_upsample: {exc}",
+            file=sys.stderr,
+        )
+
+    # --- ViT intensity normalization ---
+    # The model is trained with inputs scaled by (raw_intensity / normalization)
+    # where normalization = per-scan max raw intensity (hot pixels excluded).
+    # The scale factor (10000) is a fixed training constant set in ImagePreprocessorOp
+    # and must NOT be changed here — only normalization is scan-specific.
+    # Sample ~200 frames spread across the scan to estimate the max; using
+    # hot_pixel_count_threshold=50000 to match hxn_to_vit.py's training pipeline.
+    # Shape is (1, n_frames, H, W) for Eiger at HXN.
+    HOT_PIXEL_THRESHOLD = 50000
+    vit_normalization = None
+    if detectorkind:
+        try:
+            primary_stream = get_stream(run, "primary")
+            det_node = primary_stream[detectorkind]
+            det_shape = det_node.structure().shape
+            # det_shape: (1, n_frames, H, W) or (n_frames, H, W)
+            if len(det_shape) == 4:
+                n_det_frames = det_shape[1]
+                n_sample = min(200, n_det_frames)
+                sample = det_node.read(
+                    slice=[slice(None), slice(0, n_sample), slice(None), slice(None)]
+                )
+            else:
+                n_det_frames = det_shape[0]
+                n_sample = min(200, n_det_frames)
+                sample = det_node.read(
+                    slice=[slice(0, n_sample), slice(None), slice(None)]
+                )
+            import numpy as _np
+            from ptychoml import compute_intensity_normalization
+            # Max raw intensity with hot pixels excluded — the same constant
+            # hxn_to_vit writes per scan. compute_intensity_normalization
+            # raises ValueError when every sampled pixel exceeds the threshold.
+            try:
+                vit_normalization = compute_intensity_normalization(
+                    _np.asarray(sample),
+                    hot_pixel_count_threshold=HOT_PIXEL_THRESHOLD,
+                )
+                print(
+                    f"[config_from_tiled] vit_normalization={vit_normalization:.1f} "
+                    f"(max of {n_sample} frames, hot_pixel_threshold={HOT_PIXEL_THRESHOLD})",
+                    file=sys.stderr,
+                )
+            except ValueError:
+                print(
+                    "WARNING: all sampled pixels exceed hot_pixel_threshold "
+                    f"({HOT_PIXEL_THRESHOLD}); vit_normalization not set",
+                    file=sys.stderr,
+                )
+        except Exception as exc:
+            print(
+                f"WARNING: could not auto-detect vit_normalization: {exc}",
+                file=sys.stderr,
+            )
+
     config = {
         "scan_num": str(scan_num),
         "scan_type": plan_name,
@@ -515,12 +605,19 @@ def load_config_from_tiled(
         "y_num": str(y_num),
         "angle": str(round(angle, 4)),
         # streaming_recon defaults both to -1.0; matches legacy ptycho_gui
-        # output for HXN scans.
+        # output for HXN scans.  Override per-run via --x-direction / --y-direction
+        # in build_full_config.
         "x_direction": "-1.0",
         "y_direction": "-1.0",
         "x_ratio": str(round(x_ratio, 8)),
         "y_ratio": str(round(y_ratio, 8)),
+        "panda_upsample": str(panda_upsample),
+        # Match hxn_to_vit.py's hot-pixel zeroing convention so preprocess_diffraction
+        # receives the same threshold used when computing vit_normalization above.
+        "hot_pixel_count_threshold": str(HOT_PIXEL_THRESHOLD),
     }
+    if vit_normalization is not None:
+        config["vit_normalization"] = str(vit_normalization)
     if detectorkind:
         config["detectorkind"] = detectorkind
     if z_m is not None:
@@ -582,7 +679,52 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     )
     recon.add_argument("--det-roix0", type=int, default=0)
     recon.add_argument("--det-roiy0", type=int, default=0)
+    recon.add_argument(
+        "--x-direction",
+        type=float,
+        default=None,
+        help="Sign convention for the slow scan axis (default: -1.0).",
+    )
+    recon.add_argument(
+        "--y-direction",
+        type=float,
+        default=None,
+        help="Sign convention for the fast scan axis (default: -1.0).",
+    )
     recon.add_argument("--gpu-batch-size", type=int, default=256)
+    recon.add_argument(
+        "--patch-flip",
+        default="identity",
+        help=(
+            "D4 transform applied to each ViT output patch before stitching. "
+            "One of: identity, fliplr, flipud, rot180, transpose, "
+            "rot90_ccw, rot90_cw, antitranspose (default: identity)."
+        ),
+    )
+    recon.add_argument(
+        "--overshoot-factor",
+        type=float,
+        default=None,
+        help=(
+            "Canvas safety margin as a multiple of the commanded scan range. "
+            "1.2 (default) adds 20%% extra border; 1.0 allocates exactly the "
+            "commanded range; values below 1.0 crop the canvas to a fraction "
+            "of the commanded range. Reduce for scans with little overshoot to "
+            "shrink the blank border around the stitched mosaic."
+        ),
+    )
+    recon.add_argument(
+        "--min-overlap-count",
+        type=float,
+        default=None,
+        help=(
+            "Minimum accumulated patch-overlap count for a mosaic pixel to "
+            "be included in the output. Pixels below this threshold are set "
+            "to the median fill value, masking the low-coverage canvas border. "
+            "Must be >= 0.5 (FFT-leakage suppression floor). Default: 0.5 "
+            "(any coverage accepted)."
+        ),
+    )
     recon.add_argument(
         "--distance", type=float, default=0.5, help="Sample-to-detector distance in m"
     )
@@ -638,6 +780,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "batch_y0": str(batch_y0),
             "det_roix0": str(args.det_roix0),
             "det_roiy0": str(args.det_roiy0),
+            "x_direction": str(args.x_direction if args.x_direction is not None else config.get("x_direction", "-1.0")),
+            "y_direction": str(args.y_direction if args.y_direction is not None else config.get("y_direction", "-1.0")),
             "gpu_batch_size": str(args.gpu_batch_size),
             "distance": str(args.distance),
             "nz": str(int(config["x_num"]) * int(config["y_num"])),
@@ -665,8 +809,14 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "sign": args.sign,
             "display_interval": str(args.display_interval),
             "recon_mode": args.mode,
+            "patch_flip": args.patch_flip,
         }
     )
+
+    if args.overshoot_factor is not None:
+        config["mosaic_overshoot_factor"] = str(args.overshoot_factor)
+    if args.min_overlap_count is not None:
+        config["mosaic_min_overlap"] = str(args.min_overlap_count)
 
     return config
 
