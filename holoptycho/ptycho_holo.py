@@ -721,6 +721,7 @@ class PtychoApp(Application):
             self,
             x_direction=self.param.x_direction,
             y_direction=self.param.y_direction,
+            swap_xy=bool(getattr(self.param, "position_swap_xy", False)),
             name="point_proc",
         )
 
@@ -886,10 +887,25 @@ class PtychoApp(Application):
         # the session's own detect_dc_at_corner check verifies it), so no
         # manual fftshift flag is needed here — leave fftshift at its default
         # None.
+        #
+        # Orientation auto-detect wiring: the op runs ptychoml.autodetect_
+        # orientation on the first batch with enough finite positions, then
+        # sets image_proc.dp_orient. preprocess_kwargs mirrors the live
+        # preprocessing so the sweep scores under the same normalization/scale/
+        # hot-pixel/fftshift settings (dp_orient excluded — it's the sweep var).
+        _preprocess_kwargs = {
+            "normalization": float(self.image_proc.normalization),
+            "scale": float(self.image_proc.scale),
+            "hot_pixel_count_threshold": self.image_proc.hot_pixel_count_threshold,
+            "fftshift": self.image_proc.fftshift_dp,
+        }
         self.vit = PtychoViTInferenceOp(
             self,
             engine_path=self.engine_path,
             gpu=vit_gpu,
+            image_proc=self.image_proc,
+            positions_provider=lambda: self.point_proc.positions_um,
+            preprocess_kwargs=_preprocess_kwargs,
             name="vit_inference",
         )
         # SaveViTResult publishes positions_um alongside each batch and
@@ -933,8 +949,11 @@ class PtychoApp(Application):
             self,
             positions_provider=lambda: self.point_proc.positions_um,
             pixel_size_m=_x_pixel_m,
-            x_range_um=float(np.abs(self.param.x_range)),
-            y_range_um=float(np.abs(self.param.y_range)),
+            # positions_um col 0 = slow axis (INENC3, y_range) → canvas width;
+            # col 1 = fast axis (INENC2, x_range) → canvas height. Matches the
+            # PointProcessorOp default column convention (swap_xy=False).
+            x_range_um=float(np.abs(self.param.y_range)),
+            y_range_um=float(np.abs(self.param.x_range)),
             overshoot_factor=mosaic_overshoot,
             min_overlap_count=_min_overlap,
             patch_flip=_patch_flip,

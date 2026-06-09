@@ -90,6 +90,9 @@ class PtychoViTInferenceOp(Operator):
         gpu: int = 1,
         output_save_dir: str = "/data/users/Holoscan",
         fftshift: bool | None = None,
+        image_proc=None,
+        positions_provider=None,
+        preprocess_kwargs: dict | None = None,
         **kwargs,
     ):
         super().__init__(fragment, *args, **kwargs)
@@ -98,6 +101,17 @@ class PtychoViTInferenceOp(Operator):
         self.gpu = gpu
         self.output_save_dir = output_save_dir
         self._fftshift = fftshift
+
+        # Orientation auto-detect wiring (set by compose()). The op runs
+        # ptychoml.autodetect_orientation once on the first batch that has
+        # enough finite scan positions, then updates image_proc.dp_orient in
+        # place. preprocess_kwargs is forwarded to the sweep's internal
+        # preprocess_diffraction calls (must NOT include dp_orient — that's the
+        # sweep variable). Disabled when image_proc is None.
+        self._image_proc = image_proc
+        self._positions_provider = positions_provider
+        self._preprocess_kwargs = dict(preprocess_kwargs) if preprocess_kwargs else {}
+        self._orient_detect_pending = image_proc is not None
 
         # Lazy-initialized on first compute()
         self._session = None
@@ -151,6 +165,91 @@ class PtychoViTInferenceOp(Operator):
         if self._session is None:
             self._init_session()
 
+    def _try_autodetect_orientation(self):
+        """Run one-shot dp_orient sweep via ptychoml.autodetect_orientation.
+
+        Requires:
+          - session is initialised (called after _init_session)
+          - session.baked_probe is not None (engine exported with --probe)
+          - image_proc._autodetect_buf has frames with finite scan positions
+
+        On success: sets image_proc.dp_orient to the winning D4 name and
+        signals image_proc._autodetect_done = True so the buffer stops growing.
+        On failure or missing probe: logs and disables future attempts.
+        """
+        from ptychoml import autodetect_orientation, remap_positions
+
+        if self._session.baked_probe is None:
+            self._logger.info(
+                "Orientation autodetect: engine has no baked probe — cannot "
+                "sweep. Keeping dp_orient=%s. Re-export engine with --probe "
+                "to enable.",
+                self._image_proc.dp_orient,
+            )
+            self._orient_detect_pending = False
+            self._image_proc._autodetect_done = True
+            return
+
+        buf = self._image_proc._autodetect_buf
+        if not buf:
+            return  # buffer not yet populated
+
+        all_frames = np.concatenate([f for f, _ in buf], axis=0)
+        all_indices = np.concatenate([i for _, i in buf], axis=0)
+
+        if self._positions_provider is None:
+            self._orient_detect_pending = False
+            self._image_proc._autodetect_done = True
+            return
+        positions_um = self._positions_provider()
+        if positions_um is None:
+            return
+        positions_um = positions_um.copy()  # snapshot before PointProcessorOp mutates
+
+        valid_mask = np.array([
+            int(idx) < len(positions_um) and np.isfinite(positions_um[int(idx)]).all()
+            for idx in all_indices
+        ])
+        n_valid = int(valid_mask.sum())
+        if n_valid < 64:
+            return  # wait for PandA positions to catch up
+
+        valid_frames = all_frames[valid_mask]
+        # positions_um col 0 = slow axis (INENC3), col 1 = fast axis (INENC2);
+        # autodetect_orientation expects col 0 = x (fast), col 1 = y (slow), so
+        # swap the columns via ptychoml.remap_positions for the sweep geometry.
+        valid_positions = remap_positions(
+            np.stack([positions_um[int(idx)] for idx in all_indices[valid_mask]]),
+            swap_xy=True,
+        )
+
+        try:
+            report = autodetect_orientation(
+                valid_frames,
+                valid_positions,
+                session=self._session,
+                probe=self._session.baked_probe,
+                preprocess_kwargs=self._preprocess_kwargs,
+            )
+            best = report.best.candidate.dp_orient
+            ranking = [(r.candidate.dp_orient, f"{r.score:.4f}") for r in report.ranked]
+            self._logger.info(
+                "Orientation autodetect: winner=%s (score=%.4f) from %d frames. "
+                "Full ranking: %s",
+                best, report.best.score, n_valid, ranking,
+            )
+            self._image_proc.dp_orient = best
+        except Exception:
+            self._logger.exception(
+                "Orientation autodetect failed; keeping dp_orient=%s",
+                self._image_proc.dp_orient,
+            )
+
+        # Done — clear the buffer and stop collecting.
+        self._orient_detect_pending = False
+        self._image_proc._autodetect_done = True
+        self._image_proc._autodetect_buf.clear()
+
     def compute(self, op_input, op_output, context):
         try:
             self._compute_inner(op_input, op_output, context)
@@ -166,6 +265,11 @@ class PtychoViTInferenceOp(Operator):
 
         if diff_amp is None:
             return
+
+        # One-shot orientation sweep, before inference, once the buffered
+        # frames have enough finite scan positions to score against.
+        if self._orient_detect_pending:
+            self._try_autodetect_orientation()
 
         # --- Hot-swap engine reload via sentinel file ---
         reload_file = os.path.join(

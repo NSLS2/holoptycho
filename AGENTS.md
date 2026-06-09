@@ -874,8 +874,13 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
     Determine the right value offline with `scripts/detect_orientation.py`
     (reads a recorded scan HDF5 + the model engine, sweeps all 8 D4
     candidates via `ptychoml.autodetect_orientation`, and writes a JSON
-    snippet with the winning `dp_orient` to merge into the scan config); the
-    in-pipeline live auto-detector sets it automatically once wired up.
+    snippet with the winning `dp_orient` to merge into the scan config).
+    **Live auto-detect:** if the engine carries a baked probe (exported with
+    `--probe`), `PtychoViTInferenceOp` runs the same sweep once on the first
+    batch with ≥64 finite scan positions and overrides `dp_orient` in place —
+    `ImagePreprocessorOp` buffers pre-D4 frames for it (capped 256), and the
+    config `dp_orient` is the pre-sweep default. Engines without a baked probe
+    keep the configured value.
   * `fftshift_dp` (default unset → `None`) — DC convention for the model
     input. `None` lets ptychoml auto-detect via `detect_dc_at_corner` and
     shift only when the central beam sits at the corners. Override with
@@ -888,6 +893,12 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   * `vit_scale` (default `1e4`) — model-input amplitude scale factor.
   * `hot_pixel_count_threshold` (default unset → disabled) — photon-count
     threshold for hot-pixel zeroing; matches `hxn_to_vit.py` when enabled.
+  * `position_swap_xy` (default `false`) — `PointProcessorOp` writes scan
+    positions as col 0 = slow axis (INENC3/y_range), col 1 = fast axis
+    (INENC2/x_range), matching the `hxn_to_vit` convention and the
+    `SaveViTResult` canvas mapping (width ← col 0 ← y_range). Set `true` to
+    revert to the legacy (fast→col 0) assignment. Affects only the ViT/mosaic
+    path, not the iterative engine's `point_info`.
 
 * **`mosaic_overshoot_factor` (config field, default 1.2) — canvas safety
   margin for the ViT mosaic.** Sized as `max(observed_range, commanded_range
