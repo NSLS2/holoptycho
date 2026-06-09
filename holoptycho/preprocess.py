@@ -504,7 +504,9 @@ class PointProcessorOp(Operator):
             # print('loaded', self.pos_loaded_num)
             if self.pos_loaded_num > self.frame_id_list[i]:
                 fid = self.frame_id_list[i]
-                if fid < self.max_points:
+                # point_info_target is the iterative engine's GPU buffer; it's
+                # None in vit-only mode (no engine), so skip the device copy.
+                if fid < self.max_points and self.point_info_target is not None:
                     self.point_info_target[self.pos_ready_num,:] = cp.array(self.point_info[fid,:],\
                                                                             dtype = np.int32, order='C')
                 # sys.stderr.write(f'{self.point_info[fid,:]}'+'\n')
@@ -570,8 +572,9 @@ class ImageSendOp(Operator):
 
         nframe = diff_d.shape[0]
 
-
-        if (self.frame_ready_num + nframe) < self.max_points:
+        # diff_d_target is the iterative engine's GPU buffer; None in vit-only
+        # mode (no engine), so skip the device copy.
+        if self.diff_d_target is not None and (self.frame_ready_num + nframe) < self.max_points:
             diff_d_target = self.diff_d_target[self.frame_ready_num:self.frame_ready_num+nframe]
             
             cp.cuda.runtime.memcpy(diff_d_target.data.ptr,diff_d.ctypes.data,diff_d.nbytes,cp.cuda.runtime.memcpyHostToDevice)
