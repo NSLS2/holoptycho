@@ -160,10 +160,12 @@ class PtychoViTInferenceOp(Operator):
         spec.output("vit_result").condition(ConditionType.NONE)
 
     def start(self):
-        # Load the TRT engine before the scheduler starts dispatching data so
-        # the first ViT batch doesn't pay the ~1–2 s engine load latency.
-        if self._session is None:
-            self._init_session()
+        # NOTE: Engine is loaded lazily in _compute_inner() on the first call,
+        # NOT here. PyCUDA contexts are thread-local: creating the context in
+        # start() (framework startup thread) makes it unavailable in compute()
+        # (MultiThreadScheduler worker thread), causing SIGABRT in predict().
+        # The ~1–2 s TRT deserialize cost is paid on the first batch instead.
+        pass
 
     def _try_autodetect_orientation(self):
         """Run one-shot dp_orient sweep via ptychoml.autodetect_orientation.
