@@ -166,6 +166,16 @@ class ImagePreprocessorOp(Operator):
         # Photon-count threshold for hot-pixel zeroing (None = disabled).
         # 50000 matches hxn_to_vit.py's default.
         self.hot_pixel_count_threshold = None
+
+        # Raw-intensity buffer for orientation auto-detect. PtychoViTInferenceOp
+        # reads this to run ptychoml.autodetect_orientation on the first batch
+        # of frames that has enough finite scan positions, then updates
+        # dp_orient. Entries are (processed_images, indices) tuples of pre-D4
+        # frames. Capped at _AUTODETECT_BUF_MAX_FRAMES total frames; cleared
+        # when the sweep is done (it sets _autodetect_done=True).
+        self._autodetect_buf: list = []
+        self._autodetect_done: bool = False
+        self._AUTODETECT_BUF_MAX_FRAMES: int = 256
         super().__init__(*args, **kwargs)
 
         # Per-second compute() throughput counters. See note in EigerZmqRxOp.
@@ -288,6 +298,17 @@ class ImagePreprocessorOp(Operator):
             dy, dx = self._center_shift
             processed_images = self._apply_shift(processed_images, dy, dx)
 
+        # Buffer pre-D4 frames for the one-shot orientation auto-detect.
+        # autodetect_orientation sweeps the D4 candidates itself, so it needs
+        # the frames *before* tap_orient/dp_orient are applied. Once
+        # PtychoViTInferenceOp has run the sweep it sets _autodetect_done=True.
+        if not self._autodetect_done:
+            n_buffered = sum(f.shape[0] for f, _ in self._autodetect_buf)
+            if n_buffered < self._AUTODETECT_BUF_MAX_FRAMES:
+                self._autodetect_buf.append(
+                    (processed_images.copy(), indices.copy())
+                )
+
         # Tap branch: apply the configured D4 to put the saved intensity
         # into whatever orientation the operator wants to see on the
         # dashboard. Default 'antitranspose' reproduces the historical HXN
@@ -321,10 +342,17 @@ class ImagePreprocessorOp(Operator):
         self._diag_total_ms += (time.perf_counter() - t0) * 1000.0
 
 class PointProcessorOp(Operator):
-    def __init__(self, *args, x_direction = -1., y_direction = -1., **kwargs):
+    def __init__(self, *args, x_direction = -1., y_direction = -1.,
+                 swap_xy: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self.logger = logging.getLogger("PointProcessorOp")
         logging.basicConfig(level=logging.INFO)
+
+        # Axis swap on the (x, y) columns of ``positions_um`` only — affects
+        # the ViT/mosaic path, not the iterative engine's ``point_info``
+        # (fixed convention the engine was tuned for). Set when the
+        # orientation auto-detector picks a winning candidate with swap_xy.
+        self.swap_xy = bool(swap_xy)
 
         self.point_info = None
         self.point_info_target = None
@@ -493,8 +521,13 @@ class PointProcessorOp(Operator):
                     end = min(p_total_num, self.positions_um.shape[0])
                     take = end - self.pos_loaded_num
                     if take > 0:
-                        self.positions_um[self.pos_loaded_num:end, 0] = pos0[:take]
-                        self.positions_um[self.pos_loaded_num:end, 1] = pos1[:take]
+                        # hxn_to_vit convention (pos_map=-y,-x): col 0 = slow
+                        # axis (INENC3/pos1 = y_range), col 1 = fast axis
+                        # (INENC2/pos0 = x_range). swap_xy=True reverts to the
+                        # old (fast→col0, slow→col1) assignment.
+                        col_x, col_y = (0, 1) if self.swap_xy else (1, 0)
+                        self.positions_um[self.pos_loaded_num:end, col_x] = pos0[:take]
+                        self.positions_um[self.pos_loaded_num:end, col_y] = pos1[:take]
 
                 self.pos_loaded_num = p_total_num
                 
