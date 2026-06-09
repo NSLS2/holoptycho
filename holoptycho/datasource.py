@@ -215,6 +215,12 @@ class EigerZmqRxOp(Operator):
         # peak — comfortable for a dev machine and big enough to buffer a
         # full HXN scan (10000 frames) with margin.
         self.socket.setsockopt(zmq.RCVHWM, 20000)
+        # Cap reconnect backoff at 1 s. ZMQ's default exponential backoff has
+        # no maximum (ZMQ_RECONNECT_IVL_MAX=0), so if the pipeline was started
+        # before the publisher bound its port the SUB could be waiting minutes
+        # between reconnect attempts. Capping at 1 s ensures the SUB reconnects
+        # within ~1 s of a publisher appearing (e.g. replay --no-hp-start).
+        self.socket.setsockopt(zmq.RECONNECT_IVL_MAX, 1000)
 
         self.socket.setsockopt_string(zmq.SUBSCRIBE, "")
 
@@ -424,6 +430,8 @@ class PositionRxOp(Operator):
         # Bump receive HWM (matches EigerZmqRxOp). PandA messages are smaller
         # (~10 positions per message) so memory cost is negligible.
         socket.setsockopt(zmq.RCVHWM, 20000)
+        # Cap reconnect backoff at 1 s (same reasoning as EigerZmqRxOp).
+        socket.setsockopt(zmq.RECONNECT_IVL_MAX, 1000)
         self.socket = socket
 
         self._first_message_logged = False
