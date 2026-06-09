@@ -565,21 +565,20 @@ def load_config_from_tiled(
                     slice=[slice(0, n_sample), slice(None), slice(None)]
                 )
             import numpy as _np
-            from ptychoml import compute_intensity_normalization
             # Max raw intensity with hot pixels excluded — the same constant
-            # hxn_to_vit writes per scan. compute_intensity_normalization
-            # raises ValueError when every sampled pixel exceeds the threshold.
-            try:
-                vit_normalization = compute_intensity_normalization(
-                    _np.asarray(sample),
-                    hot_pixel_count_threshold=HOT_PIXEL_THRESHOLD,
-                )
+            # hxn_to_vit writes per scan. Kept inline (not
+            # ptychoml.compute_intensity_normalization) because config_from_tiled
+            # runs in the client/replay pixi envs, which deliberately do NOT
+            # depend on ptychoml.
+            mask = sample <= HOT_PIXEL_THRESHOLD
+            if mask.any():
+                vit_normalization = float(_np.asarray(sample)[mask].max())
                 print(
                     f"[config_from_tiled] vit_normalization={vit_normalization:.1f} "
                     f"(max of {n_sample} frames, hot_pixel_threshold={HOT_PIXEL_THRESHOLD})",
                     file=sys.stderr,
                 )
-            except ValueError:
+            else:
                 print(
                     "WARNING: all sampled pixels exceed hot_pixel_threshold "
                     f"({HOT_PIXEL_THRESHOLD}); vit_normalization not set",
