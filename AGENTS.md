@@ -928,6 +928,17 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   (default 0.5) is the minimum fractional coverage for a mosaic pixel to count
   as filled; below it the pixel takes the valid-region median instead.
 
+* **`inner_crop` (config field, default unset) — pixels trimmed from each edge
+  of a ViT output patch before stitching**, to drop the FFT-leakage border
+  outside the probe support. Resolution precedence (in `compose()`):
+  explicit config `inner_crop` > value derived from the ONNX probe geometry
+  (`holoptycho.engine_probe.find_onnx_for_engine` →
+  `inner_crop_from_onnx` → `ptychoml.inner_crop_from_probe`) > `None`, in which
+  case `SaveViTResult` auto-derives `min(patch_h, patch_w) // 4`. The ONNX
+  derivation needs the `onnx` package and a model ONNX reachable via the
+  `{name}_v{ver}.engine` → `onnx/{name}/{ver}/*.onnx` cache convention; it
+  silently falls back to auto-derive otherwise.
+
 * **`frame_write_stride` (config field, default 1000 for `recon_mode='vit'`,
   else 1) — detector-frame downsampling for tiled writes.** Persisting every
   detector frame is ~1 MB per 64-frame patch over WAN — fine for fine-tuning

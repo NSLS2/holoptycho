@@ -98,6 +98,7 @@ from .vit_inference import (
     PositionsWriterOp,
     BatchWriterOp,
 )
+from .engine_probe import find_onnx_for_engine, inner_crop_from_onnx
 from .tiled_writer import get_writer
 
 class InitRecon(Operator):
@@ -859,6 +860,23 @@ class PtychoApp(Application):
         # (via ptychoml.apply_d4). Default 'identity'; the orientation
         # auto-detector will choose this once wired up.
         _patch_flip = str(getattr(self.param, "patch_flip", "identity"))
+        # inner_crop: how many pixels to trim from each ViT output patch before
+        # stitching (drops the FFT-leakage border outside the probe support).
+        # Precedence: explicit config > derived from the ONNX probe geometry >
+        # None (SaveViTResult auto-derives from the patch size).
+        _inner_crop_cfg = int(getattr(self.param, "inner_crop", 0))
+        if _inner_crop_cfg > 0:
+            _inner_crop = _inner_crop_cfg
+        else:
+            _inner_crop = None
+            _onnx_path = find_onnx_for_engine(self.engine_path)
+            if _onnx_path is not None:
+                _inner_crop = inner_crop_from_onnx(_onnx_path)
+                if _inner_crop is not None:
+                    logging.getLogger("holoptycho.PtychoApp").info(
+                        "inner_crop=%d derived from probe in %s",
+                        _inner_crop, _onnx_path.name,
+                    )
         self.vit_save = SaveViTResult(
             self,
             positions_provider=lambda: self.point_proc.positions_um,
@@ -868,6 +886,7 @@ class PtychoApp(Application):
             overshoot_factor=mosaic_overshoot,
             min_overlap_count=_min_overlap,
             patch_flip=_patch_flip,
+            inner_crop=_inner_crop,
             enable_batch_writes=enable_batch_writes,
             name="vit_save",
         )
