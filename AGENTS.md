@@ -567,6 +567,8 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
 | `recon_mode` | str | Which reconstruction branches to wire: `iterative`, `vit`, or `both`. Default `both`. Use `iterative` to skip the ViT op entirely (no engine load); use `vit` to skip the iterative DM/ML solver — the `PtychoRecon`/`StreamingPtychoRecon` engine is **not created at all** (no CuPy context on the ViT GPU, avoiding the PyCUDA+CuPy SIGABRT), and the sample-plane geometry the engine would supply (pixel size, ranges) is derived from config via `ptychoml.compute_sample_pixel_size`. No `live/`/`final/` Tiled writes. |
 | `vit_batch_writes` | bool | (Optional) Enable per-batch `pred` + `indices` writes to `<run>/vit/batches/NNNNNN/...` via `BatchWriterOp`. Default `false`. Each batch's `pred` is `(64, 2, 256, 256)` float32 (~33 MB) and a tiled HTTPS PUT runs at ~1 MB/s, so enabling this gates the whole ViT branch at ~28 s/batch. Leave off for live mosaic viewing; turn on only when offline analysts need the raw per-batch arrays. |
+| `auto_center_dp` | bool | (Optional) Lossless one-shot DP auto-centering in `ImageBatchOp`. Default `false`. CLI: `--auto-center-dp`. See the `auto_center_dp` note below. |
+| `auto_center_headroom` | int | (Optional) Search margin (px/side) for `auto_center_dp`. Default `nx//4`. CLI: `--auto-center-headroom`. |
 | `raw_uid` | str | (Optional) UID of the raw Bluesky run being reconstructed. Stored as metadata on the per-run Tiled container. The `replay_from_tiled.py` and `config_from_tiled.py` config builders fill it in automatically from `--uid`. |
 | `scan_id` | str | (Optional) Scan id of the raw run. Defaults to `scan_num` if omitted. Stored as metadata on the per-run Tiled container. |
 | `xray_energy_kev` | float (str) | X-ray energy in keV |
@@ -619,6 +621,9 @@ hp start "$(pixi run -e client config-from-tiled --scan-id 320045 --nx 256 --n-i
 
 # 2b. (Optional) Pick which reconstruction branches to run
 hp start "$(pixi run -e client config-from-tiled --scan-id 320045 --mode iterative)"  # or vit | both (default)
+
+# 2c. (Optional) Enable lossless DP auto-centering (off by default)
+hp start "$(pixi run -e client config-from-tiled --scan-id 320045 --auto-center-dp)"
 
 # 3. (Optional) Switch to a different model
 hp model set my_vit_model --version 3
@@ -850,16 +855,24 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   either redundant or wrong. Worth confirming with the beamline team and
   potentially reducing pipeline complexity.
 
-* **`auto_center_dp` (config field, default `false`) — one-shot diffraction
-  centering via scipy segmentation.** `ImagePreprocessorOp` averages the
-  first batch (typically 64 frames), masks hot pixels at detector
-  saturation, thresholds at 5% of peak, runs `scipy.ndimage.label` to find
-  connected components, takes the centroid of the largest one, and shifts
-  every subsequent batch (and the intensity tap) so that centroid lands
-  at the canvas centre. **Default off:** this shift is not part of
-  ptychoml's preprocessing pipeline and moves the beam away from the
-  position the model was trained on. Enable only when the detector ROI is
-  too far off-centre to fix with `batch_x0`/`batch_y0`.
+* **`auto_center_dp` (config field, default `false`) — one-shot **lossless**
+  diffraction centering via scipy segmentation.** Toggle with the
+  `--auto-center-dp` flag on `config_from_tiled` / `replay`, or set the config
+  bool directly. It lives in **`ImageBatchOp`** (`preprocess.py::compute_center_box`):
+  on the first batch it buffers a `±auto_center_headroom` window (default
+  `nx//4`) around the configured ROI, averages it, masks saturated pixels,
+  thresholds at 5% of peak, runs `scipy.ndimage.label`, takes the centroid of
+  the largest component, and crops **every** batch (including the first) to an
+  `nx × ny` box centered on it — real detector pixels, **no `np.roll`, no
+  zero-fill** (the old lossy roll in `ImagePreprocessorOp` was removed). The
+  beam's raw column is flip-independent, so segmentation runs on the un-flipped
+  window and the box still feeds `crop_flipped_roi` correctly. It **composes**
+  with `batch_x0/batch_y0` (which position the search window) and refines within
+  `±headroom`. **Default off:** centering moves the beam away from the position
+  the model was trained on. Enable only when the detector ROI is too far
+  off-centre to fix with `batch_x0`/`batch_y0` alone. If no blob is found on the
+  first batch it falls back to the configured ROI (warns); if the beam sits
+  beyond the headroom the box is clamped to the window edge (warns).
 
 * **Diffraction geometry + normalization knobs (config fields).** The model
   input branch of `ImagePreprocessorOp` delegates to

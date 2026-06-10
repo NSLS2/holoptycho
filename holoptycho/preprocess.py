@@ -36,6 +36,65 @@ def crop_flipped_roi(image, roi):
     return image[r0:r1, W - c1_raw : W - c0_raw]
 
 
+def compute_center_box(headroom_batch, headroom_roi, nx, ny):
+    """One-shot segmentation-based centered crop box (lossless auto-centering).
+
+    Given a batch of detector frames already cropped (UN-flipped, raw
+    orientation) to ``headroom_roi`` — a ``[[y0,y1],[x0,x1]]`` window in raw
+    detector coordinates — find the diffraction beam and return the ``ny x nx``
+    crop box centered on it, in the same raw-left convention as the operator's
+    ``self.roi``.
+
+    Segmentation matches the historical centering: average the batch (protects
+    against an odd empty/saturated first frame), mask saturated pixels (which
+    would bias the centroid), threshold at 5% of peak to isolate the blob, run
+    ``scipy.ndimage.label``, and take the centroid of the largest connected
+    component. The box is clamped to stay inside ``headroom_roi``.
+
+    Because the beam's raw column is flip-independent, the caller can segment on
+    the un-flipped window and still feed the box to ``crop_flipped_roi`` — a
+    horizontal mirror of a beam-centered window keeps the beam centered.
+
+    Returns ``(box, clamped)`` where ``box`` is an integer ``np.array`` ROI, or
+    ``(None, False)`` when no blob is found (caller falls back to the configured
+    ROI). ``clamped`` is True when the beam sat beyond the headroom and the box
+    was pushed to the window edge.
+    """
+    from scipy.ndimage import label, center_of_mass
+
+    avg = headroom_batch.astype(np.float32).mean(axis=0)
+    # Saturation mask: pixels at/near uint max are hot/bad and would bias the
+    # centroid. Drop them from the segmentation input (floats: no saturation).
+    try:
+        sat = float(np.iinfo(headroom_batch.dtype).max) - 1.0
+    except ValueError:
+        sat = float('inf')
+    masked = np.where(avg >= sat, 0.0, avg)
+    peak = float(masked.max())
+    if peak <= 0:
+        return None, False
+    binary = masked > (0.05 * peak)
+    labels, n_obj = label(binary)
+    if n_obj == 0:
+        return None, False
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    largest = int(np.argmax(sizes))
+    cy, cx = center_of_mass(masked, labels, largest)  # window-local (row, col)
+
+    Hh, Wh = avg.shape
+    hy0 = int(headroom_roi[0, 0])
+    hx0 = int(headroom_roi[1, 0])
+    # Absolute raw-detector centroid, then box centered on it.
+    y0 = int(round(hy0 + cy - ny / 2.0))
+    x0 = int(round(hx0 + cx - nx / 2.0))
+    # Clamp so the ny x nx box stays inside the headroom window.
+    y0c = min(max(y0, hy0), hy0 + Hh - ny)
+    x0c = min(max(x0, hx0), hx0 + Wh - nx)
+    clamped = (y0c != y0) or (x0c != x0)
+    return np.array([[y0c, y0c + ny], [x0c, x0c + nx]]), clamped
+
+
 class ImageBatchOp(Operator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args,**kwargs)
@@ -49,6 +108,20 @@ class ImageBatchOp(Operator):
         self.ny_prb = 0
         self.images_to_add = None #np.zeros((self.batchsize, 256, 256))
         self.indices_to_add = None #np.zeros(self.batchsize, dtype=np.int32)
+        # ROI is normally set by compose(); default None so compute()'s guard
+        # (`if self.roi is None: return`) is safe before that runs.
+        self.roi = None
+
+        # Opt-in lossless auto-centering (off by default — OFF path is identical
+        # to the historical fixed-ROI crop). When on, the FIRST batch is buffered
+        # at a larger headroom window, segmented to find the beam, and a centered
+        # ny x nx crop box is computed once and reused for every batch (incl. the
+        # first). Set from config by compose(). See compute_center_box().
+        self.auto_center = False
+        self.headroom = 0
+        self._center_box = None       # cached ny x nx ROI once computed
+        self._hr_buf = None           # transient (batchsize, Hh, Wh) first-batch buffer
+        self._headroom_roi = None     # raw-left headroom window
 
         # Per-second compute() throughput counters. See note in EigerZmqRxOp.
         self._diag_window_start = time.time()
@@ -94,11 +167,24 @@ class ImageBatchOp(Operator):
         if self.roi is None:
             return
 
+        # Lossless auto-centering: buffer the FIRST batch at a headroom window
+        # and compute a beam-centered crop box before emitting anything. Only
+        # entered when enabled and the box isn't computed yet; once set, falls
+        # through to the steady-state crop below. OFF path never enters here.
+        if self.auto_center and self._center_box is None:
+            self._accumulate_first_batch(image, image_index, op_output)
+            return
+
+        # Steady state (and the entire OFF path): crop to the active ROI — the
+        # computed centered box if auto-centering produced one, else the fixed
+        # configured ROI (identical to historical behavior).
+        active_roi = self.roi if self._center_box is None else self._center_box
+
         # For Eiger2 detector: horizontal flip mirrors the column ROI.
         if self.flip_image:
-            image = crop_flipped_roi(image, self.roi)
+            image = crop_flipped_roi(image, active_roi)
         else:
-            image = crop_to_roi(image, self.roi)
+            image = crop_to_roi(image, active_roi)
 
         # Remove Bad pixels (-1 to unsigned int)
         image[image==np.iinfo(image.dtype).max] = 0
@@ -115,7 +201,82 @@ class ImageBatchOp(Operator):
             op_output.emit(self.indices_to_add.copy(), "image_indices")
             self.counter = 0
             self._diag_batches_emitted += 1
-            
+
+    def _headroom_roi_for(self, frame_shape):
+        """Raw-left headroom window: the configured ROI grown by ``headroom`` on
+        each side, clamped to the actual frame bounds (known only at compute)."""
+        H, W = int(frame_shape[0]), int(frame_shape[1])
+        M = int(self.headroom)
+        y0, y1 = int(self.roi[0, 0]), int(self.roi[0, 1])
+        x0, x1 = int(self.roi[1, 0]), int(self.roi[1, 1])
+        return np.array([
+            [max(0, y0 - M), min(H, y1 + M)],
+            [max(0, x0 - M), min(W, x1 + M)],
+        ])
+
+    def _accumulate_first_batch(self, image, image_index, op_output):
+        """Buffer the first batch at the headroom window (UN-flipped), then on
+        the full batch compute the centered crop box and emit the batch."""
+        if self._hr_buf is None:
+            self._headroom_roi = self._headroom_roi_for(image.shape)
+            hy0, hy1 = int(self._headroom_roi[0, 0]), int(self._headroom_roi[0, 1])
+            hx0, hx1 = int(self._headroom_roi[1, 0]), int(self._headroom_roi[1, 1])
+            self._hr_buf = np.zeros(
+                (self.batchsize, hy1 - hy0, hx1 - hx0), dtype=image.dtype
+            )
+
+        # Crop UN-flipped (raw orientation) for segmentation; zero bad pixels to
+        # match the steady-state path. crop_to_roi may return a view — copy.
+        hr = np.array(crop_to_roi(image, self._headroom_roi))
+        hr[hr == np.iinfo(image.dtype).max] = 0
+        self._hr_buf[self.counter, :, :] = hr
+        self.indices_to_add[self.counter] = image_index
+
+        if self.counter < (self.batchsize - 1):
+            self.counter += 1
+            return
+
+        # First batch full — compute the centered ny x nx box (derive nx/ny from
+        # the configured ROI so it matches images_to_add's allocation).
+        ny = int(self.roi[0, 1] - self.roi[0, 0])
+        nx = int(self.roi[1, 1] - self.roi[1, 0])
+        box, clamped = compute_center_box(self._hr_buf, self._headroom_roi, nx, ny)
+        if box is None:
+            self._center_box = np.array(self.roi)
+            self.logger.warning(
+                "Auto-centering: no diffraction blob in the first batch; "
+                "falling back to the configured ROI."
+            )
+        else:
+            self._center_box = box
+            if clamped:
+                self.logger.warning(
+                    "Auto-centering: beam beyond the ±%d px headroom; crop box "
+                    "clamped to the window edge. Adjust batch_x0/y0 or headroom.",
+                    int(self.headroom),
+                )
+            self.logger.info(
+                "Auto-centering: centered crop box rows %d:%d cols %d:%d",
+                int(box[0, 0]), int(box[0, 1]), int(box[1, 0]), int(box[1, 1]),
+            )
+
+        # Emit the buffered first batch cropped to the centered box. Slicing the
+        # un-flipped buffer then flipping is exactly crop_flipped_roi() on the
+        # originals, so batch 0 matches the orientation of all later batches.
+        hy0 = int(self._headroom_roi[0, 0])
+        hx0 = int(self._headroom_roi[1, 0])
+        ry0, ry1 = int(self._center_box[0, 0]) - hy0, int(self._center_box[0, 1]) - hy0
+        rx0, rx1 = int(self._center_box[1, 0]) - hx0, int(self._center_box[1, 1]) - hx0
+        for i in range(self.batchsize):
+            sub = self._hr_buf[i, ry0:ry1, rx0:rx1]
+            self.images_to_add[i, :, :] = np.flip(sub, 1) if self.flip_image else sub
+        op_output.emit(self.images_to_add.copy(), "image_batch")
+        op_output.emit(self.indices_to_add.copy(), "image_indices")
+        self.counter = 0
+        self._hr_buf = None
+        self._diag_batches_emitted += 1
+
+
 class ImagePreprocessorOp(Operator):
     def __init__(self, *args, **kwargs):
         super().__init__(*args,**kwargs)
@@ -124,16 +285,11 @@ class ImagePreprocessorOp(Operator):
         # self.roi = np.array(roi)
         self.detmap_threshold = 0
         self.badpixels = None
-        # Once-per-run auto-centering. Computed on the average of the first
-        # batch via scipy connected-component segmentation; same shift then
-        # applied to every subsequent batch. ``None`` = not yet computed,
-        # ``False`` = disabled by config. See ``_compute_centering_shift``.
-        # Disabled by default: this shift is NOT part of ptychoml's preprocessing
-        # pipeline and moves the diffraction beam away from the position the model
-        # was trained on. Enable only if the detector ROI is uncalibrated and the
-        # beam is significantly off-centre.
-        self.auto_center = False
-        self._center_shift: tuple[int, int] | None = None
+        # NOTE: diffraction auto-centering lives in ImageBatchOp now (a lossless
+        # centered crop computed once on the first batch — see
+        # compute_center_box). This operator no longer shifts frames; it receives
+        # them already centered, so the intensity tap and model input stay in
+        # lockstep exactly as before.
         # Geometry knobs for the two output branches.
         #   tap_orient: D4 element applied to the intensity tap (saved /dp).
         #               Default 'antitranspose' matches the historical HXN
@@ -183,79 +339,6 @@ class ImagePreprocessorOp(Operator):
         self._diag_calls = 0
         self._diag_total_ms = 0.0
 
-    def _compute_centering_shift(self, batch: np.ndarray) -> tuple[int, int]:
-        """Segmentation-based one-shot centering offset.
-
-        Averages the input batch (typically 64 frames; protects against the
-        odd empty/saturated first frame), masks hot pixels at detector
-        saturation, thresholds at 5% of peak to isolate the diffraction
-        blob, and runs ``scipy.ndimage.label`` to find connected components.
-        The centroid of the largest one is taken as the "scan center"; the
-        returned shift translates that centroid to the canvas centre.
-
-        Falls back to ``(0, 0)`` if no object meets the threshold (e.g.
-        truly empty first batch) — subsequent batches stay un-shifted in
-        that case, matching the un-centered behaviour we had before.
-        """
-        from scipy.ndimage import label, center_of_mass
-
-        avg = batch.astype(np.float32).mean(axis=0)
-        # Saturation mask: pixels at/near uint max are hot/bad and would
-        # bias the centroid. Drop them out of the segmentation input.
-        try:
-            sat = float(np.iinfo(batch.dtype).max) - 1.0
-        except ValueError:
-            sat = float('inf')  # floats — no saturation concept
-        masked = np.where(avg >= sat, 0.0, avg)
-        peak = float(masked.max())
-        if peak <= 0:
-            self.logger.warning(
-                "Auto-centering: average frame has no positive signal; "
-                "skipping shift",
-            )
-            return (0, 0)
-        binary = masked > (0.05 * peak)
-        labels, n_obj = label(binary)
-        if n_obj == 0:
-            self.logger.warning(
-                "Auto-centering: no connected component above 5%% of peak; "
-                "skipping shift",
-            )
-            return (0, 0)
-        # "Find 1 object": largest connected component by pixel count.
-        sizes = np.bincount(labels.ravel())
-        sizes[0] = 0
-        largest = int(np.argmax(sizes))
-        cy, cx = center_of_mass(masked, labels, largest)
-        h, w = batch.shape[1], batch.shape[2]
-        dy = int(round(h / 2.0 - cy))
-        dx = int(round(w / 2.0 - cx))
-        self.logger.info(
-            "Auto-centering: %d component(s) found, largest=%d px at "
-            "(y=%.1f, x=%.1f); shifting batch by (dy=%d, dx=%d)",
-            n_obj, int(sizes[largest]), cy, cx, dy, dx,
-        )
-        return (dy, dx)
-
-    @staticmethod
-    def _apply_shift(batch: np.ndarray, dy: int, dx: int) -> np.ndarray:
-        """Translate every frame in ``batch`` by ``(dy, dx)``; zero-fill the
-        wrap-around band (so we don't bring in random distant intensity).
-        ``np.roll`` is vectorised over the batch dim — much faster than
-        per-frame ``scipy.ndimage.shift``."""
-        if dy == 0 and dx == 0:
-            return batch
-        shifted = np.roll(batch, shift=(dy, dx), axis=(1, 2))
-        if dy > 0:
-            shifted[:, :dy, :] = 0
-        elif dy < 0:
-            shifted[:, dy:, :] = 0
-        if dx > 0:
-            shifted[:, :, :dx] = 0
-        elif dx < 0:
-            shifted[:, :, dx:] = 0
-        return shifted
-
     def setup(self, spec: OperatorSpec):
         spec.input("image_batch").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.input("image_indices_in").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
@@ -286,17 +369,6 @@ class ImagePreprocessorOp(Operator):
         # self.badpixels is shape (2, K) with rows=[row_indices, col_indices];
         # transpose to (K, 2) for inpaint_bad_pixels' coords format.
         inpaint_bad_pixels(processed_images, self.badpixels.T)
-
-        # One-shot segmentation-based centering: compute a (dy, dx) shift
-        # from the first batch's averaged frame, then apply that same shift
-        # to every subsequent batch. Affects both the intensity tap (saved
-        # to tiled <run>/diffraction/dp) and the model input, so what the
-        # operator sees on the dashboard matches what the ViT model sees.
-        if self.auto_center and self._center_shift is None:
-            self._center_shift = self._compute_centering_shift(processed_images)
-        if self._center_shift is not None:
-            dy, dx = self._center_shift
-            processed_images = self._apply_shift(processed_images, dy, dx)
 
         # Buffer pre-D4 frames for the one-shot orientation auto-detect.
         # autodetect_orientation sweeps the D4 candidates itself, so it needs

@@ -680,13 +680,8 @@ class PtychoApp(Application):
 
         self.image_batch = ImageBatchOp(self, name="image_batch")
         self.image_proc = ImagePreprocessorOp(self, name="image_proc")
-        # Auto-center the diffraction pattern via scipy segmentation on the
-        # average of the first batch. Default off: this shift is not part of
-        # ptychoml's preprocessing pipeline and displaces the beam from the
-        # model's expected position. Enable via auto_center_dp=true in the
-        # scan JSON only when the detector ROI is too far off-centre to use
-        # batch_x0/batch_y0 correction instead.
-        self.image_proc.auto_center = bool(getattr(self.param, "auto_center_dp", False))
+        # auto_center_dp (lossless centered crop) is wired into ImageBatchOp
+        # after its ROI is set below.
         # Geometry + normalization for the two output branches. See
         # ImagePreprocessorOp docstrings for what each does. Defaults reproduce
         # the prior hardcoded HXN chain for the D4 transforms (antidiag tap +
@@ -743,6 +738,16 @@ class PtychoApp(Application):
             [det_roiy0 + self.param.batch_y0, det_roiy0 + self.param.batch_y0 + self.param.ny],
             [det_roix0 + self.param.batch_x0, det_roix0 + self.param.batch_x0 + self.param.nx],
         ])
+        # Opt-in lossless DP auto-centering (default off). When enabled,
+        # ImageBatchOp buffers the first batch at a ±headroom window, segments to
+        # find the beam, and crops every batch to an nx x ny box centered on it
+        # (no np.roll, no zero-fill). Headroom defaults to nx//4. Enable via
+        # auto_center_dp=true in the scan JSON only when the detector ROI is too
+        # far off-centre to fix with batch_x0/batch_y0.
+        self.image_batch.auto_center = bool(getattr(self.param, "auto_center_dp", False))
+        self.image_batch.headroom = int(
+            getattr(self.param, "auto_center_headroom", int(self.param.nx) // 4)
+        )
 
         # PointProcessorOp: set scan geometry from config.
         self.point_proc.x_range_um = np.abs(self.param.x_range)

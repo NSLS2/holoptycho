@@ -679,6 +679,20 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument("--det-roix0", type=int, default=0)
     recon.add_argument("--det-roiy0", type=int, default=0)
     recon.add_argument(
+        "--auto-center-dp",
+        action="store_true",
+        help="Enable one-shot lossless diffraction auto-centering: ImageBatchOp "
+        "buffers the first batch at a ±headroom window, segments to find the "
+        "beam, and crops every batch to an nx x ny box centered on it (default "
+        "off). Composes with batch_x0/y0 (which position the search window).",
+    )
+    recon.add_argument(
+        "--auto-center-headroom",
+        type=int,
+        default=None,
+        help="Search margin (px per side) for --auto-center-dp (default: nx//4).",
+    )
+    recon.add_argument(
         "--x-direction",
         type=float,
         default=None,
@@ -809,6 +823,10 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "display_interval": str(args.display_interval),
             "recon_mode": args.mode,
             "patch_flip": args.patch_flip,
+            # Real JSON bool (not str): the pipeline reads it via bool(getattr(...))
+            # after ast.literal_eval, so a lowercase "false" string would be
+            # mis-read as truthy. Default off.
+            "auto_center_dp": bool(args.auto_center_dp),
         }
     )
 
@@ -816,6 +834,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_overshoot_factor"] = str(args.overshoot_factor)
     if args.min_overlap_count is not None:
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
+    if args.auto_center_headroom is not None:
+        config["auto_center_headroom"] = str(int(args.auto_center_headroom))
 
     return config
 
