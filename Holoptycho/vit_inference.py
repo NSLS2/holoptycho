@@ -204,6 +204,16 @@ class PtychoViTInferenceOp(Operator):
         if diff_amp is None:
             return
 
+        # --- Save batch-average diffraction amplitude for live monitor ---
+        # diff_amp is diff_amp_vit: sqrt(I/norm*10000), DC at center (no fftshift).
+        # Use .tmp.npy suffix so np.save does not append a second .npy extension.
+        try:
+            _tmp = os.path.join(self.output_save_dir, "diff_avg_latest.tmp.npy")
+            np.save(_tmp, diff_amp.mean(axis=0))
+            os.replace(_tmp, os.path.join(self.output_save_dir, "diff_avg_latest.npy"))
+        except Exception:
+            pass
+
         # --- Hot-swap engine reload via sentinel file ---
         reload_file = os.path.join(
             os.path.dirname(self.engine_path), "reload_engine.txt"
@@ -298,6 +308,8 @@ class SaveViTResult(Operator):
                  min_overlap_count=0.5,    # min patch overlap to show a pixel
                  phase_channel_index=1,    # output channel index for phase (0 or 1)
                  overshoot_factor=1.2,     # canvas safety margin over commanded range
+                 total_frames=0,           # total expected scan frames (for progress bar)
+                 save_batch_files=False,   # save per-batch vit_batch_*.npy files
                  **kwargs):
         super().__init__(fragment, *args, **kwargs)
         self._logger = logging.getLogger("SaveViTResult")
@@ -306,6 +318,9 @@ class SaveViTResult(Operator):
         self.sign = sign
         self.batch_num = 0
         self.max_index_seen = -1
+        self._total_frames = max(0, int(total_frames))
+        self.save_batch_files = bool(save_batch_files)
+        self._save_every = 5  # write mosaic/progress every N batches
 
         # Mosaic stitching state
         self._positions_provider = positions_provider
@@ -341,9 +356,9 @@ class SaveViTResult(Operator):
             )
 
     def setup(self, spec: OperatorSpec):
-        spec.input("results").connector(
-            IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32
-        )
+        # Default connector with POP policy drops oldest messages when full.
+        # DOUBLE_BUFFER ignores QueuePolicy and raises GXF_EXCEEDING_PREALLOCATED_SIZE.
+        spec.input("results", policy=IOSpec.QueuePolicy.POP).condition(ConditionType.NONE)
 
     def start(self):
         """Pre-warm the stitch kernel to avoid a JIT delay on the first batch."""
@@ -550,25 +565,26 @@ class SaveViTResult(Operator):
     # ------------------------------------------------------------------
 
     def _save_final(self, scan_num):
-        """Concatenate all per-batch VIT files and save to the recon_data directory."""
-        import glob as globmod
+        """Save vit_mosaic_latest and vit_mosaic_amp_latest to the recon_data directory."""
+        import shutil
         recon_data_dir = os.path.join(self.working_directory,
                                       './recon_result/S' + str(scan_num) + '/' + self.sign + '/recon_data/')
-        pred_files = sorted(globmod.glob(os.path.join(self.save_dir, "vit_batch_*_pred.npy")))
-        idx_files  = sorted(globmod.glob(os.path.join(self.save_dir, "vit_batch_*_indices.npy")))
-        if not pred_files:
-            self._logger.warning("No VIT batch files found to consolidate.")
+        mosaic_src     = os.path.join(self.save_dir, "vit_mosaic_latest.npy")
+        mosaic_amp_src = os.path.join(self.save_dir, "vit_mosaic_amp_latest.npy")
+        if not os.path.exists(mosaic_src):
+            self._logger.warning("vit_mosaic_latest.npy not found in %s; nothing to save.", self.save_dir)
             return
         try:
-            preds   = np.concatenate([np.load(f) for f in pred_files],  axis=0)
-            indices = np.concatenate([np.load(f) for f in idx_files],   axis=0)
             os.makedirs(recon_data_dir, exist_ok=True)
-            print(f"VIT results are being saved to {recon_data_dir}")
-            np.save(os.path.join(recon_data_dir, f'recon_{scan_num}_{self.sign}_vit_pred.npy'),    preds)
-            np.save(os.path.join(recon_data_dir, f'recon_{scan_num}_{self.sign}_vit_indices.npy'), indices)
-            self._logger.info("VIT results saved to %s", recon_data_dir)
+            print(f"VIT mosaic results are being saved to {recon_data_dir}")
+            shutil.copy2(mosaic_src,
+                         os.path.join(recon_data_dir, f'recon_{scan_num}_{self.sign}_vit_mosaic.npy'))
+            if os.path.exists(mosaic_amp_src):
+                shutil.copy2(mosaic_amp_src,
+                             os.path.join(recon_data_dir, f'recon_{scan_num}_{self.sign}_vit_mosaic_amp.npy'))
+            self._logger.info("VIT mosaic results saved to %s", recon_data_dir)
         except Exception:
-            self._logger.exception("Failed to save final VIT results")
+            self._logger.exception("Failed to save final VIT mosaic results")
 
     def _clear_old_batches(self):
         """Remove previous scan's batch files."""
@@ -603,25 +619,27 @@ class SaveViTResult(Operator):
 
             self.max_index_seen = max(self.max_index_seen, int(indices.max()))
 
-            # --- Per-batch .npy writes (existing behaviour, unchanged) ---
-            np.save(
-                os.path.join(self.save_dir, f"vit_batch_{self.batch_num:06d}_pred.npy"),
-                pred,
-            )
-            np.save(
-                os.path.join(self.save_dir, f"vit_batch_{self.batch_num:06d}_indices.npy"),
-                indices,
-            )
+            _do_save = (self.batch_num % self._save_every == 0)
 
-            # Atomic write of latest batch for quick inspection
-            tmp = os.path.join(self.save_dir, "_vit_pred_latest.tmp.npy")
-            np.save(tmp, pred)
-            os.replace(tmp, os.path.join(self.save_dir, "vit_pred_latest.npy"))
+            # --- Optional per-batch .npy writes (off by default) ---
+            if self.save_batch_files:
+                np.save(
+                    os.path.join(self.save_dir, f"vit_batch_{self.batch_num:06d}_pred.npy"),
+                    pred,
+                )
+                np.save(
+                    os.path.join(self.save_dir, f"vit_batch_{self.batch_num:06d}_indices.npy"),
+                    indices,
+                )
+                tmp = os.path.join(self.save_dir, "_vit_pred_latest.tmp.npy")
+                np.save(tmp, pred)
+                os.replace(tmp, os.path.join(self.save_dir, "vit_pred_latest.npy"))
 
-            # --- Mosaic stitching and save (AI inference visualization) ---
+            # --- Mosaic stitching (every batch) + throttled save ---
             if self._stitch_enabled:
                 try:
-                    if self._stitch_batch(pred, indices):
+                    stitched = self._stitch_batch(pred, indices)
+                    if stitched and _do_save:
                         # Normalize phase mosaic and save atomically
                         valid = self._counts >= self._min_overlap_count
                         norm = np.where(
@@ -651,6 +669,15 @@ class SaveViTResult(Operator):
                     self._logger.exception(
                         "Mosaic stitching/save failed (non-fatal)"
                     )
+
+            # --- Throttled progress write ---
+            if _do_save:
+                try:
+                    _tmp_p = os.path.join(self.save_dir, "_vit_progress.tmp.npy")
+                    np.save(_tmp_p, np.array([self.max_index_seen + 1, self._total_frames], dtype=np.int64))
+                    os.replace(_tmp_p, os.path.join(self.save_dir, "vit_progress.npy"))
+                except Exception:
+                    pass
 
             self.batch_num += 1
         except Exception:

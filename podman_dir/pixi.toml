@@ -48,5 +48,6 @@ h5py = ">=3.12.1"
 pyqt5 = "*"
 numba-cuda = {version = "*", extras = ["cu12"]}
 
+#ptychoml = { path = "/ptychoml", editable = true }
 #nsls2ptycho = { path = "/ptycho_gui", editable = true }
 #posix_ipc = "==1.1.1"

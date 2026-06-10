@@ -35,11 +35,11 @@ from .vit_inference import PtychoViTInferenceOp, SaveViTResult
 class InitRecon(Operator):
     def __init__(self, *args, param, batchsize,min_points,scan_header_file, **kwargs):
         super().__init__(*args,**kwargs)
+        # Start with scan_num=None so the first active scan is always treated
+        # as "new" and triggers a flush. Pre-reading the header caused the first
+        # scan to be silently skipped (no flush → zero points_total → no saves).
         self.scan_num = None
         self.scan_header_file = scan_header_file
-        p = parse_scan_header(self.scan_header_file)
-        if p:
-            self.scan_num = p.scan_num
 
         self.roi_ptyx0 = param.batch_x0
         self.roi_ptyy0 = param.batch_y0
@@ -71,16 +71,14 @@ class InitRecon(Operator):
                 nz = p.nz - p.nz%self.batchsize
 
                 if self.angle_correction_flag:
-                    #if np.abs(p.angle) <= 45.:
-                    #    p.x_range *= np.abs(np.cos(p.angle*np.pi/180.))
-                    #else:
-                    #    p.x_range *= np.abs(np.sin(p.angle*np.pi/180.))
                     if p.x_motor.lower().endswith('x'):
                         print(f'rescale x axis in the real space (motor axis: {p.x_motor}) by {p.angle} degrees')
                         p.x_range *= np.cos(p.angle*np.pi/180.)
                     elif p.x_motor.lower().endswith('z'):
                         print(f'rescale x axis in the real space (motor axis: {p.x_motor}) by {p.angle} degrees')
                         p.x_range *= np.sin(p.angle*np.pi/180.)
+                    else:
+                        print(f'motor axis {p.x_motor}, skip angle correction...')
 
                 # New scan
                 op_output.emit((motor_table[p.x_motor][2],motor_table[p.y_motor][2]),'flush_pos_rx')
@@ -90,7 +88,7 @@ class InitRecon(Operator):
                                            p.det_roix0 + self.roi_ptyx0 + self.nx]],\
                                             'flush_image_batch')
                 op_output.emit(True,'flush_image_send')
-                op_output.emit((p.x_range,p.y_range,motor_table[p.x_motor][1],motor_table[p.y_motor][1],p.x_num*2,p.angle,p.x_motor == 'ssx',p.x_num,p.y_num),'flush_pos_proc')
+                op_output.emit((p.x_range,p.y_range,motor_table[p.x_motor][1],motor_table[p.y_motor][1],p.x_num*2,p.angle,p.x_motor == 'ssx',p.x_num,p.y_num,p.x_motor),'flush_pos_proc')
                 op_output.emit((p.scan_num,p.x_range,p.y_range,np.maximum(p.x_num*2,self.min_points),nz),'flush_pty')
         sleep(0.05)
 
@@ -141,6 +139,22 @@ class PtychoRecon(Operator):
     def flush(self,param):
 
         print(f'flush ptycho recon {str(param[0])}')
+
+        # Save current scan before discarding it — runs whether reconstruction
+        # finished naturally or was interrupted by a new scan starting.
+        if self.it > 0 and self.num_points_min < np.inf:
+            print(f'New scan {param[0]}: saving results for scan {self.recon.scan_num}...')
+            try:
+                self.recon.save_recon()
+                save_dir = self.recon.save_recon_flow()
+                np.save(save_dir+'/timestamp_iter', np.array(self.timestamp_iter))
+                np.save(save_dir+'/num_points_recv_iter', np.array(self.num_points_recv_iter))
+                if hasattr(self, '_vit_save_op'):
+                    self._vit_save_op._save_final(self.recon.scan_num)
+                print(f'Results saved for scan {self.recon.scan_num}.')
+            except Exception as e:
+                print(f'Warning: failed to save results for scan {self.recon.scan_num}: {e}')
+
         self.it = 0
         self.it_last_update = np.inf
         self.pos_ready_num = 0
@@ -401,6 +415,8 @@ class PtychoSimulApp(Application):
                  pixel_size_m=self.pty.recon.x_pixel_m,
                  x_range_um=self.pty.recon.y_range_um,  # slow axis (INENC3) → canvas width
                  y_range_um=self.pty.recon.x_range_um,  # fast axis (INENC2) → canvas height
+                 total_frames=self.pty.recon.num_points,
+                 save_batch_files=getattr(self.param, 'save_vit_batch_files', False),
                  name="vit_save")
             # Fan-out from InitSimul's diff_amp_vit (ViT-normalised amplitude)
             self.add_flow(self.init, self.vit, {("diff_amp_vit", "diff_amp"), ("image_indices", "image_indices")})
@@ -441,6 +457,7 @@ class PtychoApp(Application):
 
         self.image_proc.detmap_threshold = 0
         self.image_proc.badpixels = np.array([])
+        self.image_proc.vit_normalization_guess = getattr(param, 'vit_normalization_guess', 1000.0)
 
         self.image_send.diff_d_target = self.pty.recon.diff_d
         self.image_send.max_points = nz
@@ -552,6 +569,8 @@ class PtychoApp(Application):
                  pixel_size_m=self.pty.recon.x_pixel_m,
                  x_range_um=self.pty.recon.y_range_um,  # slow axis (INENC3) → canvas width
                  y_range_um=self.pty.recon.x_range_um,  # fast axis (INENC2) → canvas height
+                 total_frames=self.pty.recon.num_points,
+                 save_batch_files=getattr(self.param, 'save_vit_batch_files', False),
                  name="vit_save")
             # Fan-out from ImagePreprocessorOp's diff_amp_vit (ViT-normalised amplitude,
             # scale=10000, fftshift=False). ptychoml auto-detects DC convention.

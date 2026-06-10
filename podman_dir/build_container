@@ -1,0 +1,2 @@
+#!/bin/bash
+podman build --userns-uid-map=0:0:1 --userns-uid-map=1:1:1999 --userns-uid-map=65534:2000:2 ./podman_dir -t hxn-ptycho-holoscan --network host

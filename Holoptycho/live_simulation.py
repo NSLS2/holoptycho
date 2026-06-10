@@ -32,6 +32,7 @@ class InitSimul(Operator):
         self.batchsize = batchsize
         self.min_points = min_points
         self.angle_correction_flag = param.angle_correction_flag
+        self.scan_motor_x = param.scan_motors[0] if hasattr(param, 'scan_motors') and param.scan_motors else ''
 
         self.param = param
         self.scan_num = param.scan_num
@@ -63,10 +64,20 @@ class InitSimul(Operator):
         self.x_num = self.param.x_range // self.param.dr_x
 
         if self.angle_correction_flag:
-            if np.abs(self.param.angle) <= 45.:
-                self.param.x_range *= np.abs(np.cos(self.param.angle*np.pi/180.))
+            _m = self.scan_motor_x.lower()
+            if _m.endswith('x'):
+                print(f'rescale x axis (motor: {self.scan_motor_x}) by {self.param.angle} degrees')
+                self.param.x_range *= np.cos(self.param.angle*np.pi/180.)
+            elif _m.endswith('z'):
+                print(f'rescale x axis (motor: {self.scan_motor_x}) by {self.param.angle} degrees')
+                self.param.x_range *= np.sin(self.param.angle*np.pi/180.)
+            elif _m == '':
+                if np.abs(self.param.angle) <= 45.:
+                    self.param.x_range *= np.abs(np.cos(self.param.angle*np.pi/180.))
+                else:
+                    self.param.x_range *= np.abs(np.sin(self.param.angle*np.pi/180.))
             else:
-                self.param.x_range *= np.abs(np.sin(self.param.angle*np.pi/180.))
+                print(f'motor axis {self.scan_motor_x}, skip angle correction...')
 
         self.counter = 0
         self.point_datapack_counter = 0
@@ -111,7 +122,7 @@ class InitSimul(Operator):
         if self.counter == 0:
             # flush to begin
             op_output.emit(True,'flush_image_send')
-            op_output.emit((self.param.x_range,self.param.y_range,1.0,1.0,self.x_num*2,self.param.angle,False),'flush_pos_proc')
+            op_output.emit((self.param.x_range,self.param.y_range,1.0,1.0,self.x_num*2,self.param.angle,False,0,0,self.scan_motor_x),'flush_pos_proc')
             op_output.emit((self.scan_num,self.param.x_range,self.param.y_range,np.maximum(self.x_num*2,self.min_points),self.nz),'flush_pty')
 
         if self.counter < self.nz:

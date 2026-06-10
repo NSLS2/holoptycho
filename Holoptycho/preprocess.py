@@ -101,18 +101,25 @@ class ImageBatchOp(Operator):
             return
 
         # For Eiger2 detector
+        #if self.flip_image:
+        #    image = np.flip(image, 1)
+        #    # After flipping along axis=1 the ROI column indices (measured on
+        #    # the un-flipped raw frame) must be mirrored so the crop picks the
+        #    # same physical region in the now-flipped frame.
+        #    W = image.shape[1]
+        #    r0, r1         = int(self.roi[0, 0]), int(self.roi[0, 1])
+        #    c0_raw, c1_raw = int(self.roi[1, 0]), int(self.roi[1, 1])
+        #    image = image[r0:r1, W - c1_raw : W - c0_raw]
+        #else:
+        #    image = image[self.roi[0, 0]:self.roi[0, 1],
+        #                  self.roi[1, 0]:self.roi[1, 1]]
+        # For Eiger2 detector
         if self.flip_image:
-            image = np.flip(image, 1)
-            # After flipping along axis=1 the ROI column indices (measured on
-            # the un-flipped raw frame) must be mirrored so the crop picks the
-            # same physical region in the now-flipped frame.
-            W = image.shape[1]
-            r0, r1         = int(self.roi[0, 0]), int(self.roi[0, 1])
-            c0_raw, c1_raw = int(self.roi[1, 0]), int(self.roi[1, 1])
-            image = image[r0:r1, W - c1_raw : W - c0_raw]
-        else:
-            image = image[self.roi[0, 0]:self.roi[0, 1],
-                          self.roi[1, 0]:self.roi[1, 1]]
+            image = np.flip(image,1)
+
+
+        image = image[self.roi[0, 0]:self.roi[0, 1],
+                    self.roi[1, 0]:self.roi[1, 1]]
 
         # Remove Bad pixels (-1 to unsigned int)
         image[image==np.iinfo(image.dtype).max] = 0
@@ -226,29 +233,38 @@ class ImagePreprocessorOp(Operator):
                 processed_images[:, r, c] = np.median(
                     processed_images[:, r0:r1, c0:c1], axis=(2, 1)
                 )
+        # rot90 only — fftshift applied separately per path
+        detmap_rot90 = np.rot90(processed_images, axes=(2, 1))
+
+        # Iterative path: fftshift applied so DC is at corners (standard
+        # convention for the iterative DM algorithm)
+        diff_amp = np.sqrt(
+            np.fft.fftshift(detmap_rot90, axes=(1, 2)),
+            dtype=np.float32, order='C',
+        )
+        op_output.emit(diff_amp, "diff_amp")
+        op_output.emit(indices, "image_indices")
 
         # --- Noise floor threshold (BOTH paths; unchanged from old code) ---
         if self.detmap_threshold > 0:
-            processed_images = processed_images.copy()
-            processed_images[processed_images < self.detmap_threshold] = 0
+            detmap_rot90 = detmap_rot90.copy()
+            detmap_rot90[detmap_rot90 < self.detmap_threshold] = 0
 
-        # --- Reconstruction + model branch → diff_amp (BOTH paths) ---
-        # With all defaults this is numerically equivalent to the old chain:
-        #   np.rot90(images, axes=(2,1)) → fftshift(axes=(1,2)) → sqrt(float32)
-        # To enable ViT-style normalisation set self.normalization to the
-        # per-scan max intensity; self.scale to the training scale (e.g. 1e4).
-        # The iterative reconstruction is insensitive to constant amplitude
-        # scaling, so adjusting these does not affect iterative results.
-        diff_amp = _preprocess_diffraction(
-            processed_images,
-            normalization=self.normalization,
-            scale=self.scale,
-            hot_pixel_count_threshold=self.hot_pixel_count_threshold,
-            fftshift=self.fftshift_dp,
-        )
+        ## --- Reconstruction + model branch → diff_amp (BOTH paths) ---
+        ## With all defaults this is numerically equivalent to the old chain:
+        ##   np.rot90(images, axes=(2,1)) → fftshift(axes=(1,2)) → sqrt(float32)
+        ## To enable ViT-style normalisation set self.normalization to the
+        ## per-scan max intensity; self.scale to the training scale (e.g. 1e4).
+        ## The iterative reconstruction is insensitive to constant amplitude
+        ## scaling, so adjusting these does not affect iterative results.
+        #diff_amp = _preprocess_diffraction(
+        #    processed_images,
+        #    normalization=self.normalization,
+        #    scale=self.scale,
+        #    hot_pixel_count_threshold=self.hot_pixel_count_threshold,
+        #    fftshift=self.fftshift_dp,
+        #)
 
-        op_output.emit(diff_amp, "diff_amp")
-        op_output.emit(indices, "image_indices")
 
         # --- ViT branch → diff_amp_vit (AI inference path only) ---
         # Online vit_normalization: accumulate raw frames until vit_norm_frames
@@ -256,8 +272,8 @@ class ImagePreprocessorOp(Operator):
         # ready the first few batches use vit_norm=1.0 as a placeholder — this
         # is a small fraction of a typical scan and acceptable for live display.
         if self.vit_normalization is None:
-            self._vit_norm_buffer.append(processed_images.copy())
-            self._vit_norm_seen += processed_images.shape[0]
+            self._vit_norm_buffer.append(detmap_rot90.copy())
+            self._vit_norm_seen += detmap_rot90.shape[0]
             if self._vit_norm_seen >= self._vit_norm_frames:
                 all_raw = np.concatenate(self._vit_norm_buffer, axis=0)
                 mask = all_raw < self._vit_norm_hot_threshold
@@ -274,13 +290,20 @@ class ImagePreprocessorOp(Operator):
         # rot90). ptychoml.PtychoViTInference uses fftshift=None to auto-detect
         # DC position, so it will correctly no-op here and the model sees
         # DC at center — matching the 01Holoscan/holoptycho training convention.
-        diff_amp_vit = _preprocess_diffraction(
-            processed_images,
-            normalization=vit_norm,
-            scale=10000.0,
-            hot_pixel_count_threshold=self.hot_pixel_count_threshold,
-            fftshift=False,
-        )
+        # ViT path: no fftshift (DC stays at center); scale=10000 with
+        # per-scan normalization pre-computed in __init__.
+        # ptychoml.PtychoViTInference auto-detects DC position internally.
+        diff_amp_vit = np.sqrt(
+            detmap_rot90.astype(np.float64) / vit_norm * 10000.0
+        ).astype(np.float32)
+
+        #diff_amp_vit = _preprocess_diffraction(
+        #    processed_images,
+        #    normalization=vit_norm,
+        #    scale=10000.0,
+        #    hot_pixel_count_threshold=self.hot_pixel_count_threshold,
+        #    fftshift=False,
+        #)
         op_output.emit(diff_amp_vit, "diff_amp_vit")
 
         self._diag_total_ms += (time.perf_counter() - t0) * 1000.0
@@ -308,6 +331,7 @@ class PointProcessorOp(Operator):
 
         self.angle_correction_flag = True
         self.angle = 0
+        self.x_motor = ''
 
         self.upsample = 10
         self.buffer = []
@@ -363,6 +387,7 @@ class PointProcessorOp(Operator):
         self.angle = param[5]
 
         self.simulate_positions = param[6]
+        self.x_motor = param[9] if len(param) > 9 else ''
 
         # Reset positions_um to NaN for the new scan (AI inference path)
         if self.positions_um is not None:
@@ -427,14 +452,17 @@ class PointProcessorOp(Operator):
                     pos1 = pos1*self.y_ratio*self.y_direction
 
                     if self.angle_correction_flag:
-                        # print('rescale x axis...')
-                        if np.abs(self.angle) <= 45.:
-                            pos0 *= np.abs(np.cos(self.angle*np.pi/180.))
-                        else:
-                            pos0 *= np.abs(np.sin(self.angle*np.pi/180.))
-
-                        if self.angle <= -45.:
-                            pos0 *= -1
+                        _m = self.x_motor.lower()
+                        if _m.endswith('x'):
+                            pos0 *= np.cos(self.angle*np.pi/180.)
+                        elif _m.endswith('z'):
+                            pos0 *= np.sin(self.angle*np.pi/180.)
+                        elif _m == '':
+                            if np.abs(self.angle) <= 45.:
+                                pos0 *= np.abs(np.cos(self.angle*np.pi/180.))
+                            else:
+                                pos0 *= np.abs(np.sin(self.angle*np.pi/180.))
+                        # else: unrecognized motor — skip angle correction
                 else:
                     pos0 = self.pos0_simul[self.pos_loaded_num:p_total_num]
                     pos1 = self.pos1_simul[self.pos_loaded_num:p_total_num]
