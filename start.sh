@@ -152,6 +152,14 @@ run_args=(
   -e PANDA_STREAM_SOURCE
 )
 
+# Persist the TensorRT engine cache (ENGINE_CACHE_DIR=/models in the container)
+# on the host so `hp model set` doesn't re-download the ONNX from Azure ML and
+# re-compile via TensorRT on every --rm restart — a couple of minutes per model
+# for a byte-identical result. Engine files are named {name}_v{version}.engine,
+# so new versions add files alongside old ones (no manual versioning). (issue #33)
+mkdir -p "$HOME/.cache/holoptycho/models"
+run_args+=(-v "$HOME/.cache/holoptycho/models:/models")
+
 if [[ $LIVE -eq 1 ]]; then
   run_args+=(-e SERVER_PUBLIC_KEY -e CLIENT_PUBLIC_KEY -e CLIENT_SECRET_KEY)
 fi
