@@ -59,6 +59,27 @@ from config_from_tiled import (
 )
 
 
+# D4 transforms on the last two axes (numpy only — the replay env has no
+# ptychoml). Used by --simulate-live to un-rotate Tiled frames back to the raw
+# detector orientation so the live coordinate-correction path can be exercised.
+_D4 = {
+    'identity':      lambda a: a,
+    'fliplr':        lambda a: np.flip(a, -1),
+    'flipud':        lambda a: np.flip(a, -2),
+    'rot180':        lambda a: np.flip(np.flip(a, -1), -2),
+    'transpose':     lambda a: np.swapaxes(a, -1, -2),
+    'rot90_ccw':     lambda a: np.flip(np.swapaxes(a, -1, -2), -2),
+    'rot90_cw':      lambda a: np.flip(np.swapaxes(a, -1, -2), -1),
+    'antitranspose': lambda a: np.flip(np.flip(np.swapaxes(a, -1, -2), -1), -2),
+}
+_D4_INVERSE = {
+    'identity': 'identity', 'fliplr': 'fliplr', 'flipud': 'flipud',
+    'rot180': 'rot180', 'transpose': 'transpose', 'antitranspose': 'antitranspose',
+    'rot90_cw': 'rot90_ccw', 'rot90_ccw': 'rot90_cw',
+}
+_D4_TRANSPOSE_FAMILY = {'transpose', 'antitranspose', 'rot90_cw', 'rot90_ccw'}
+
+
 # ---------------------------------------------------------------------------
 # Eiger wire format helpers
 # ---------------------------------------------------------------------------
@@ -714,9 +735,13 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
     config = build_full_config(args.uid, tiled_url=config_tiled_url, args=args)
     config["panda_upsample"] = str(int(panda_upsample))
     # Tiled frames are already coordinate-corrected (the acquisition/file-writer
-    # applied the local->global rotation when saving), so the pipeline must NOT
-    # re-apply it on replay — force the no-op. Live runs use 'rot180' instead.
-    config["detector_orientation"] = "identity"
+    # applied the local->global rotation when saving), so by default the pipeline
+    # must NOT re-apply it on replay — force the no-op. With --simulate-live we
+    # instead publish un-rotated (raw-like) frames and set the live value so the
+    # pipeline's coordinate-correction path runs (see main()).
+    config["detector_orientation"] = (
+        str(args.detector_orientation) if args.simulate_live else "identity"
+    )
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
     # Retry-with-backoff for the brief window where a prior runner thread is
@@ -793,6 +818,17 @@ def parse_args():
         help="Tiled URL used to build the hp config for --hp-start; defaults to --tiled-url",
     )
     add_reconstruction_arguments(parser)
+    parser.add_argument(
+        "--simulate-live",
+        action="store_true",
+        help="Make replay behave like the LIVE Eiger: un-rotate the (already "
+        "corrected) Tiled frames back to raw detector orientation by applying "
+        "detector_orientation^-1, and set the config's detector_orientation to "
+        "the live value (--detector-orientation, default rot180) so the pipeline "
+        "re-applies it. Exercises the live coordinate-correction path; the final "
+        "recon is unchanged. Without this, replay publishes Tiled frames as-is "
+        "and sets detector_orientation=identity.",
+    )
     parser.add_argument(
         "--eiger-endpoint",
         default="tcp://0.0.0.0:5555",
@@ -963,6 +999,24 @@ def main():
     # chunks from tiled lazily — first chunk is the already-fetched head,
     # subsequent chunks are server-side-sliced via _fetch_frame_chunk.
     chunks_iter = iter_frame_chunks(streams, streams["head_frames"], args.chunk_size, args.tiled_workers)
+    if args.simulate_live:
+        do = str(args.detector_orientation)
+        if do not in _D4:
+            print(f"ERROR: --detector-orientation {do!r} is not a valid D4 name "
+                  f"({sorted(_D4)})", file=sys.stderr)
+            sys.exit(1)
+        inv = _D4_INVERSE[do]
+        fh, fw = streams["frame_shape"]
+        if inv in _D4_TRANSPOSE_FAMILY and fh != fw:
+            print(f"ERROR: --simulate-live with detector_orientation={do!r} would "
+                  f"transpose non-square frames ({fh}x{fw}), changing the wire "
+                  f"shape. Not supported.", file=sys.stderr)
+            sys.exit(1)
+        print(f"[eiger] --simulate-live: publishing {inv} of the Tiled frames "
+              f"(raw-like); pipeline applies detector_orientation={do}.", flush=True)
+        if inv != 'identity':
+            _fn = _D4[inv]
+            chunks_iter = (np.ascontiguousarray(_fn(chunk)) for chunk in chunks_iter)
     eiger_thread = threading.Thread(
         target=publish_eiger,
         args=(
