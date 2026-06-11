@@ -386,8 +386,8 @@ def setup_scan_from_tiled(
 
     Eagerly loads only:
       * the encoder arrays (small — a few hundred KB even for 10k frames), and
-      * the first ``autodetect_frames`` detector frames so the caller can run
-        ``_auto_batch_offsets`` before publishing starts.
+      * the first ``autodetect_frames`` detector frames (used as the leading
+        chunk when publishing starts).
 
     The remaining frames are streamed chunk-by-chunk during publishing via
     ``_fetch_frame_chunk(frames_node, frame_axis, start, stop)``.
@@ -888,39 +888,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _auto_batch_offsets(frames: np.ndarray, nx: int, ny: int) -> tuple[int, int]:
-    """Auto-detect detector ROI offsets from the diffraction pattern center.
-
-    Averages up to 50 frames, masks dtype-saturated pixels (which would
-    otherwise drag the COM off course), then computes the intensity-weighted
-    center of mass and returns (bx0, by0) such that an nx × ny crop is
-    centered on it. Returns (0, 0) if the masked frame has zero total
-    intensity.
-
-    Verified on scan 404611: target was (135, 70), detected (137, 68) — 2px
-    rounding noise after sat masking.
-
-    Inlined verbatim from ptychoml.preprocess.auto_detect_roi_offsets so the
-    replay env doesn't need the private ptychoml repo.
-    """
-    n_sample = 50
-    saturation_threshold = np.iinfo(frames.dtype).max - 1
-    sample = frames[:min(n_sample, len(frames))].astype(np.float64)
-    mean_frame = sample.mean(axis=0)
-    sat_mask = (sample > saturation_threshold).any(axis=0)
-    masked = np.where(sat_mask, 0.0, mean_frame)
-    total = masked.sum()
-    if total <= 0:
-        return 0, 0
-    ys, xs = np.indices(masked.shape)
-    cy = float((ys * masked).sum() / total)
-    cx = float((xs * masked).sum() / total)
-    h, w = mean_frame.shape
-    bx0 = max(0, min(w - nx, round(cx - nx / 2)))
-    by0 = max(0, min(h - ny, round(cy - ny / 2)))
-    return int(bx0), int(by0)
-
-
 def main():
     args = parse_args()
 
@@ -951,17 +918,14 @@ def main():
         skip_frames=args.skip_frames,
     )
 
+    # When no crop ROI is passed we deliberately leave batch_x0/y0 unset so the
+    # pipeline's segmentation-based auto-centering (config auto_center_dp, default
+    # on with a whole-frame search) finds the beam — the SAME mechanism as live.
+    # (We no longer COM-fill batch_x0/y0 here; that bypassed auto-centering.)
     if args.batch_x0 is None or args.batch_y0 is None:
-        auto_x0, auto_y0 = _auto_batch_offsets(streams["head_frames"], args.nx, args.ny)
-        if args.batch_x0 is None:
-            args.batch_x0 = auto_x0
-        if args.batch_y0 is None:
-            args.batch_y0 = auto_y0
-        h, w = streams["frame_shape"]
         print(
-            f"[holoptycho] auto-detected diffraction center: "
-            f"batch_x0={args.batch_x0}, batch_y0={args.batch_y0} "
-            f"(box {args.nx}x{args.ny} on {h}x{w} detector)",
+            "[holoptycho] no crop ROI passed — using segmentation auto-centering "
+            "(set --batch-x0/--batch-y0 to crop at a fixed offset instead).",
             flush=True,
         )
 
