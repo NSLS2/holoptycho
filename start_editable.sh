@@ -19,6 +19,17 @@ set -euo pipefail
 DEV_IMAGE="cuda-dev"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- Podman runtime setup --------------------------------------------------
+# On hosts where `docker` is an alias for rootless podman (e.g. a Slurm
+# compute node), podman needs a writable XDG_RUNTIME_DIR. Always point it at
+# a private /tmp path we own — we do NOT trust an inherited
+# XDG_RUNTIME_DIR=/run/user/<uid>, which a Slurm allocation inherits from the
+# login shell and which passes the `-w` test on the compute node even though
+# logind never backed it there (issue #36). Harmless on real-docker hosts.
+export XDG_RUNTIME_DIR="/tmp/xdg-$(id -u)"
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
 # --- One-time build of the dev image --------------------------------------
 # Layered on top of nvidia/cuda + pixi. Nothing holoptycho-specific lives
 # in here, so it's reusable across any pixi/CUDA project.
