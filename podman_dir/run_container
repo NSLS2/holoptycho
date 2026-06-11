@@ -35,5 +35,4 @@ podman run --rm --net host -it \
 -e OMPI_COMM_WORLD_LOCAL_SIZE=1 \
 -e HOLOSCAN_ENABLE_PROFILE=1 \
 --device nvidia.com/gpu=all \
-hxn-ptycho-holoscan pixi shell
-#hxn-ptycho-holoscan bash -c "source /root/.bashrc && pixi run python -m nsls2ptycho"
+hxn-ptycho-holoscan bash -c "source /root/.bashrc && pixi run python -m nsls2ptycho"

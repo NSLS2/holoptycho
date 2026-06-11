@@ -38,6 +38,11 @@ nvtx = "==0.2.10"
 git = "*"
 
 
+# PtychoViT TRT inference deps
+pycuda = "*"
+onnx = "*"
+pyyaml = "*"
+
 [pypi-dependencies]
 holoscan = "==3.1.*"
 dectris-compression = ">=0.3"
@@ -47,6 +52,9 @@ pyFFTW = ">=0.15"
 h5py = ">=3.12.1"
 pyqt5 = "*"
 numba-cuda = {version = "*", extras = ["cu12"]}
+
+# PtychoViT TRT inference
+tensorrt-cu12 = "==10.16.0.72"
 
 #ptychoml = { path = "/ptychoml", editable = true }
 #nsls2ptycho = { path = "/ptycho_gui", editable = true }
