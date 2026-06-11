@@ -70,21 +70,19 @@ HOST_PORT=8000
 CONTAINER_NAME="holoptycho"
 
 # --- Podman runtime setup --------------------------------------------------
-# On compute nodes `docker` is an alias for rootless podman. sbatch and
-# other non-systemd shells don't get XDG_RUNTIME_DIR from logind, so point
-# it at a private /tmp path so podman has somewhere to write its runtime
-# state. Harmless on real-docker hosts (the dir just sits unused).
+# On compute nodes `docker` is an alias for rootless podman, which needs a
+# writable XDG_RUNTIME_DIR. Always point it at a private /tmp path we own.
 #
-# Also fall back when the inherited value points at a path we can't write
-# to: slurm sessions sometimes inherit XDG_RUNTIME_DIR=/run/user/<uid>
-# from the login shell, but logind doesn't mount /run/user/<uid> on batch
-# nodes (no PAM session unless `loginctl enable-linger` is set), so the
-# path doesn't exist and we can't create it ourselves. ``-w`` returns
-# false for missing paths, so this covers both "exists but unwritable"
-# and "doesn't exist" in one check.
-if [[ -z "${XDG_RUNTIME_DIR:-}" || ! -w "${XDG_RUNTIME_DIR:-}" ]]; then
-  XDG_RUNTIME_DIR="/tmp/xdg-$(id -u)"
-fi
+# We deliberately do NOT trust an inherited XDG_RUNTIME_DIR=/run/user/<uid>.
+# A Slurm allocation (salloc/sbatch) inherits that value from the login
+# shell, where logind's PAM session created and mounted /run/user/<uid> — so
+# the path *exists and passes the `-w` writable test on the compute node*
+# even though logind never backed it there (no PAM session on the batch node
+# unless `loginctl enable-linger` is set). A conditional `-w` fallback is
+# therefore never triggered, and podman fails on a runtime dir that isn't
+# properly backed. Unconditionally overriding avoids that (issue #36).
+# Harmless on real-docker hosts and login nodes — the dir just sits unused.
+XDG_RUNTIME_DIR="/tmp/xdg-$(id -u)"
 export XDG_RUNTIME_DIR
 mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR"
