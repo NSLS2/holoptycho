@@ -21,41 +21,19 @@ from holoscan.logger import LogLevel, set_log_level
 from holoscan.decorator import create_op, Input
 
 
-def crop_flipped_roi(image, roi):
-    """Crop a horizontally-flipped Eiger2 frame, mirroring the column ROI.
-
-    ``roi[1]`` stores the column window in raw-frame (pre-flip) coordinates,
-    measured from the left. ``np.flip(image, 1)`` reverses the columns, so
-    the raw col start/stop must be mirrored to positions measured from the
-    right of the flipped frame, using the actual post-flip frame width
-    (only known at compute time, not when the ROI is set at compose time).
-    Rows (``roi[0]``) are unaffected by the horizontal flip.
-    """
-    image = np.flip(image, 1)
-    W = image.shape[1]
-    r0, r1 = int(roi[0, 0]), int(roi[0, 1])
-    c0_raw, c1_raw = int(roi[1, 0]), int(roi[1, 1])
-    return image[r0:r1, W - c1_raw : W - c0_raw]
-
-
 def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     """One-shot segmentation-based centered crop box (lossless auto-centering).
 
-    Given a batch of detector frames already cropped (UN-flipped, raw
-    orientation) to ``headroom_roi`` — a ``[[y0,y1],[x0,x1]]`` window in raw
-    detector coordinates — find the diffraction beam and return the ``ny x nx``
-    crop box centered on it, in the same raw-left convention as the operator's
-    ``self.roi``.
+    Given a batch of (coordinate-corrected, global) detector frames cropped to
+    ``headroom_roi`` — a ``[[y0,y1],[x0,x1]]`` window in global coords — find the
+    diffraction beam and return the ``ny x nx`` crop box centered on it, in the
+    same global convention as the operator's ``self.roi``.
 
-    Segmentation matches the historical centering: average the batch (protects
-    against an odd empty/saturated first frame), mask saturated pixels (which
-    would bias the centroid), threshold at 5% of peak to isolate the blob, run
-    ``scipy.ndimage.label``, and take the centroid of the largest connected
-    component. The box is clamped to stay inside ``headroom_roi``.
-
-    Because the beam's raw column is flip-independent, the caller can segment on
-    the un-flipped window and still feed the box to ``crop_flipped_roi`` — a
-    horizontal mirror of a beam-centered window keeps the beam centered.
+    Segmentation: average the batch (protects against an odd empty/saturated
+    first frame), mask saturated pixels (which would bias the centroid),
+    threshold at 5% of peak to isolate the blob, run ``scipy.ndimage.label``,
+    and take the centroid of the largest connected component. The box is clamped
+    to stay inside ``headroom_roi``.
 
     Returns ``(box, clamped)`` where ``box`` is an integer ``np.array`` ROI, or
     ``(None, False)`` when no blob is found (caller falls back to the configured
@@ -104,7 +82,12 @@ class ImageBatchOp(Operator):
         logging.basicConfig(level=logging.INFO)
         self.counter = 0
 
-        self.flip_image = False
+        # Local→global coordinate correction (a ptychoml D4 name) applied to the
+        # WHOLE raw frame before cropping. Source-dependent: live Eiger ZMQ is
+        # raw-local → 'rot180'; replay-from-Tiled is already corrected → 'identity'.
+        # Set from config by compose(). Default 'identity' is a zero-cost no-op
+        # for safety before compose runs.
+        self.detector_orientation = 'identity'
         self.batchsize = 0
         self.nx_prb = 0
         self.ny_prb = 0
@@ -121,9 +104,9 @@ class ImageBatchOp(Operator):
         # first). Set from config by compose(). See compute_center_box().
         self.auto_center = False
         self.headroom = 0
-        self._center_box = None       # cached ny x nx ROI once computed
+        self._center_box = None       # cached ny x nx global ROI once computed
         self._hr_buf = None           # transient (batchsize, Hh, Wh) first-batch buffer
-        self._headroom_roi = None     # raw-left headroom window
+        self._headroom_roi = None     # global-coords headroom window
 
         # Per-second compute() throughput counters. See note in EigerZmqRxOp.
         self._diag_window_start = time.time()
@@ -169,26 +152,29 @@ class ImageBatchOp(Operator):
         if self.roi is None:
             return
 
-        # Lossless auto-centering: buffer the FIRST batch at a headroom window
-        # and compute a beam-centered crop box before emitting anything. Only
-        # entered when enabled and the box isn't computed yet; once set, falls
-        # through to the steady-state crop below. OFF path never enters here.
+        # Step 1: coordinate-correct the WHOLE raw frame local->global once.
+        # Everything below (ROI crop, auto-center segmentation) then works in
+        # global coords, so the ROI is a plain crop and never needs flipping.
+        # 'identity' (replay, Tiled already corrected) is a zero-cost no-op.
+        if self.detector_orientation != 'identity':
+            image = np.ascontiguousarray(apply_d4(image, self.detector_orientation))
+
+        # Step 2 (auto-center variant): buffer the FIRST batch at a headroom
+        # window and compute a beam-centered crop box before emitting anything.
+        # Only entered when enabled and the box isn't computed yet; once set,
+        # falls through to the plain crop below. OFF path never enters here.
         if self.auto_center and self._center_box is None:
             self._accumulate_first_batch(image, image_index, op_output)
             return
 
-        # Steady state (and the entire OFF path): crop to the active ROI — the
-        # computed centered box if auto-centering produced one, else the fixed
-        # configured ROI (identical to historical behavior).
+        # Step 2 (steady state + OFF path): plain crop to the active global ROI —
+        # the computed centered box if auto-centering produced one, else the
+        # configured global ROI. Output is always nx x ny.
         active_roi = self.roi if self._center_box is None else self._center_box
-
-        # For Eiger2 detector: horizontal flip mirrors the column ROI.
-        if self.flip_image:
-            image = crop_flipped_roi(image, active_roi)
-        else:
-            image = crop_to_roi(image, active_roi)
+        image = crop_to_roi(image, active_roi)
 
         # Remove Bad pixels (-1 to unsigned int)
+        image = np.array(image)  # crop_to_roi may return a view; don't mutate source
         image[image==np.iinfo(image.dtype).max] = 0
 
         self.images_to_add[self.counter, :, :] = image
@@ -205,10 +191,15 @@ class ImageBatchOp(Operator):
             self._diag_batches_emitted += 1
 
     def _headroom_roi_for(self, frame_shape):
-        """Raw-left headroom window: the configured ROI grown by ``headroom`` on
-        each side, clamped to the actual frame bounds (known only at compute)."""
+        """Global-coords headroom window to search for the beam. ``headroom < 0``
+        searches the WHOLE frame (used when no crop ROI was given — the beam can
+        be anywhere in the full detector). Otherwise the configured ROI grown by
+        ``headroom`` on each side, clamped to the frame bounds (known only at
+        compute time)."""
         H, W = int(frame_shape[0]), int(frame_shape[1])
         M = int(self.headroom)
+        if M < 0:
+            return np.array([[0, H], [0, W]])
         y0, y1 = int(self.roi[0, 0]), int(self.roi[0, 1])
         x0, x1 = int(self.roi[1, 0]), int(self.roi[1, 1])
         return np.array([
@@ -217,8 +208,10 @@ class ImageBatchOp(Operator):
         ])
 
     def _accumulate_first_batch(self, image, image_index, op_output):
-        """Buffer the first batch at the headroom window (UN-flipped), then on
-        the full batch compute the centered crop box and emit the batch."""
+        """Buffer the first batch at the headroom window, then on the full batch
+        compute the centered crop box and emit the batch. ``image`` is already
+        coordinate-corrected (global) by compute(), so the box and crop are in
+        global coords — no flipping anywhere."""
         if self._hr_buf is None:
             self._headroom_roi = self._headroom_roi_for(image.shape)
             hy0, hy1 = int(self._headroom_roi[0, 0]), int(self._headroom_roi[0, 1])
@@ -227,7 +220,7 @@ class ImageBatchOp(Operator):
                 (self.batchsize, hy1 - hy0, hx1 - hx0), dtype=image.dtype
             )
 
-        # Crop UN-flipped (raw orientation) for segmentation; zero bad pixels to
+        # Crop the (global) headroom window for segmentation; zero bad pixels to
         # match the steady-state path. crop_to_roi may return a view — copy.
         hr = np.array(crop_to_roi(image, self._headroom_roi))
         hr[hr == np.iinfo(image.dtype).max] = 0
@@ -262,16 +255,15 @@ class ImageBatchOp(Operator):
                 int(box[0, 0]), int(box[0, 1]), int(box[1, 0]), int(box[1, 1]),
             )
 
-        # Emit the buffered first batch cropped to the centered box. Slicing the
-        # un-flipped buffer then flipping is exactly crop_flipped_roi() on the
-        # originals, so batch 0 matches the orientation of all later batches.
+        # Emit the buffered first batch cropped to the centered box. The buffer
+        # is already coordinate-corrected, so slicing it to the box is exactly
+        # what the steady-state crop produces — batch 0 matches all later batches.
         hy0 = int(self._headroom_roi[0, 0])
         hx0 = int(self._headroom_roi[1, 0])
         ry0, ry1 = int(self._center_box[0, 0]) - hy0, int(self._center_box[0, 1]) - hy0
         rx0, rx1 = int(self._center_box[1, 0]) - hx0, int(self._center_box[1, 1]) - hx0
         for i in range(self.batchsize):
-            sub = self._hr_buf[i, ry0:ry1, rx0:rx1]
-            self.images_to_add[i, :, :] = np.flip(sub, 1) if self.flip_image else sub
+            self.images_to_add[i, :, :] = self._hr_buf[i, ry0:ry1, rx0:rx1]
         op_output.emit(self.images_to_add.copy(), "image_batch")
         op_output.emit(self.indices_to_add.copy(), "image_indices")
         self.counter = 0

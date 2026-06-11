@@ -92,6 +92,7 @@ from holoscan.decorator import create_op
 from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressOp
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
 from .orientation import reduce_d4_sequence
+from ptychoml.preprocess import D4_NAMES
 from .liverecon_utils import parse_scan_header
 from .vit_inference import (
     PtychoViTInferenceOp,
@@ -580,7 +581,7 @@ class PtychoApp(Application):
 
         self.image_batch.roi = None
         self.image_batch.batchsize = self.batchsize
-        self.image_batch.flip_image = self.flip_image
+        self.image_batch.detector_orientation = self.detector_orientation
         self.image_batch.nx_prb = nx_prb
         self.image_batch.ny_prb = ny_prb
         self.image_batch.images_to_add = np.zeros((self.batchsize, nx_prb, ny_prb), dtype = np.uint32)
@@ -661,7 +662,28 @@ class PtychoApp(Application):
             )
         self.recon_mode = recon_mode
 
-        self.flip_image = True  # According to detector settings
+        # Local->global coordinate correction (a ptychoml D4 name) applied to the
+        # whole raw frame before cropping. Source-dependent: live Eiger ZMQ is
+        # raw-local (default 'rot180'); replay sets 'identity' because Tiled data
+        # is already corrected. The old `flip_image=True` applied 'fliplr' to BOTH
+        # sources, leaving live and replay 180 deg apart — do NOT map the legacy
+        # flag to 'fliplr'.
+        self.detector_orientation = str(
+            getattr(self.param, "detector_orientation", "rot180")
+        )
+        if self.detector_orientation not in D4_NAMES:
+            raise ValueError(
+                f"detector_orientation must be one of {D4_NAMES}; got "
+                f"{self.detector_orientation!r}"
+            )
+        if getattr(self.param, "flip_image", None) is not None and not getattr(
+            self.param, "detector_orientation", None
+        ):
+            print(
+                "WARNING: 'flip_image' is deprecated and ignored; use "
+                "'detector_orientation' (D4 name). Live default is 'rot180'.",
+                file=sys.stderr,
+            )
 
         # Derive scan-size parameters from config.
         # x_num / y_num: number of scan positions along each axis.
@@ -778,12 +800,24 @@ class PtychoApp(Application):
         self.config_ops(self.param)
 
         # Initialize operators from config (replaces InitRecon scan header flush).
-        # ImageBatchOp: set detector crop ROI from config.
-        det_roiy0 = int(self.param.det_roiy0)
-        det_roix0 = int(self.param.det_roix0)
+        # ImageBatchOp crop: a SINGLE global ROI offset in the coordinate-corrected
+        # frame — batch_x0/batch_y0 mark the top-left of the nx x ny model window.
+        # (The old det_roi base offset is gone; the acquisition crop that made
+        # replay frames pre-cropped is handled by detector_orientation='identity'
+        # on the replay side, not by config math.) Auto-centering, if enabled,
+        # overrides this with a beam-centered box.
+        if int(getattr(self.param, "det_roix0", 0)) or int(getattr(self.param, "det_roiy0", 0)):
+            print(
+                "WARNING: 'det_roix0'/'det_roiy0' are deprecated and ignored; the "
+                "crop is a single global ROI (batch_x0/batch_y0) after coordinate "
+                "correction.",
+                file=sys.stderr,
+            )
+        batch_x0 = int(self.param.batch_x0)
+        batch_y0 = int(self.param.batch_y0)
         self.image_batch.roi = np.array([
-            [det_roiy0 + self.param.batch_y0, det_roiy0 + self.param.batch_y0 + self.param.ny],
-            [det_roix0 + self.param.batch_x0, det_roix0 + self.param.batch_x0 + self.param.nx],
+            [batch_y0, batch_y0 + self.param.ny],
+            [batch_x0, batch_x0 + self.param.nx],
         ])
         # Opt-in lossless DP auto-centering (default off). When enabled,
         # ImageBatchOp buffers the first batch at a ±headroom window, segments to

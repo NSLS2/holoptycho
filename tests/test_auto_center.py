@@ -24,7 +24,7 @@ pytest.importorskip("cupy")
 pytest.importorskip("tiled")
 
 from ptychoml.preprocess import crop_to_roi
-from holoptycho.preprocess import compute_center_box, crop_flipped_roi
+from holoptycho.preprocess import compute_center_box
 
 
 def _frame_with_blob(H, W, by, bx, r=4.0):
@@ -73,10 +73,10 @@ def test_box_centers_offcenter_blob_losslessly():
     assert abs(pk[0] - ny // 2) <= 1 and abs(pk[1] - nx // 2) <= 1
 
 
-def test_box_is_flip_independent():
-    """The crop *offset* is flip-independent: a box from un-flipped segmentation,
-    fed to crop_flipped_roi, still lands the beam at the centre (mirroring a
-    beam-centered window keeps the beam centered)."""
+def test_box_is_plain_global_crop():
+    """The box is a plain global ROI: auto-centering runs on the already
+    coordinate-corrected frame, so the box feeds a plain crop_to_roi and the
+    beam lands at the centre (no flip/mirror logic)."""
     H = W = 100
     nx = ny = 32
     by, bx = 58, 38
@@ -85,10 +85,10 @@ def test_box_is_flip_independent():
     frame = _frame_with_blob(H, W, by, bx)
 
     box, _ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
-    flipped = crop_flipped_roi(frame, box)
+    cropped = np.asarray(crop_to_roi(frame, box))
 
-    assert flipped.shape == (ny, nx)
-    pk = np.unravel_index(int(np.argmax(flipped)), flipped.shape)
+    assert cropped.shape == (ny, nx)
+    pk = np.unravel_index(int(np.argmax(cropped)), cropped.shape)
     assert abs(pk[0] - ny // 2) <= 1 and abs(pk[1] - nx // 2) <= 1
 
 
@@ -148,6 +148,42 @@ def _parse(argv):
     p = argparse.ArgumentParser()
     _cft.add_reconstruction_arguments(p)
     return p.parse_args(argv)
+
+
+def test_full_frame_search_finds_offcenter_beam():
+    """headroom < 0 searches the WHOLE frame, so auto-centering finds a beam far
+    from any configured offset — the full-detector (no-ROI) case."""
+    H, W = 300, 320
+    nx = ny = 64
+    by, bx = 40, 280  # beam in a corner, nowhere near the frame centre
+    frame = _frame_with_blob(H, W, by, bx, r=5.0)
+    hroi = np.array([[0, H], [0, W]])  # whole-frame headroom (the M<0 result)
+
+    box, clamped = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
+
+    assert not clamped
+    assert abs((box[0, 0] + box[0, 1]) / 2 - by) <= 1
+    assert abs((box[1, 0] + box[1, 1]) / 2 - bx) <= 1
+
+
+def _auto_center_decision(args):
+    """Mirror of build_full_config: auto-center on unless a crop ROI was passed."""
+    roi_passed = args.batch_x0 is not None and args.batch_y0 is not None
+    return bool(args.auto_center_dp or not roi_passed)
+
+
+def test_auto_center_defaults_on_without_roi():
+    assert _auto_center_decision(_parse([])) is True                       # no ROI
+    assert _auto_center_decision(_parse(["--auto-center-dp"])) is True
+    assert _auto_center_decision(
+        _parse(["--batch-x0", "10", "--batch-y0", "20"])) is False         # manual ROI
+    assert _auto_center_decision(
+        _parse(["--batch-x0", "10", "--batch-y0", "20", "--auto-center-dp"])) is True
+
+
+def test_detector_orientation_default_and_override():
+    assert _parse([]).detector_orientation == "rot180"          # LIVE default
+    assert _parse(["--detector-orientation", "identity"]).detector_orientation == "identity"
 
 
 def test_auto_center_flag_default_off():

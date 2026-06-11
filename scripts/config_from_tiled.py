@@ -660,22 +660,34 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="Detector crop height in pixels (default: --ny).",
     )
-    # batch-x0/y0 default to None and are auto-computed from the diffraction
-    # center of the first frames if the replay script has the data on hand.
+    # batch-x0/y0 default to None: when neither is passed the pipeline's
+    # segmentation auto-centering finds the beam (auto_center_dp defaults on).
     recon.add_argument(
         "--batch-x0",
         type=int,
         default=None,
-        help="Detector crop column offset (default: auto from "
-        "diffraction center of mass).",
+        help="Detector crop column offset, global coords (default: unset → "
+        "segmentation auto-centering).",
     )
     recon.add_argument(
         "--batch-y0",
         type=int,
         default=None,
-        help="Detector crop row offset (default: auto from "
-        "diffraction center of mass).",
+        help="Detector crop row offset, global coords (default: unset → "
+        "segmentation auto-centering).",
     )
+    recon.add_argument(
+        "--detector-orientation",
+        default="rot180",
+        help="Local->global coordinate correction applied to the WHOLE incoming "
+        "ZMQ frame before cropping (a D4 name: identity, fliplr, flipud, rot180, "
+        "transpose, rot90_ccw, rot90_cw, antitranspose). Default 'rot180' (LIVE "
+        "Eiger raw). replay_from_tiled forces 'identity' because Tiled data is "
+        "already corrected. The crop ROI (batch_x0/y0) is then a single offset in "
+        "this global frame.",
+    )
+    # Deprecated: the crop is now a single global ROI (batch_x0/y0); det_roi is
+    # ignored by the pipeline. Kept so old invocations don't error.
     recon.add_argument("--det-roix0", type=int, default=0)
     recon.add_argument("--det-roiy0", type=int, default=0)
     recon.add_argument(
@@ -794,13 +806,20 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     # halving the pixel size and distorting the reconstruction.
     for k, v in LEGACY_PTYCHO_DEFAULTS.items():
         config.setdefault(k, v)
-    # Default batch box size to nx/ny; default ROI offset to 0 if the caller
-    # didn't run auto-centering (the replay script fills these in by computing
-    # the diffraction center of mass before calling build_full_config).
+    # Default batch box size to nx/ny; ROI offset to 0 when not passed (in which
+    # case auto_center is enabled below and the offset is unused — the pipeline
+    # finds the beam by segmentation).
     batch_width = args.batch_width if args.batch_width is not None else args.nx
     batch_height = args.batch_height if args.batch_height is not None else args.ny
     batch_x0 = args.batch_x0 if args.batch_x0 is not None else 0
     batch_y0 = args.batch_y0 if args.batch_y0 is not None else 0
+
+    # Default to auto-centering when no crop ROI was passed: with no batch_x0/y0
+    # to position the window, find the beam from the data. The replay script
+    # fills batch_x0/y0 from the diffraction COM before calling this, so this
+    # path triggers mainly for live (hp start) configs.
+    roi_passed = args.batch_x0 is not None and args.batch_y0 is not None
+    auto_center = bool(args.auto_center_dp or not roi_passed)
 
     config.update(
         {
@@ -815,6 +834,7 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "batch_height": str(batch_height),
             "batch_x0": str(batch_x0),
             "batch_y0": str(batch_y0),
+            "detector_orientation": str(args.detector_orientation),
             "det_roix0": str(args.det_roix0),
             "det_roiy0": str(args.det_roiy0),
             "x_direction": str(args.x_direction if args.x_direction is not None else config.get("x_direction", "-1.0")),
@@ -849,8 +869,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "patch_flip": args.patch_flip,
             # Real JSON bool (not str): the pipeline reads it via bool(getattr(...))
             # after ast.literal_eval, so a lowercase "false" string would be
-            # mis-read as truthy. Default off.
-            "auto_center_dp": bool(args.auto_center_dp),
+            # mis-read as truthy. Defaults on when no crop ROI was passed.
+            "auto_center_dp": auto_center,
         }
     )
 
@@ -860,6 +880,11 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.auto_center_headroom is not None:
         config["auto_center_headroom"] = str(int(args.auto_center_headroom))
+    elif auto_center and not roi_passed:
+        # No ROI seed → search the WHOLE frame for the beam (sentinel -1). The
+        # full live detector is 1062x1028 and the beam can be anywhere, so a
+        # bounded headroom around offset 0 would miss it.
+        config["auto_center_headroom"] = "-1"
     # Iterative-only orientation/direction overrides: emitted ONLY when set.
     # An absent dp_orient_iterative key disables the feature entirely (the
     # engine then follows the shared dp_orient + autodetect); emitting a

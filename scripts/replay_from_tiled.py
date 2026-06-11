@@ -59,6 +59,27 @@ from config_from_tiled import (
 )
 
 
+# D4 transforms on the last two axes (numpy only — the replay env has no
+# ptychoml). Used by --simulate-live to un-rotate Tiled frames back to the raw
+# detector orientation so the live coordinate-correction path can be exercised.
+_D4 = {
+    'identity':      lambda a: a,
+    'fliplr':        lambda a: np.flip(a, -1),
+    'flipud':        lambda a: np.flip(a, -2),
+    'rot180':        lambda a: np.flip(np.flip(a, -1), -2),
+    'transpose':     lambda a: np.swapaxes(a, -1, -2),
+    'rot90_ccw':     lambda a: np.flip(np.swapaxes(a, -1, -2), -2),
+    'rot90_cw':      lambda a: np.flip(np.swapaxes(a, -1, -2), -1),
+    'antitranspose': lambda a: np.flip(np.flip(np.swapaxes(a, -1, -2), -1), -2),
+}
+_D4_INVERSE = {
+    'identity': 'identity', 'fliplr': 'fliplr', 'flipud': 'flipud',
+    'rot180': 'rot180', 'transpose': 'transpose', 'antitranspose': 'antitranspose',
+    'rot90_cw': 'rot90_ccw', 'rot90_ccw': 'rot90_cw',
+}
+_D4_TRANSPOSE_FAMILY = {'transpose', 'antitranspose', 'rot90_cw', 'rot90_ccw'}
+
+
 # ---------------------------------------------------------------------------
 # Eiger wire format helpers
 # ---------------------------------------------------------------------------
@@ -386,8 +407,8 @@ def setup_scan_from_tiled(
 
     Eagerly loads only:
       * the encoder arrays (small — a few hundred KB even for 10k frames), and
-      * the first ``autodetect_frames`` detector frames so the caller can run
-        ``_auto_batch_offsets`` before publishing starts.
+      * the first ``autodetect_frames`` detector frames (used as the leading
+        chunk when publishing starts).
 
     The remaining frames are streamed chunk-by-chunk during publishing via
     ``_fetch_frame_chunk(frames_node, frame_axis, start, stop)``.
@@ -713,6 +734,14 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
     config_tiled_url = args.hp_config_tiled_url or args.tiled_url
     config = build_full_config(args.uid, tiled_url=config_tiled_url, args=args)
     config["panda_upsample"] = str(int(panda_upsample))
+    # Tiled frames are already coordinate-corrected (the acquisition/file-writer
+    # applied the local->global rotation when saving), so by default the pipeline
+    # must NOT re-apply it on replay — force the no-op. With --simulate-live we
+    # instead publish un-rotated (raw-like) frames and set the live value so the
+    # pipeline's coordinate-correction path runs (see main()).
+    config["detector_orientation"] = (
+        str(args.detector_orientation) if args.simulate_live else "identity"
+    )
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
     # Retry-with-backoff for the brief window where a prior runner thread is
@@ -789,6 +818,17 @@ def parse_args():
         help="Tiled URL used to build the hp config for --hp-start; defaults to --tiled-url",
     )
     add_reconstruction_arguments(parser)
+    parser.add_argument(
+        "--simulate-live",
+        action="store_true",
+        help="Make replay behave like the LIVE Eiger: un-rotate the (already "
+        "corrected) Tiled frames back to raw detector orientation by applying "
+        "detector_orientation^-1, and set the config's detector_orientation to "
+        "the live value (--detector-orientation, default rot180) so the pipeline "
+        "re-applies it. Exercises the live coordinate-correction path; the final "
+        "recon is unchanged. Without this, replay publishes Tiled frames as-is "
+        "and sets detector_orientation=identity.",
+    )
     parser.add_argument(
         "--eiger-endpoint",
         default="tcp://0.0.0.0:5555",
@@ -884,39 +924,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _auto_batch_offsets(frames: np.ndarray, nx: int, ny: int) -> tuple[int, int]:
-    """Auto-detect detector ROI offsets from the diffraction pattern center.
-
-    Averages up to 50 frames, masks dtype-saturated pixels (which would
-    otherwise drag the COM off course), then computes the intensity-weighted
-    center of mass and returns (bx0, by0) such that an nx × ny crop is
-    centered on it. Returns (0, 0) if the masked frame has zero total
-    intensity.
-
-    Verified on scan 404611: target was (135, 70), detected (137, 68) — 2px
-    rounding noise after sat masking.
-
-    Inlined verbatim from ptychoml.preprocess.auto_detect_roi_offsets so the
-    replay env doesn't need the private ptychoml repo.
-    """
-    n_sample = 50
-    saturation_threshold = np.iinfo(frames.dtype).max - 1
-    sample = frames[:min(n_sample, len(frames))].astype(np.float64)
-    mean_frame = sample.mean(axis=0)
-    sat_mask = (sample > saturation_threshold).any(axis=0)
-    masked = np.where(sat_mask, 0.0, mean_frame)
-    total = masked.sum()
-    if total <= 0:
-        return 0, 0
-    ys, xs = np.indices(masked.shape)
-    cy = float((ys * masked).sum() / total)
-    cx = float((xs * masked).sum() / total)
-    h, w = mean_frame.shape
-    bx0 = max(0, min(w - nx, round(cx - nx / 2)))
-    by0 = max(0, min(h - ny, round(cy - ny / 2)))
-    return int(bx0), int(by0)
-
-
 def main():
     args = parse_args()
 
@@ -947,17 +954,14 @@ def main():
         skip_frames=args.skip_frames,
     )
 
+    # When no crop ROI is passed we deliberately leave batch_x0/y0 unset so the
+    # pipeline's segmentation-based auto-centering (config auto_center_dp, default
+    # on with a whole-frame search) finds the beam — the SAME mechanism as live.
+    # (We no longer COM-fill batch_x0/y0 here; that bypassed auto-centering.)
     if args.batch_x0 is None or args.batch_y0 is None:
-        auto_x0, auto_y0 = _auto_batch_offsets(streams["head_frames"], args.nx, args.ny)
-        if args.batch_x0 is None:
-            args.batch_x0 = auto_x0
-        if args.batch_y0 is None:
-            args.batch_y0 = auto_y0
-        h, w = streams["frame_shape"]
         print(
-            f"[holoptycho] auto-detected diffraction center: "
-            f"batch_x0={args.batch_x0}, batch_y0={args.batch_y0} "
-            f"(box {args.nx}x{args.ny} on {h}x{w} detector)",
+            "[holoptycho] no crop ROI passed — using segmentation auto-centering "
+            "(set --batch-x0/--batch-y0 to crop at a fixed offset instead).",
             flush=True,
         )
 
@@ -995,6 +999,24 @@ def main():
     # chunks from tiled lazily — first chunk is the already-fetched head,
     # subsequent chunks are server-side-sliced via _fetch_frame_chunk.
     chunks_iter = iter_frame_chunks(streams, streams["head_frames"], args.chunk_size, args.tiled_workers)
+    if args.simulate_live:
+        do = str(args.detector_orientation)
+        if do not in _D4:
+            print(f"ERROR: --detector-orientation {do!r} is not a valid D4 name "
+                  f"({sorted(_D4)})", file=sys.stderr)
+            sys.exit(1)
+        inv = _D4_INVERSE[do]
+        fh, fw = streams["frame_shape"]
+        if inv in _D4_TRANSPOSE_FAMILY and fh != fw:
+            print(f"ERROR: --simulate-live with detector_orientation={do!r} would "
+                  f"transpose non-square frames ({fh}x{fw}), changing the wire "
+                  f"shape. Not supported.", file=sys.stderr)
+            sys.exit(1)
+        print(f"[eiger] --simulate-live: publishing {inv} of the Tiled frames "
+              f"(raw-like); pipeline applies detector_orientation={do}.", flush=True)
+        if inv != 'identity':
+            _fn = _D4[inv]
+            chunks_iter = (np.ascontiguousarray(_fn(chunk)) for chunk in chunks_iter)
     eiger_thread = threading.Thread(
         target=publish_eiger,
         args=(
