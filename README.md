@@ -200,6 +200,14 @@ the config the replay script POSTs to holoptycho):
   default raw-bytes path uses a `"raw"` encoding header that holoptycho's
   receiver recognises; localhost ZMQ handles the ~10× larger wire size
   easily. Enable only when explicitly testing the decompression code path.
+- **`--auto-center-dp`** — enable one-shot **lossless** diffraction-pattern
+  auto-centering. **Off by default.** `ImageBatchOp` buffers the first batch at a
+  `±headroom` window, segments it (largest connected component) to find the beam,
+  and crops every batch to an `nx × ny` box centered on it — real pixels, no
+  `np.roll`, no zero-fill. It composes with `--batch-x0/--batch-y0` (which
+  position the search window) and refines within `±headroom`
+  (`--auto-center-headroom`, default `nx//4`). Use when the detector ROI is too
+  far off-centre to fix with `batch_x0/batch_y0` alone.
 
 ### Best practices
 
