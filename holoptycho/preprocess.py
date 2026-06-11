@@ -191,10 +191,15 @@ class ImageBatchOp(Operator):
             self._diag_batches_emitted += 1
 
     def _headroom_roi_for(self, frame_shape):
-        """Raw-left headroom window: the configured ROI grown by ``headroom`` on
-        each side, clamped to the actual frame bounds (known only at compute)."""
+        """Global-coords headroom window to search for the beam. ``headroom < 0``
+        searches the WHOLE frame (used when no crop ROI was given — the beam can
+        be anywhere in the full detector). Otherwise the configured ROI grown by
+        ``headroom`` on each side, clamped to the frame bounds (known only at
+        compute time)."""
         H, W = int(frame_shape[0]), int(frame_shape[1])
         M = int(self.headroom)
+        if M < 0:
+            return np.array([[0, H], [0, W]])
         y0, y1 = int(self.roi[0, 0]), int(self.roi[0, 1])
         x0, x1 = int(self.roi[1, 0]), int(self.roi[1, 1])
         return np.array([

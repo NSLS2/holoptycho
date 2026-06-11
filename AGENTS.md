@@ -569,7 +569,7 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
 | `recon_mode` | str | Which reconstruction branches to wire: `iterative`, `vit`, or `both`. Default `both`. Use `iterative` to skip the ViT op entirely (no engine load); use `vit` to skip the iterative DM/ML solver — the `PtychoRecon`/`StreamingPtychoRecon` engine is **not created at all** (no CuPy context on the ViT GPU, avoiding the PyCUDA+CuPy SIGABRT), and the sample-plane geometry the engine would supply (pixel size, ranges) is derived from config via `ptychoml.compute_sample_pixel_size`. No `live/`/`final/` Tiled writes. |
 | `vit_batch_writes` | bool | (Optional) Enable per-batch `pred` + `indices` writes to `<run>/vit/batches/NNNNNN/...` via `BatchWriterOp`. Default `false`. Each batch's `pred` is `(64, 2, 256, 256)` float32 (~33 MB) and a tiled HTTPS PUT runs at ~1 MB/s, so enabling this gates the whole ViT branch at ~28 s/batch. Leave off for live mosaic viewing; turn on only when offline analysts need the raw per-batch arrays. |
-| `auto_center_dp` | bool | (Optional) Lossless one-shot DP auto-centering in `ImageBatchOp`. Default `false`. CLI: `--auto-center-dp`. See the `auto_center_dp` note below. |
+| `auto_center_dp` | bool | Lossless one-shot DP auto-centering in `ImageBatchOp`. **Defaults on when no crop ROI (`batch_x0/y0`) is passed** — config_from_tiled then also sets `auto_center_headroom=-1` (search the whole frame). CLI: `--auto-center-dp` to force on with an explicit ROI. See the note below. |
 | `auto_center_headroom` | int | (Optional) Search margin (px/side) for `auto_center_dp`. Default `nx//4`. CLI: `--auto-center-headroom`. |
 | `raw_uid` | str | (Optional) UID of the raw Bluesky run being reconstructed. Stored as metadata on the per-run Tiled container. The `replay_from_tiled.py` and `config_from_tiled.py` config builders fill it in automatically from `--uid`. |
 | `scan_id` | str | (Optional) Scan id of the raw run. Defaults to `scan_num` if omitted. Stored as metadata on the per-run Tiled container. |
@@ -863,12 +863,16 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   either redundant or wrong. Worth confirming with the beamline team and
   potentially reducing pipeline complexity.
 
-* **`auto_center_dp` (config field, default `false`) — one-shot **lossless**
-  diffraction centering via scipy segmentation.** Toggle with the
-  `--auto-center-dp` flag on `config_from_tiled` / `replay`, or set the config
-  bool directly. It lives in **`ImageBatchOp`** (`preprocess.py::compute_center_box`):
-  on the first batch it buffers a `±auto_center_headroom` window (default
-  `nx//4`) around the configured ROI, averages it, masks saturated pixels,
+* **`auto_center_dp` (config field) — one-shot **lossless** diffraction
+  centering via scipy segmentation.** **Defaults on when no crop ROI
+  (`batch_x0/y0`) is passed** (find the beam from data instead of a hand-set
+  crop); pass `--batch-x0/--batch-y0` for a manual ROI, or `--auto-center-dp` to
+  force it on alongside an explicit ROI. It lives in **`ImageBatchOp`**
+  (`preprocess.py::compute_center_box`): on the first batch it buffers a
+  `±auto_center_headroom` window around the configured ROI (default `nx//4`; a
+  **negative** value, set automatically when there's no ROI, searches the WHOLE
+  frame — needed because the full live detector is 1062×1028 and the beam can be
+  anywhere), averages it, masks saturated pixels,
   thresholds at 5% of peak, runs `scipy.ndimage.label`, takes the centroid of
   the largest component, and crops **every** batch (including the first) to an
   `nx × ny` box centered on it — real detector pixels, **no `np.roll`, no

@@ -814,6 +814,13 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     batch_x0 = args.batch_x0 if args.batch_x0 is not None else 0
     batch_y0 = args.batch_y0 if args.batch_y0 is not None else 0
 
+    # Default to auto-centering when no crop ROI was passed: with no batch_x0/y0
+    # to position the window, find the beam from the data. The replay script
+    # fills batch_x0/y0 from the diffraction COM before calling this, so this
+    # path triggers mainly for live (hp start) configs.
+    roi_passed = args.batch_x0 is not None and args.batch_y0 is not None
+    auto_center = bool(args.auto_center_dp or not roi_passed)
+
     config.update(
         {
             # Provenance for the per-run Tiled container metadata.
@@ -862,8 +869,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "patch_flip": args.patch_flip,
             # Real JSON bool (not str): the pipeline reads it via bool(getattr(...))
             # after ast.literal_eval, so a lowercase "false" string would be
-            # mis-read as truthy. Default off.
-            "auto_center_dp": bool(args.auto_center_dp),
+            # mis-read as truthy. Defaults on when no crop ROI was passed.
+            "auto_center_dp": auto_center,
         }
     )
 
@@ -873,6 +880,11 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.auto_center_headroom is not None:
         config["auto_center_headroom"] = str(int(args.auto_center_headroom))
+    elif auto_center and not roi_passed:
+        # No ROI seed → search the WHOLE frame for the beam (sentinel -1). The
+        # full live detector is 1062x1028 and the beam can be anywhere, so a
+        # bounded headroom around offset 0 would miss it.
+        config["auto_center_headroom"] = "-1"
     # Iterative-only orientation/direction overrides: emitted ONLY when set.
     # An absent dp_orient_iterative key disables the feature entirely (the
     # engine then follows the shared dp_orient + autodetect); emitting a

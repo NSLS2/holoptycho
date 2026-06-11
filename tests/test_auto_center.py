@@ -150,6 +150,37 @@ def _parse(argv):
     return p.parse_args(argv)
 
 
+def test_full_frame_search_finds_offcenter_beam():
+    """headroom < 0 searches the WHOLE frame, so auto-centering finds a beam far
+    from any configured offset — the full-detector (no-ROI) case."""
+    H, W = 300, 320
+    nx = ny = 64
+    by, bx = 40, 280  # beam in a corner, nowhere near the frame centre
+    frame = _frame_with_blob(H, W, by, bx, r=5.0)
+    hroi = np.array([[0, H], [0, W]])  # whole-frame headroom (the M<0 result)
+
+    box, clamped = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
+
+    assert not clamped
+    assert abs((box[0, 0] + box[0, 1]) / 2 - by) <= 1
+    assert abs((box[1, 0] + box[1, 1]) / 2 - bx) <= 1
+
+
+def _auto_center_decision(args):
+    """Mirror of build_full_config: auto-center on unless a crop ROI was passed."""
+    roi_passed = args.batch_x0 is not None and args.batch_y0 is not None
+    return bool(args.auto_center_dp or not roi_passed)
+
+
+def test_auto_center_defaults_on_without_roi():
+    assert _auto_center_decision(_parse([])) is True                       # no ROI
+    assert _auto_center_decision(_parse(["--auto-center-dp"])) is True
+    assert _auto_center_decision(
+        _parse(["--batch-x0", "10", "--batch-y0", "20"])) is False         # manual ROI
+    assert _auto_center_decision(
+        _parse(["--batch-x0", "10", "--batch-y0", "20", "--auto-center-dp"])) is True
+
+
 def test_detector_orientation_default_and_override():
     assert _parse([]).detector_orientation == "rot180"          # LIVE default
     assert _parse(["--detector-orientation", "identity"]).detector_orientation == "identity"
