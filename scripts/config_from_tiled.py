@@ -660,21 +660,21 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="Detector crop height in pixels (default: --ny).",
     )
-    # batch-x0/y0 default to None and are auto-computed from the diffraction
-    # center of the first frames if the replay script has the data on hand.
+    # batch-x0/y0 default to None: when neither is passed the pipeline's
+    # segmentation auto-centering finds the beam (auto_center_dp defaults on).
     recon.add_argument(
         "--batch-x0",
         type=int,
         default=None,
-        help="Detector crop column offset (default: auto from "
-        "diffraction center of mass).",
+        help="Detector crop column offset, global coords (default: unset → "
+        "segmentation auto-centering).",
     )
     recon.add_argument(
         "--batch-y0",
         type=int,
         default=None,
-        help="Detector crop row offset (default: auto from "
-        "diffraction center of mass).",
+        help="Detector crop row offset, global coords (default: unset → "
+        "segmentation auto-centering).",
     )
     recon.add_argument(
         "--detector-orientation",
@@ -806,9 +806,9 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     # halving the pixel size and distorting the reconstruction.
     for k, v in LEGACY_PTYCHO_DEFAULTS.items():
         config.setdefault(k, v)
-    # Default batch box size to nx/ny; default ROI offset to 0 if the caller
-    # didn't run auto-centering (the replay script fills these in by computing
-    # the diffraction center of mass before calling build_full_config).
+    # Default batch box size to nx/ny; ROI offset to 0 when not passed (in which
+    # case auto_center is enabled below and the offset is unused — the pipeline
+    # finds the beam by segmentation).
     batch_width = args.batch_width if args.batch_width is not None else args.nx
     batch_height = args.batch_height if args.batch_height is not None else args.ny
     batch_x0 = args.batch_x0 if args.batch_x0 is not None else 0
