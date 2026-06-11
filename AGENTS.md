@@ -578,7 +578,9 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `dr_x`, `dr_y` | float (str) | Scan step size in µm |
 | `x_arr_size`, `y_arr_size` | float (str) | Number of scan positions (fast/slow axis) |
 | `x_range`, `y_range` | float (str) | Total scan range in µm |
-| `x_direction`, `y_direction` | float (str) | Sign convention for scan axes (`1.0` or `-1.0`) |
+| `x_direction`, `y_direction` | float (str) | Sign convention for scan axes (`1.0` or `-1.0`). Applies to the shared positions stream (`positions_um` / ViT mosaic) and is the default for the iterative engine. |
+| `x_direction_iterative`, `y_direction_iterative` | float (str) | (Optional) Iterative-engine-only sign override (`1.0`/`-1.0`) for the `point_info` stream. Unset = follow `x_direction`/`y_direction`. The ViT positions stream is never affected. CLI: `--x-direction-iterative` / `--y-direction-iterative`. |
+| `dp_orient_iterative` | str | (Optional) Iterative-engine-only absolute D4 orientation for the diffraction input — one name or a comma-separated sequence (reduced to one element; D4 is closed). **Unset = disabled**: the engine follows the shared `dp_orient`, including orientation-autodetect updates. Requires even `nx`/`ny`. CLI: `--dp-orient-iterative`. |
 | `z_m` | float (str) | Sample z position in m |
 | `alg_flag` | str | Primary algorithm: `ML_grad`, `DM`, `ePIE`, etc. |
 | `alg2_flag` | str | Secondary algorithm (after `alg_percentage` fraction) |
@@ -624,6 +626,10 @@ hp start "$(pixi run -e client config-from-tiled --scan-id 320045 --mode iterati
 
 # 2c. (Optional) Enable lossless DP auto-centering (off by default)
 hp start "$(pixi run -e client config-from-tiled --scan-id 320045 --auto-center-dp)"
+
+# 2d. (Optional) Give the iterative engine its own DP orientation / scan signs
+#     (the ViT branch keeps dp_orient / x_direction / y_direction)
+hp start "$(pixi run -e client config-from-tiled --scan-id 320045 --mode both --dp-orient-iterative rot90_ccw --x-direction-iterative 1.0)"
 
 # 3. (Optional) Switch to a different model
 hp model set my_vit_model --version 3
@@ -894,6 +900,19 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
     `ImagePreprocessorOp` buffers pre-D4 frames for it (capped 256), and the
     config `dp_orient` is the pre-sweep default. Engines without a baked probe
     keep the configured value.
+  * `dp_orient_iterative` (default unset = disabled) — iterative-engine-only
+    **absolute** D4 orientation. `ImagePreprocessorOp` stamps each batch with
+    the `dp_orient` it was produced with; `ImageSendOp` composes the inverse of
+    that stamp with this target before the GPU copy, so the engine receives
+    exactly what `preprocess_diffraction` would have produced with this
+    orientation (per-batch stamping keeps it correct even when the live
+    auto-detect changes `dp_orient` mid-run with batches still queued). The
+    ViT branch is never touched. Accepts one D4 name or a comma-separated
+    sequence (`rot90_cw,fliplr`), reduced to a single element. Even `nx`/`ny`
+    required (the relative D4 is applied post-fftshift, which only commutes
+    for even dims). **Leave unset** unless the iterative recon needs a
+    different orientation than the AI engine (demo flexibility) — an explicit
+    value freezes the engine to it, opting it out of the auto-detect.
   * `fftshift_dp` (default unset → `None`) — DC convention for the model
     input. `None` lets ptychoml auto-detect via `detect_dc_at_corner` and
     shift only when the central beam sits at the corners. Override with

@@ -693,6 +693,30 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Search margin (px per side) for --auto-center-dp (default: nx//4).",
     )
     recon.add_argument(
+        "--dp-orient-iterative",
+        default=None,
+        help="Iterative-engine-only diffraction orientation: one D4 name "
+        "(identity, fliplr, flipud, rot180, transpose, rot90_ccw, rot90_cw, "
+        "antitranspose) or a comma-separated sequence applied left to right "
+        "(e.g. 'rot90_cw,fliplr' — D4 is closed, so it reduces to a single "
+        "element). Unset = the engine follows the shared dp_orient, including "
+        "orientation-autodetect updates. The ViT branch is never affected.",
+    )
+    recon.add_argument(
+        "--x-direction-iterative",
+        type=float,
+        default=None,
+        help="Iterative-engine-only x sign convention (+1/-1). Unset = follow "
+        "--x-direction. The ViT positions stream is never affected.",
+    )
+    recon.add_argument(
+        "--y-direction-iterative",
+        type=float,
+        default=None,
+        help="Iterative-engine-only y sign convention (+1/-1). Unset = follow "
+        "--y-direction.",
+    )
+    recon.add_argument(
         "--x-direction",
         type=float,
         default=None,
@@ -836,6 +860,16 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.auto_center_headroom is not None:
         config["auto_center_headroom"] = str(int(args.auto_center_headroom))
+    # Iterative-only orientation/direction overrides: emitted ONLY when set.
+    # An absent dp_orient_iterative key disables the feature entirely (the
+    # engine then follows the shared dp_orient + autodetect); emitting a
+    # fallback value here would freeze the engine to the config orientation.
+    if args.dp_orient_iterative is not None:
+        config["dp_orient_iterative"] = str(args.dp_orient_iterative)
+    if args.x_direction_iterative is not None:
+        config["x_direction_iterative"] = str(args.x_direction_iterative)
+    if args.y_direction_iterative is not None:
+        config["y_direction_iterative"] = str(args.y_direction_iterative)
 
     return config
 

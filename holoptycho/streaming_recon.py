@@ -103,9 +103,15 @@ class StreamingPtychoRecon:
         self.ny_obj = 0
         self.scan_num = ""
 
-        # Scan direction (read by upstream PointProcessorOp)
-        self.x_direction = float(getattr(config, "x_direction", -1.0))
-        self.y_direction = float(getattr(config, "y_direction", -1.0))
+        # Scan direction for THIS (iterative) engine. Follows the shared
+        # x/y_direction unless the iterative-only override is set. No longer
+        # copied onto PointProcessorOp (which keeps the shared convention for
+        # the ViT positions_um); the iterative divergence reaches point_info
+        # via point_proc.x/y_sign_rel — see ptycho_holo.compose().
+        _xd = float(getattr(config, "x_direction", -1.0))
+        _yd = float(getattr(config, "y_direction", -1.0))
+        self.x_direction = float(getattr(config, "x_direction_iterative", _xd) or _xd)
+        self.y_direction = float(getattr(config, "y_direction_iterative", _yd) or _yd)
 
         # Probe propagation distance (config stores it under 'distance' or
         # 'prb_prop_dist_um' depending on branch)
