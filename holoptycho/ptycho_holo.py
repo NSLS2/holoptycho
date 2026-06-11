@@ -91,6 +91,7 @@ from holoscan.decorator import create_op
 
 from .datasource import parse_args, EigerZmqRxOp, PositionRxOp, EigerDecompressOp
 from .preprocess import ImageBatchOp, ImagePreprocessorOp, PointProcessorOp, ImageSendOp
+from .orientation import reduce_d4_sequence
 from .liverecon_utils import parse_scan_header
 from .vit_inference import (
     PtychoViTInferenceOp,
@@ -606,8 +607,12 @@ class PtychoApp(Application):
         self.point_proc.min_points = self.min_points
         self.point_proc.max_points = nz
         if has_recon:
-            self.point_proc.x_direction = self.pty.recon.x_direction
-            self.point_proc.y_direction = self.pty.recon.y_direction
+            # NOTE: point_proc.x/y_direction deliberately keep the SHARED
+            # config convention set at construction (they feed positions_um /
+            # the ViT mosaic). The engine's convention may differ via
+            # x/y_direction_iterative, carried by point_proc.x/y_sign_rel —
+            # recon.x/y_direction already reflect the iterative values, so the
+            # old copy-down here would leak them onto the ViT stream.
             self.point_proc.x_range_um = self.pty.recon.x_range_um
             self.point_proc.y_range_um = self.pty.recon.y_range_um
             self.point_proc.x_pixel_m = self.pty.recon.x_pixel_m
@@ -719,6 +724,48 @@ class PtychoApp(Application):
             swap_xy=bool(getattr(self.param, "position_swap_xy", False)),
             name="point_proc",
         )
+
+        # --- Iterative-only orientation / direction overrides (demo knobs) ---
+        # dp_orient_iterative: absolute D4 (or comma-separated sequence reduced
+        # to one element) for the ITERATIVE engine's diffraction input.
+        # Unset = disabled — the engine follows the shared dp_orient, including
+        # any runtime change by the orientation auto-detect. Do NOT default it
+        # to the config dp_orient: that would counter-rotate the engine input
+        # the moment the auto-detect updates dp_orient.
+        _dp_it = getattr(self.param, "dp_orient_iterative", None)
+        if _dp_it:
+            _dp_it = reduce_d4_sequence(str(_dp_it))
+            if int(self.param.nx) % 2 or int(self.param.ny) % 2:
+                raise ValueError(
+                    "dp_orient_iterative requires even nx/ny (the relative D4 "
+                    f"is applied post-fftshift); got nx={self.param.nx} "
+                    f"ny={self.param.ny}"
+                )
+            self.image_send.dp_orient_iterative = _dp_it
+        # x/y_direction_iterative: ±1 sign convention for the engine's
+        # point_info stream. Unset = follow the shared x/y_direction
+        # (value-fallback is safe here — these are static config values).
+        _xd = float(self.param.x_direction)
+        _yd = float(self.param.y_direction)
+        _xd_it = float(getattr(self.param, "x_direction_iterative", _xd) or _xd)
+        _yd_it = float(getattr(self.param, "y_direction_iterative", _yd) or _yd)
+        for _name, _v in (("x_direction", _xd), ("y_direction", _yd),
+                          ("x_direction_iterative", _xd_it),
+                          ("y_direction_iterative", _yd_it)):
+            if abs(_v) != 1.0:
+                raise ValueError(f"{_name} must be +1.0 or -1.0, got {_v}")
+        # For unit signs the relative factor iter/shared equals iter*shared.
+        self.point_proc.x_sign_rel = _xd_it * _xd
+        self.point_proc.y_sign_rel = _yd_it * _yd
+        if recon_mode == "vit" and (
+            _dp_it or _xd_it != _xd or _yd_it != _yd
+        ):
+            print(
+                "WARNING: dp_orient_iterative / x|y_direction_iterative are "
+                "set but recon_mode='vit' — the iterative engine is not "
+                "wired, so these flags have no effect.",
+                file=sys.stderr,
+            )
 
         # vit-only mode skips the iterative engine and its result writers so
         # no CuPy context is opened on the ViT GPU (PyCUDA + CuPy on the same
@@ -848,6 +895,15 @@ class PtychoApp(Application):
             # processing without inspecting state.
             "complete": False,
         }
+        # Iterative-only overrides — recorded only when set so downstream
+        # consumers can tell the engine's conventions differed from the shared
+        # x/y_direction / dp_orient above.
+        if _dp_it:
+            run_metadata["dp_orient_iterative"] = _dp_it
+        if _xd_it != _xd:
+            run_metadata["x_direction_iterative"] = _xd_it
+        if _yd_it != _yd:
+            run_metadata["y_direction_iterative"] = _yd_it
         _writer.start_run(self.run_uid, metadata=run_metadata)
 
         # Detector-frame downsampling. ViT-only runs default to keeping 1
@@ -979,7 +1035,7 @@ class PtychoApp(Application):
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
         self.add_flow(self.image_batch, self.image_proc, {("image_batch", "image_batch"), ("image_indices", "image_indices_in")})
-        self.add_flow(self.image_proc, self.image_send, {("diff_amp", "diff_amp"), ("image_indices", "image_indices")})
+        self.add_flow(self.image_proc, self.image_send, {("diff_amp", "diff_amp"), ("image_indices", "image_indices"), ("dp_orient_used", "dp_orient_used")})
         # Tap detector-frame intensity (pre-rot/shift) into the Tiled
         # diffraction buffer. Always wired so the dashboard tile and
         # downstream ptycho-vit fine-tuning have the data on any run.

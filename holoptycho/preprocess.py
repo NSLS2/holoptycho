@@ -13,6 +13,8 @@ from ptychoml.preprocess import (
     preprocess_diffraction,
 )
 
+from .orientation import compute_pos_bases, reorient_d4
+
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 from holoscan.schedulers import GreedyScheduler, MultiThreadScheduler, EventBasedScheduler
 from holoscan.logger import LogLevel, set_log_level
@@ -347,6 +349,11 @@ class ImagePreprocessorOp(Operator):
         # Detector-frame intensity tap, captured before rot90/fftshift/floor/sqrt.
         # Consumed only by FrameWriterOp when fine_tune writes are enabled.
         spec.output("intensity")
+        # The dp_orient this batch was actually preprocessed with, emitted in
+        # lockstep with diff_amp. ImageSendOp needs it per batch (not read live
+        # from this op) because the orientation auto-detect mutates dp_orient at
+        # runtime while up to capacity=32 batches sit queued downstream.
+        spec.output("dp_orient_used")
 
     def compute(self, op_input, op_output, context):
         t0 = time.perf_counter()
@@ -400,17 +407,21 @@ class ImagePreprocessorOp(Operator):
         # position and shift only when needed.
         if self.detmap_threshold > 0:
             apply_intensity_floor(processed_images, self.detmap_threshold)
+        # Snapshot dp_orient once so the preprocess call and the stamp emitted
+        # below can't disagree (the autodetect mutates it from another thread).
+        dp_orient = self.dp_orient
         diff_amp = preprocess_diffraction(
             processed_images,
             normalization=self.normalization,
             scale=self.scale,
             hot_pixel_count_threshold=self.hot_pixel_count_threshold,
-            dp_orient=self.dp_orient,
+            dp_orient=dp_orient,
             fftshift=self.fftshift_dp,
         )
 
         op_output.emit(diff_amp, "diff_amp")
         op_output.emit(indices, "image_indices")
+        op_output.emit(dp_orient, "dp_orient_used")
         self._diag_total_ms += (time.perf_counter() - t0) * 1000.0
 
 class PointProcessorOp(Operator):
@@ -454,6 +465,13 @@ class PointProcessorOp(Operator):
         self.max_points = 20000
         self.x_direction = x_direction
         self.y_direction = y_direction
+        # Relative sign factors (iterative_direction * shared_direction, ±1)
+        # applied ONLY to the iterative engine's point_info stream. 1.0 =
+        # iterative follows the shared x/y_direction (byte-identical default);
+        # the ViT positions_um always uses the shared convention. Set from
+        # config x/y_direction_iterative by compose().
+        self.x_sign_rel = 1.0
+        self.y_sign_rel = 1.0
         self.pos_x_base = None
         self.pos_y_base = None
         self.x_range_um = 2.
@@ -563,17 +581,22 @@ class PointProcessorOp(Operator):
                     pos0 = self.pos0_simul[self.pos_loaded_num:p_total_num]
                     pos1 = self.pos1_simul[self.pos_loaded_num:p_total_num]
 
-                
-                if self.pos_x_base is None:
-                    self.pos_x_base = np.min(pos0)
 
-                if self.pos_y_base is None:
-                    self.pos_y_base = pos1[0]
-                    if pos1[-1]<pos1[0]:
-                        self.pos_y_base -= self.y_range_um
+                # Iterative-only sign override: the engine's point_info stream
+                # may run with flipped axis conventions relative to the shared
+                # pos0/pos1 (which always keep the configured x/y_direction and
+                # feed positions_um / the ViT mosaic). A trailing ±1 commutes
+                # with all the scalar ratio/angle factors above.
+                pos0_pts = pos0 if self.x_sign_rel == 1.0 else pos0 * self.x_sign_rel
+                pos1_pts = pos1 if self.y_sign_rel == 1.0 else pos1 * self.y_sign_rel
 
-                points0 = np.round((pos0-self.pos_x_base)*1.e-6/self.x_pixel_m)
-                points1 = np.round((pos1-self.pos_y_base)*1.e-6/self.y_pixel_m)
+                if self.pos_x_base is None or self.pos_y_base is None:
+                    self.pos_x_base, self.pos_y_base = compute_pos_bases(
+                        pos0_pts, pos1_pts, self.y_range_um
+                    )
+
+                points0 = np.round((pos0_pts-self.pos_x_base)*1.e-6/self.x_pixel_m)
+                points1 = np.round((pos1_pts-self.pos_y_base)*1.e-6/self.y_pixel_m)
 
                 points0 = points0 + self.nx_prb / 2 + self.obj_pad//2
                 points1 = points1 + self.ny_prb / 2 + self.obj_pad//2
@@ -659,14 +682,24 @@ class ImageSendOp(Operator):
         self.diff_d_target = None
         self.max_points = 20000
         self.frame_ready_num = 0
-    
+        # Iterative-only absolute D4 orientation (config dp_orient_iterative).
+        # None = disabled: the engine receives diff_amp exactly as produced
+        # with the shared dp_orient. Must NOT default to the config dp_orient —
+        # the orientation auto-detect changes dp_orient at runtime and the
+        # engine should follow it unless an explicit override was requested.
+        self.dp_orient_iterative = None
+        self._warned_nonsquare = False
+
     def flush(self,param):
         self.frame_ready_num = 0
-        
-    
+
+
     def setup(self, spec: OperatorSpec):
         spec.input("diff_amp").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.input("image_indices").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
+        # Per-batch dp_orient stamp from ImagePreprocessorOp; always received
+        # (to drain the queue), only used when dp_orient_iterative is set.
+        spec.input("dp_orient_used").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.output("frame_ready_num").condition(ConditionType.NONE)
         spec.output("image_indices_out").condition(ConditionType.NONE)
 
@@ -674,17 +707,43 @@ class ImageSendOp(Operator):
 
         diff_d = op_input.receive("diff_amp")
         indices = op_input.receive("image_indices")
+        dp_orient_used = op_input.receive("dp_orient_used")
 
         nframe = diff_d.shape[0]
 
         # diff_d_target is the iterative engine's GPU buffer; None in vit-only
         # mode (no engine), so skip the device copy.
         if self.diff_d_target is not None and (self.frame_ready_num + nframe) < self.max_points:
+            # Iterative-only re-orientation: compose the inverse of the D4 this
+            # batch was preprocessed with and the configured target. For even
+            # square frames this equals having run preprocess_diffraction with
+            # dp_orient_iterative directly (D4 commutes with fftshift there).
+            # Rebinds only — diff_d is the same object the ViT branch consumes,
+            # so it must never be mutated in place. ascontiguousarray because
+            # the memcpy below reads raw ctypes memory.
+            if (
+                self.dp_orient_iterative is not None
+                and dp_orient_used != self.dp_orient_iterative
+            ):
+                reoriented = reorient_d4(
+                    diff_d, dp_orient_used, self.dp_orient_iterative
+                )
+                if reoriented.shape == diff_d.shape:
+                    diff_d = np.ascontiguousarray(reoriented)
+                elif not self._warned_nonsquare:
+                    self.logger.warning(
+                        "dp_orient_iterative %r relative to %r would change the "
+                        "frame shape %s (non-square frames + transpose-family "
+                        "relative transform); skipping re-orientation.",
+                        self.dp_orient_iterative, dp_orient_used,
+                        diff_d.shape[-2:],
+                    )
+                    self._warned_nonsquare = True
             diff_d_target = self.diff_d_target[self.frame_ready_num:self.frame_ready_num+nframe]
-            
+
             cp.cuda.runtime.memcpy(diff_d_target.data.ptr,diff_d.ctypes.data,diff_d.nbytes,cp.cuda.runtime.memcpyHostToDevice)
 
         self.frame_ready_num += nframe
-        
+
         op_output.emit(indices,"image_indices_out")
         op_output.emit(self.frame_ready_num,"frame_ready_num")

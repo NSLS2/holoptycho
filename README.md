@@ -208,6 +208,16 @@ the config the replay script POSTs to holoptycho):
   position the search window) and refines within `±headroom`
   (`--auto-center-headroom`, default `nx//4`). Use when the detector ROI is too
   far off-centre to fix with `batch_x0/batch_y0` alone.
+- **`--dp-orient-iterative`, `--x-direction-iterative`, `--y-direction-iterative`**
+  — give the **iterative engine** its own diffraction orientation (one D4 name
+  or a comma-separated sequence, e.g. `rot90_cw,fliplr`) and scan-axis sign
+  conventions, independent of the ViT/AI branch (which keeps `dp_orient` /
+  `x_direction` / `y_direction`). **Unset by default = identical behavior to
+  before.** Demo flexibility for when the two recons disagree about input
+  orientation on live data; once the right values are known, bake them into the
+  config defaults. Note: setting `--dp-orient-iterative` opts the engine out of
+  the live orientation auto-detect (it follows the shared `dp_orient` when
+  unset).
 
 ### Best practices
 
