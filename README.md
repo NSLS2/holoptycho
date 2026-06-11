@@ -200,21 +200,28 @@ the config the replay script POSTs to holoptycho):
   default raw-bytes path uses a `"raw"` encoding header that holoptycho's
   receiver recognises; localhost ZMQ handles the ~10× larger wire size
   easily. Enable only when explicitly testing the decompression code path.
-- **`--auto-center-dp`** — enable one-shot **lossless** diffraction-pattern
-  auto-centering. **Off by default.** `ImageBatchOp` buffers the first batch at a
-  `±headroom` window, segments it (largest connected component) to find the beam,
-  and crops every batch to an `nx × ny` box centered on it — real pixels, no
-  `np.roll`, no zero-fill. It composes with `--batch-x0/--batch-y0` (which
-  position the search window) and refines within `±headroom`
-  (`--auto-center-headroom`, default `nx//4`). Use when the detector ROI is too
-  far off-centre to fix with `batch_x0/batch_y0` alone.
+- **Diffraction centering — `--batch-x0/--batch-y0` vs auto-centering.** The crop
+  is a single `nx × ny` window in the coordinate-corrected (global) frame.
+  **If you don't pass `--batch-x0/--batch-y0`, the pipeline auto-centers** —
+  `ImageBatchOp` segments the first batch (largest connected component of the
+  thresholded blob), searching the **whole frame**, and crops every batch to an
+  `nx × ny` box on the beam (lossless: real pixels, no `np.roll`, no zero-fill).
+  This is the same mechanism used live. Pass `--batch-x0/--batch-y0` to crop at a
+  fixed global offset instead, or `--auto-center-dp` to force auto-centering
+  alongside an explicit offset (then bounded by `--auto-center-headroom`, default
+  `nx//4`). (Replay no longer COM-fills the offset — that bypassed auto-centering.)
 - **`--detector-orientation`** — the local→global coordinate correction (a D4
   name) applied to the whole incoming frame *before* cropping. **Default
-  `rot180`** (raw live Eiger); `replay` forces `identity` because Tiled data is
-  already corrected. The crop ROI (`batch_x0/y0`) is then a single offset in the
-  corrected (global) frame, or is found automatically with `--auto-center-dp`.
-  This replaces the old hardcoded horizontal flip, which left live and replay
-  180° apart.
+  `rot180`** (raw live Eiger). **Replay forces `identity`** because Tiled data is
+  already corrected — *unless* `--simulate-live` is given. This replaces the old
+  hardcoded horizontal flip, which left live and replay 180° apart.
+- **`--simulate-live`** — make replay behave like the **live** Eiger to exercise
+  the coordinate-correction path: un-rotate the (already-corrected) Tiled frames
+  by `detector_orientation⁻¹` so they're raw-like, and set the config's
+  `detector_orientation` to the live value (`--detector-orientation`, default
+  `rot180`) so the pipeline re-applies it. The recon is unchanged (round-trip is
+  exact), but the live `rot180` code runs — use it to validate live before
+  deploying.
 - **`--dp-orient-iterative`, `--x-direction-iterative`, `--y-direction-iterative`**
   — give the **iterative engine** its own diffraction orientation (one D4 name
   or a comma-separated sequence, e.g. `rot90_cw,fliplr`) and scan-axis sign

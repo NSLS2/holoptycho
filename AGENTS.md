@@ -897,7 +897,11 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   (`replay_from_tiled` forces it) while **live = `rot180`** (raw Eiger ZMQ).
   This fixes a real bug: the old hardcoded `flip_image=True` applied `fliplr`
   to *both* sources, leaving live (`fliplr(raw)`) and replay (`fliplr(rot180(raw))`)
-  **180° apart**. `flip_image` is deprecated. (Out of scope / known issue:
+  **180° apart**. `flip_image` is deprecated. **To exercise the live `rot180`
+  path through replay**, pass `replay … --simulate-live`: it un-rotates the Tiled
+  frames by `detector_orientation⁻¹` (raw-like) and sets `detector_orientation`
+  to the live value so the pipeline re-applies it (round-trip exact → same recon,
+  live code path runs). (Out of scope / known issue:
   `dump_scan_h5.py` flips `axis=1` of a 3-D chunk = a *vertical* flip, a separate
   inconsistency. Live ZMQ delivers the FULL `1062×1028` detector while Tiled is a
   pre-cropped `~493×437` ROI — auto-centering or `batch_x0/y0` handle the size
