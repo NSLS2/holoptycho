@@ -676,6 +676,18 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Detector crop row offset (default: auto from "
         "diffraction center of mass).",
     )
+    recon.add_argument(
+        "--detector-orientation",
+        default="rot180",
+        help="Local->global coordinate correction applied to the WHOLE incoming "
+        "ZMQ frame before cropping (a D4 name: identity, fliplr, flipud, rot180, "
+        "transpose, rot90_ccw, rot90_cw, antitranspose). Default 'rot180' (LIVE "
+        "Eiger raw). replay_from_tiled forces 'identity' because Tiled data is "
+        "already corrected. The crop ROI (batch_x0/y0) is then a single offset in "
+        "this global frame.",
+    )
+    # Deprecated: the crop is now a single global ROI (batch_x0/y0); det_roi is
+    # ignored by the pipeline. Kept so old invocations don't error.
     recon.add_argument("--det-roix0", type=int, default=0)
     recon.add_argument("--det-roiy0", type=int, default=0)
     recon.add_argument(
@@ -815,6 +827,7 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "batch_height": str(batch_height),
             "batch_x0": str(batch_x0),
             "batch_y0": str(batch_y0),
+            "detector_orientation": str(args.detector_orientation),
             "det_roix0": str(args.det_roix0),
             "det_roiy0": str(args.det_roiy0),
             "x_direction": str(args.x_direction if args.x_direction is not None else config.get("x_direction", "-1.0")),

@@ -208,6 +208,13 @@ the config the replay script POSTs to holoptycho):
   position the search window) and refines within `±headroom`
   (`--auto-center-headroom`, default `nx//4`). Use when the detector ROI is too
   far off-centre to fix with `batch_x0/batch_y0` alone.
+- **`--detector-orientation`** — the local→global coordinate correction (a D4
+  name) applied to the whole incoming frame *before* cropping. **Default
+  `rot180`** (raw live Eiger); `replay` forces `identity` because Tiled data is
+  already corrected. The crop ROI (`batch_x0/y0`) is then a single offset in the
+  corrected (global) frame, or is found automatically with `--auto-center-dp`.
+  This replaces the old hardcoded horizontal flip, which left live and replay
+  180° apart.
 - **`--dp-orient-iterative`, `--x-direction-iterative`, `--y-direction-iterative`**
   — give the **iterative engine** its own diffraction orientation (one D4 name
   or a comma-separated sequence, e.g. `rot90_cw,fliplr`) and scan-axis sign

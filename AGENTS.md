@@ -563,7 +563,9 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `scan_type` | str | Scan pattern, e.g. `pt_fly2dcontpd` |
 | `nx`, `ny` | int (str) | Reconstruction array size (pixels) |
 | `batch_width`, `batch_height` | int (str) | Diffraction pattern tile size |
-| `batch_x0`, `batch_y0` | int (str) | Top-left crop offset in the detector frame |
+| `batch_x0`, `batch_y0` | int (str) | Top-left of the `nx×ny` model crop, a SINGLE offset in the coordinate-corrected (global) frame. Optional when `auto_center_dp` is on (the beam is found from data). |
+| `detector_orientation` | str | Local→global coordinate correction (a D4 name) applied to the WHOLE incoming frame before cropping. **Live = `rot180`** (raw Eiger); **replay = `identity`** (Tiled is already corrected — `replay_from_tiled` forces it). Default `rot180`. See the orientation note below. |
+| `det_roix0`, `det_roiy0` | int (str) | **Deprecated/ignored.** The crop is a single global ROI (`batch_x0/y0`) after coordinate correction; a non-zero value warns. |
 | `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
 | `recon_mode` | str | Which reconstruction branches to wire: `iterative`, `vit`, or `both`. Default `both`. Use `iterative` to skip the ViT op entirely (no engine load); use `vit` to skip the iterative DM/ML solver — the `PtychoRecon`/`StreamingPtychoRecon` engine is **not created at all** (no CuPy context on the ViT GPU, avoiding the PyCUDA+CuPy SIGABRT), and the sample-plane geometry the engine would supply (pixel size, ranges) is derived from config via `ptychoml.compute_sample_pixel_size`. No `live/`/`final/` Tiled writes. |
 | `vit_batch_writes` | bool | (Optional) Enable per-batch `pred` + `indices` writes to `<run>/vit/batches/NNNNNN/...` via `BatchWriterOp`. Default `false`. Each batch's `pred` is `(64, 2, 256, 256)` float32 (~33 MB) and a tiled HTTPS PUT runs at ~1 MB/s, so enabling this gates the whole ViT branch at ~28 s/batch. Leave off for live mosaic viewing; turn on only when offline analysts need the raw per-batch arrays. |
@@ -879,6 +881,24 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   off-centre to fix with `batch_x0`/`batch_y0` alone. If no blob is found on the
   first batch it falls back to the configured ROI (warns); if the beam sits
   beyond the headroom the box is clamped to the window edge (warns).
+
+* **Detector coordinate systems (LOCAL vs GLOBAL) — `detector_orientation`.**
+  Frames arrive in the detector's LOCAL system; the lab/sample is GLOBAL. The
+  crop pipeline in `ImageBatchOp` is two steps: **(1)** coordinate-correct the
+  WHOLE frame local→global via `apply_d4(frame, detector_orientation)`, then
+  **(2)** crop the `nx×ny` model window with a SINGLE global ROI (`batch_x0/y0`)
+  or via auto-centering. The ROI is therefore never flipped — it's a plain crop
+  in global coords. The correction is **source-dependent**: the acquisition/
+  file-writer already applies it when saving to Tiled, so **replay = `identity`**
+  (`replay_from_tiled` forces it) while **live = `rot180`** (raw Eiger ZMQ).
+  This fixes a real bug: the old hardcoded `flip_image=True` applied `fliplr`
+  to *both* sources, leaving live (`fliplr(raw)`) and replay (`fliplr(rot180(raw))`)
+  **180° apart**. `flip_image` is deprecated. (Out of scope / known issue:
+  `dump_scan_h5.py` flips `axis=1` of a 3-D chunk = a *vertical* flip, a separate
+  inconsistency. Live ZMQ delivers the FULL `1062×1028` detector while Tiled is a
+  pre-cropped `~493×437` ROI — auto-centering or `batch_x0/y0` handle the size
+  difference.) Changing this alters what the model sees vs before, so
+  re-validate `dp_orient`/the autodetect on a replay.
 
 * **Diffraction geometry + normalization knobs (config fields).** The model
   input branch of `ImagePreprocessorOp` delegates to

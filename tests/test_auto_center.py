@@ -24,7 +24,7 @@ pytest.importorskip("cupy")
 pytest.importorskip("tiled")
 
 from ptychoml.preprocess import crop_to_roi
-from holoptycho.preprocess import compute_center_box, crop_flipped_roi
+from holoptycho.preprocess import compute_center_box
 
 
 def _frame_with_blob(H, W, by, bx, r=4.0):
@@ -73,10 +73,10 @@ def test_box_centers_offcenter_blob_losslessly():
     assert abs(pk[0] - ny // 2) <= 1 and abs(pk[1] - nx // 2) <= 1
 
 
-def test_box_is_flip_independent():
-    """The crop *offset* is flip-independent: a box from un-flipped segmentation,
-    fed to crop_flipped_roi, still lands the beam at the centre (mirroring a
-    beam-centered window keeps the beam centered)."""
+def test_box_is_plain_global_crop():
+    """The box is a plain global ROI: auto-centering runs on the already
+    coordinate-corrected frame, so the box feeds a plain crop_to_roi and the
+    beam lands at the centre (no flip/mirror logic)."""
     H = W = 100
     nx = ny = 32
     by, bx = 58, 38
@@ -85,10 +85,10 @@ def test_box_is_flip_independent():
     frame = _frame_with_blob(H, W, by, bx)
 
     box, _ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
-    flipped = crop_flipped_roi(frame, box)
+    cropped = np.asarray(crop_to_roi(frame, box))
 
-    assert flipped.shape == (ny, nx)
-    pk = np.unravel_index(int(np.argmax(flipped)), flipped.shape)
+    assert cropped.shape == (ny, nx)
+    pk = np.unravel_index(int(np.argmax(cropped)), cropped.shape)
     assert abs(pk[0] - ny // 2) <= 1 and abs(pk[1] - nx // 2) <= 1
 
 
@@ -148,6 +148,11 @@ def _parse(argv):
     p = argparse.ArgumentParser()
     _cft.add_reconstruction_arguments(p)
     return p.parse_args(argv)
+
+
+def test_detector_orientation_default_and_override():
+    assert _parse([]).detector_orientation == "rot180"          # LIVE default
+    assert _parse(["--detector-orientation", "identity"]).detector_orientation == "identity"
 
 
 def test_auto_center_flag_default_off():

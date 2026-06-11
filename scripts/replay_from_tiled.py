@@ -713,6 +713,10 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
     config_tiled_url = args.hp_config_tiled_url or args.tiled_url
     config = build_full_config(args.uid, tiled_url=config_tiled_url, args=args)
     config["panda_upsample"] = str(int(panda_upsample))
+    # Tiled frames are already coordinate-corrected (the acquisition/file-writer
+    # applied the local->global rotation when saving), so the pipeline must NOT
+    # re-apply it on replay — force the no-op. Live runs use 'rot180' instead.
+    config["detector_orientation"] = "identity"
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
     # Retry-with-backoff for the brief window where a prior runner thread is
