@@ -328,6 +328,34 @@ generates a throwaway keypair automatically when only `SERVER_PUBLIC_KEY` is
 set. The production pipeline (`EigerZmqRxOp` in `datasource.py`) requires all
 three keys and will raise `RuntimeError` if only some are set.
 
+### Dumping dps + positions to files (`--save`)
+
+Pass `--save [DIR]` to also write the received data to disk for manual
+inspection (e.g. checking diffraction-pattern orientation against tiled).
+`DIR` defaults to the current directory if given with no value. The detector
+frames are decoded with the exact logic the pipeline uses
+(`datasource.py::decode_json_message`, including the `reshape(shape[1],
+shape[0])` that inverts the Eiger `[cols, rows]` header), so the orientation
+on disk matches what the pipeline sees.
+
+```bash
+# Live run — pull the server key, raise the timeout, and dump 20 frames
+SERVER_PUBLIC_KEY="$(az keyvault secret show --vault-name genesisdemoskv --name holoptycho-eiger-server-public-key --query value -o tsv)" \
+pixi run -e replay python scripts/check_zmq.py --save /tmp/zmqdump --num-frames 20 --timeout 30
+```
+
+Writes two files into `DIR`:
+
+| File | Contents |
+|---|---|
+| `eiger_dps.npy` | `(N, H, W)` array of decoded diffraction patterns (`N = --num-frames`, default 10) |
+| `panda_positions.npy` | `(N, n_channels)` position samples gathered from `--num-position-msgs` PandA `data` messages (default 10); columns ordered by sorted channel name, mapping printed to stdout |
+
+Load and inspect with `np.load(...)`. `--save` requires a live scan (frames
+only flow when the detector is armed); with no scan running it returns
+`TIMEOUT` and writes nothing. Both `--num-frames` and `--num-position-msgs`
+only take effect when `--save` is set.
+
 ### CurveZMQ key format
 
 Keys must be **Z85-encoded 40-character ASCII strings** as produced by
