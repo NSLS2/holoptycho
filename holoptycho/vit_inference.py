@@ -945,6 +945,12 @@ class MosaicWriterOp(Operator):
         self._last_seen_batch_num = -1
         self._fill_value = 0.0
         self._fill_value_amp = 0.0
+        # Final display reorientation applied to the stitched canvas (phase +
+        # amplitude) just before the Tiled upload, so the mosaic matches the
+        # beamline view (top→bottom, left→right). Default 'antitranspose' ==
+        # rot90_ccw then horizontal flip (issue #50). A ptychoml D4 name; set
+        # from config by compose(). 'identity' = no reorientation.
+        self.mosaic_orient = 'antitranspose'
 
     def setup(self, spec: OperatorSpec):
         # capacity=1 + POP gives single-slot, latest-wins semantics: while
@@ -987,6 +993,14 @@ class MosaicWriterOp(Operator):
             self._fill_value, normalised = normalize_mosaic(
                 mosaic, counts, min_overlap_count
             )
+            # Reorient the stitched canvas to the beamline display convention
+            # (top→bottom, left→right) just before upload — issue #50. Default
+            # 'antitranspose' (rot90_ccw ∘ hflip). Contiguous because tiled
+            # writes the raw buffer. 'identity' short-circuits to a no-op.
+            if self.mosaic_orient != 'identity':
+                normalised = np.ascontiguousarray(
+                    apply_d4(normalised, self.mosaic_orient)
+                )
             t_norm = time.perf_counter()
             _writer.write_vit_mosaic(
                 normalised,
@@ -998,6 +1012,10 @@ class MosaicWriterOp(Operator):
                 self._fill_value_amp, norm_amp = normalize_mosaic(
                     mosaic_amp, counts_amp, min_overlap_count
                 )
+                if self.mosaic_orient != 'identity':
+                    norm_amp = np.ascontiguousarray(
+                        apply_d4(norm_amp, self.mosaic_orient)
+                    )
                 _writer.write_vit_amp_mosaic(
                     norm_amp,
                     batch_num=batch_num,

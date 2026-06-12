@@ -594,6 +594,7 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `batch_x0`, `batch_y0` | int (str) | Top-left of the `nx×ny` model crop, a SINGLE offset in the coordinate-corrected (global) frame. Optional when `auto_center_dp` is on (the beam is found from data). |
 | `detector_orientation` | str | Local→global coordinate correction (a D4 name) applied to the WHOLE incoming frame before cropping. **Live = `fliplr`** (raw Eiger — a flip over the vertical axis); **replay = `identity`** (Tiled is already corrected — `replay_from_tiled` forces it). Default `fliplr`. See the orientation note below. |
 | `det_roix0`, `det_roiy0` | int (str) | **Deprecated/ignored.** The crop is a single global ROI (`batch_x0/y0`) after coordinate correction; a non-zero value warns. |
+| `mosaic_orient` | str | D4 reorientation of the stitched ViT mosaic canvas before the Tiled upload, to match the beamline display. Default `antitranspose` (rot90_ccw then hflip; issue #50). `identity` = raw stitching frame. CLI: `--mosaic-orient`. See the note below. |
 | `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
 | `recon_mode` | str | Which reconstruction branches to wire: `iterative`, `vit`, or `both`. Default `both`. Use `iterative` to skip the ViT op entirely (no engine load); use `vit` to skip the iterative DM/ML solver — the `PtychoRecon`/`StreamingPtychoRecon` engine is **not created at all** (no CuPy context on the ViT GPU, avoiding the PyCUDA+CuPy SIGABRT), and the sample-plane geometry the engine would supply (pixel size, ranges) is derived from config via `ptychoml.compute_sample_pixel_size`. No `live/`/`final/` Tiled writes. |
 | `vit_batch_writes` | bool | (Optional) Enable per-batch `pred` + `indices` writes to `<run>/vit/batches/NNNNNN/...` via `BatchWriterOp`. Default `false`. Each batch's `pred` is `(64, 2, 256, 256)` float32 (~33 MB) and a tiled HTTPS PUT runs at ~1 MB/s, so enabling this gates the whole ViT branch at ~28 s/batch. Leave off for live mosaic viewing; turn on only when offline analysts need the raw per-batch arrays. |
@@ -1000,6 +1001,16 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   warning, so under-sizing degrades the mosaic but doesn't crash the run.
   `mosaic_overshoot_factor < 1.0` switches to *crop mode* — the canvas is
   intentionally smaller than commanded to trim the low-coverage border.
+
+* **`mosaic_orient` (config field, default `antitranspose`) — display
+  reorientation of the stitched ViT canvas (issue #50).** `MosaicWriterOp`
+  applies this D4 to the phase *and* amplitude canvases (`ptychoml.apply_d4`)
+  just before the Tiled upload, so the mosaic matches the beamline view
+  (top→bottom, left→right). The default `antitranspose` == rotate 90° CCW then
+  horizontal flip. `identity` uploads the canvas in the raw stitching frame.
+  It's a presentation transform on the final array; `pixel_size_m` is a scalar
+  (transpose-invariant) and `canvas_origin_um` is left as-is (the stitching-frame
+  reference). CLI: `--mosaic-orient`.
 
 * **ViT mosaic stitching uses `ptychoml.stitch.stitch_batch_livestitch_into`
   (nearest-integer placement) — `SaveViTResult` + `MosaicWriterOp`.**

@@ -1072,6 +1072,14 @@ class PtychoApp(Application):
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
+        # Final canvas display reorientation before the Tiled upload (issue #50);
+        # default 'antitranspose' = rot90_ccw then hflip (beamline view).
+        _mosaic_orient = str(getattr(self.param, "mosaic_orient", "antitranspose"))
+        if _mosaic_orient not in D4_NAMES:
+            raise ValueError(
+                f"mosaic_orient must be one of {D4_NAMES}; got {_mosaic_orient!r}"
+            )
+        self.mosaic_writer.mosaic_orient = _mosaic_orient
         self.positions_writer = PositionsWriterOp(self, name="positions_writer")
         if enable_batch_writes:
             self.batch_writer = BatchWriterOp(self, name="batch_writer")

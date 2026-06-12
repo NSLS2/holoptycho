@@ -677,6 +677,14 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         "segmentation auto-centering).",
     )
     recon.add_argument(
+        "--mosaic-orient",
+        default="antitranspose",
+        help="D4 reorientation applied to the stitched ViT mosaic canvas just "
+        "before the Tiled upload, to match the beamline display (top→bottom, "
+        "left→right). Default 'antitranspose' (rot90_ccw then horizontal flip). "
+        "Use 'identity' to upload the canvas in the stitching frame.",
+    )
+    recon.add_argument(
         "--detector-orientation",
         default="fliplr",
         help="Local->global coordinate correction applied to the WHOLE incoming "
@@ -836,6 +844,7 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "batch_x0": str(batch_x0),
             "batch_y0": str(batch_y0),
             "detector_orientation": str(args.detector_orientation),
+            "mosaic_orient": str(args.mosaic_orient),
             "det_roix0": str(args.det_roix0),
             "det_roiy0": str(args.det_roiy0),
             "x_direction": str(args.x_direction if args.x_direction is not None else config.get("x_direction", "-1.0")),
