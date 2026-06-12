@@ -14,6 +14,11 @@ All three CurveZMQ keys must be set together or not at all.
 Usage:
     pixi run python scripts/check_zmq.py
     pixi run python scripts/check_zmq.py --timeout 10
+
+    # Also dump received diffraction patterns + positions to files for
+    # manual inspection (decoded the same way the pipeline decodes them):
+    pixi run python scripts/check_zmq.py --save
+    pixi run python scripts/check_zmq.py --save /tmp/zmqdump --num-frames 20
 """
 
 import argparse
@@ -23,7 +28,53 @@ import os
 import socket
 import sys
 
+import numpy as np
 import zmq
+
+
+# ---------------------------------------------------------------------------
+# Eiger frame decode — mirrors holoptycho/datasource.py::decode_json_message
+# ---------------------------------------------------------------------------
+
+_SUPPORTED_ENCODINGS = {
+    "bs32-lz4<": "bslz4",
+    "lz4<": "lz4",
+    "bs16-lz4<": "bslz4",
+    "raw": "raw",
+}
+_SUPPORTED_TYPES = {"uint32": "uint32", "uint16": "uint16"}
+
+
+def _decode_frame(data_msg: bytes, encoding_msg: dict) -> np.ndarray:
+    """Decode one Eiger ``dimage_d-1.0`` payload into a 2-D ndarray.
+
+    Replicates ``decode_json_message`` from ``holoptycho/datasource.py`` —
+    including the ``reshape(shape[1], shape[0])`` that inverts the Eiger
+    ``[cols, rows]`` header convention — so the orientation written to disk is
+    exactly what the pipeline sees.
+    """
+    enc = encoding_msg.get("encoding")
+    shape = encoding_msg.get("shape")
+    typ = encoding_msg.get("type")
+
+    enc_str = _SUPPORTED_ENCODINGS.get(enc)
+    if not enc_str:
+        raise RuntimeError(f"Encoding {enc!r} is not supported")
+    type_str = _SUPPORTED_TYPES.get(typ)
+    if not type_str:
+        raise RuntimeError(f"Type {typ!r} is not supported")
+
+    elem_type = getattr(np, type_str)
+    elem_size = elem_type(0).nbytes
+    if enc_str == "raw":
+        image = np.frombuffer(bytearray(data_msg), dtype=elem_type)
+    else:
+        from dectris.compression import decompress
+
+        decompressed = decompress(data_msg, enc_str, elem_size=elem_size)
+        image = np.frombuffer(bytearray(decompressed), dtype=elem_type)
+    # Eiger reports shape as [cols, rows]; reshape back to (rows, cols).
+    return image.reshape(shape[1], shape[0])
 
 
 def _tcp_reachable(host: str, port: int, timeout: float = 3.0) -> bool:
@@ -123,8 +174,18 @@ def _apply_curve(sock: zmq.Socket) -> bool:
     return True
 
 
-def check_eiger(ctx: zmq.Context, endpoint: str, timeout_ms: int) -> str:
-    """Returns 'ok', 'timeout', or 'error'."""
+def check_eiger(
+    ctx: zmq.Context,
+    endpoint: str,
+    timeout_ms: int,
+    save_frames: int = 0,
+    save_dir: str | None = None,
+) -> str:
+    """Returns 'ok', 'timeout', or 'error'.
+
+    When ``save_frames`` > 0, collect and decode that many image frames and
+    write them to ``<save_dir>/eiger_dps.npy`` as a ``(N, H, W)`` array.
+    """
     print(f"Eiger  {endpoint}")
     host, port = _parse_endpoint(endpoint)
     if not _tcp_reachable(host, port):
@@ -135,7 +196,7 @@ def check_eiger(ctx: zmq.Context, endpoint: str, timeout_ms: int) -> str:
     print(f"  TCP {host}:{port} reachable")
     sock = ctx.socket(zmq.SUB)
     sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
-    sock.setsockopt(zmq.RCVHWM, 10)
+    sock.setsockopt(zmq.RCVHWM, 0 if save_frames else 10)
     curve = _apply_curve(sock)
     if curve:
         print("  CurveZMQ: enabled")
@@ -144,28 +205,75 @@ def check_eiger(ctx: zmq.Context, endpoint: str, timeout_ms: int) -> str:
     sock.setsockopt_string(zmq.SUBSCRIBE, "")
     sock.connect(endpoint)
 
+    collected: list[np.ndarray] = []
     try:
-        # The Eiger sends multi-part messages; first part is a JSON header
-        # containing a "frame" key once the detector is armed and scanning.
-        # We loop over a few messages to skip any non-image traffic.
-        for attempt in range(20):
+        # The Eiger streams each image as three consecutive ZMQ messages: a
+        # JSON header (contains "frame"), a JSON encoding descriptor, and the
+        # binary payload. The live detector sends them as three separate
+        # messages; the replay sends them as one multipart message. Sequential
+        # recv() handles both (recv() returns one frame at a time either way).
+        # Non-image traffic (global/series headers) is skipped by requiring a
+        # "frame" key.
+        max_attempts = (save_frames * 50 + 200) if save_frames else 40
+        for attempt in range(max_attempts):
             try:
-                parts = sock.recv_multipart()
+                raw = sock.recv()
             except zmq.Again:
+                if collected:
+                    break  # got some frames already; stop waiting
                 print(f"  TIMEOUT after {timeout_ms / 1000:.1f}s — no data received")
                 print("  Is the detector armed / a scan running?")
                 return "timeout"
 
             try:
-                header = json.loads(parts[0])
-            except (json.JSONDecodeError, IndexError):
+                # json.loads on bytes sniffs the encoding and raises
+                # UnicodeDecodeError (not JSONDecodeError) on a binary payload,
+                # so catch broadly and skip anything that isn't a JSON object.
+                header = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(header, dict) or "frame" not in header:
                 continue
 
-            if "frame" in header:
-                frame_id = header["frame"]
-                n_parts = len(parts)
-                print(f"  OK — received frame {frame_id} ({n_parts}-part message)")
+            frame_id = header["frame"]
+            if not save_frames:
+                print(f"  OK — received frame {frame_id}")
                 return "ok"
+
+            # Saving path: the next two messages are the encoding descriptor
+            # and the binary payload.
+            try:
+                encoding = json.loads(sock.recv())
+                data = sock.recv()
+                image = _decode_frame(data, encoding)
+            except zmq.Again:
+                if collected:
+                    break
+                print(f"  TIMEOUT after {timeout_ms / 1000:.1f}s — no data received")
+                return "timeout"
+            except Exception as exc:  # noqa: BLE001 — report and keep going
+                print(f"  WARN — failed to decode frame {frame_id}: {exc}")
+                continue
+            collected.append(image)
+            print(
+                f"  collected frame {frame_id}: shape={image.shape} "
+                f"dtype={image.dtype}"
+            )
+            if len(collected) >= save_frames:
+                break
+
+        if save_frames:
+            if not collected:
+                print(f"  TIMEOUT — no frames decoded within {timeout_ms / 1000:.1f}s")
+                return "timeout"
+            arr = np.stack(collected)
+            path = os.path.join(save_dir or ".", "eiger_dps.npy")
+            np.save(path, arr)
+            print(
+                f"  OK — saved {len(collected)} dps to {os.path.abspath(path)} "
+                f"(shape={arr.shape}, dtype={arr.dtype})"
+            )
+            return "ok"
 
         print("  TIMEOUT — received messages but none contained a 'frame' key")
         print("  Is the detector armed / a scan running?")
@@ -177,8 +285,20 @@ def check_eiger(ctx: zmq.Context, endpoint: str, timeout_ms: int) -> str:
         sock.close()
 
 
-def check_panda(ctx: zmq.Context, endpoint: str, timeout_ms: int) -> str:
-    """Returns 'ok', 'timeout', or 'error'."""
+def check_panda(
+    ctx: zmq.Context,
+    endpoint: str,
+    timeout_ms: int,
+    save_msgs: int = 0,
+    save_dir: str | None = None,
+) -> str:
+    """Returns 'ok', 'timeout', or 'error'.
+
+    When ``save_msgs`` > 0, collect that many PandA ``data`` messages, gather
+    their per-channel position samples, and write them to
+    ``<save_dir>/panda_positions.npy`` as an ``(N, n_channels)`` array (columns
+    ordered by sorted channel name, printed to stdout).
+    """
     print(f"PandA  {endpoint}")
     host, port = _parse_endpoint(endpoint)
     if not _tcp_reachable(host, port):
@@ -189,26 +309,65 @@ def check_panda(ctx: zmq.Context, endpoint: str, timeout_ms: int) -> str:
     print(f"  TCP {host}:{port} reachable")
     sock = ctx.socket(zmq.SUB)
     sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
-    sock.setsockopt(zmq.RCVHWM, 10)
+    sock.setsockopt(zmq.RCVHWM, 0 if save_msgs else 10)
     sock.setsockopt_string(zmq.SUBSCRIBE, "")
     sock.connect(endpoint)
 
+    channel_data: dict[str, list] = {}
+    n_data_msgs = 0
     try:
-        for attempt in range(20):
+        max_attempts = (save_msgs * 5 + 200) if save_msgs else 20
+        for attempt in range(max_attempts):
             try:
                 raw = sock.recv()
             except zmq.Again:
+                if n_data_msgs:
+                    break  # got some data messages already; stop waiting
                 print(f"  TIMEOUT after {timeout_ms / 1000:.1f}s — no data received")
                 print("  Is PandA streaming / a scan running?")
                 return "timeout"
 
             try:
                 msg = json.loads(raw)
-            except json.JSONDecodeError:
+            except Exception:  # binary or non-JSON message — skip
+                continue
+            if not isinstance(msg, dict):
                 continue
 
             msg_type = msg.get("msg_type", "<unknown>")
-            print(f"  OK — received msg_type='{msg_type}'")
+            if not save_msgs:
+                print(f"  OK — received msg_type='{msg_type}'")
+                return "ok"
+
+            # Saving path: accumulate position samples from 'data' messages.
+            if msg_type != "data":
+                print(f"  (skipping msg_type='{msg_type}')")
+                continue
+            for ch, dset in msg.get("datasets", {}).items():
+                channel_data.setdefault(ch, []).extend(dset.get("data", []))
+            n_data_msgs += 1
+            print(
+                f"  collected data msg {n_data_msgs} "
+                f"(frame_number={msg.get('frame_number')})"
+            )
+            if n_data_msgs >= save_msgs:
+                break
+
+        if save_msgs:
+            if not channel_data:
+                print(f"  TIMEOUT — no 'data' messages within {timeout_ms / 1000:.1f}s")
+                return "timeout"
+            names = sorted(channel_data)
+            cols = [np.asarray(channel_data[n], dtype=float) for n in names]
+            m = min(len(c) for c in cols)
+            arr = np.stack([c[:m] for c in cols], axis=1)
+            path = os.path.join(save_dir or ".", "panda_positions.npy")
+            np.save(path, arr)
+            print(
+                f"  OK — saved {arr.shape[0]} positions to {os.path.abspath(path)} "
+                f"(shape={arr.shape})"
+            )
+            print(f"       columns: {names}")
             return "ok"
 
         print("  TIMEOUT — received messages but none were valid JSON")
@@ -230,6 +389,30 @@ def main() -> None:
         default=5.0,
         help="Seconds to wait for a message on each stream (default: 5)",
     )
+    parser.add_argument(
+        "--save",
+        nargs="?",
+        const=".",
+        default=None,
+        metavar="DIR",
+        help="Dump received diffraction patterns to <DIR>/eiger_dps.npy and "
+        "positions to <DIR>/panda_positions.npy for manual inspection. "
+        "DIR defaults to the current directory if given with no value. "
+        "Implies a longer wait, so consider raising --timeout.",
+    )
+    parser.add_argument(
+        "--num-frames",
+        type=int,
+        default=10,
+        help="Number of Eiger frames to save when --save is set (default: 10)",
+    )
+    parser.add_argument(
+        "--num-position-msgs",
+        type=int,
+        default=10,
+        help="Number of PandA 'data' messages to gather when --save is set "
+        "(default: 10)",
+    )
     args = parser.parse_args()
 
     eiger_ep = os.environ.get(
@@ -240,12 +423,19 @@ def main() -> None:
     )
     timeout_ms = int(args.timeout * 1000)
 
+    save_dir = args.save
+    save_frames = args.num_frames if save_dir is not None else 0
+    save_msgs = args.num_position_msgs if save_dir is not None else 0
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        print(f"Saving enabled — writing files to {os.path.abspath(save_dir)}")
+
     ctx = zmq.Context()
     results = {}
     print()
-    results["eiger"] = check_eiger(ctx, eiger_ep, timeout_ms)
+    results["eiger"] = check_eiger(ctx, eiger_ep, timeout_ms, save_frames, save_dir)
     print()
-    results["panda"] = check_panda(ctx, panda_ep, timeout_ms)
+    results["panda"] = check_panda(ctx, panda_ep, timeout_ms, save_msgs, save_dir)
     print()
     ctx.term()
 
