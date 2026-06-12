@@ -611,7 +611,7 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `x_direction`, `y_direction` | float (str) | Sign convention for scan axes (`1.0` or `-1.0`). Applies to the shared positions stream (`positions_um` / ViT mosaic) and is the default for the iterative engine. |
 | `x_direction_iterative`, `y_direction_iterative` | float (str) | (Optional) Iterative-engine-only sign override (`1.0`/`-1.0`) for the `point_info` stream. Unset = follow `x_direction`/`y_direction`. The ViT positions stream is never affected. CLI: `--x-direction-iterative` / `--y-direction-iterative`. |
 | `dp_orient` | str | Shared D4 on the model-input branch. **Default `identity`** (the frame is already global after `detector_orientation`; autodetect OFF). `"auto"` = opt in to the runtime ViT orientation-autodetect sweep. Any other D4 name = pinned. CLI: `--dp-orient`. |
-| `dp_orient_iterative` | str | (Optional) Iterative-engine-only absolute D4 orientation for the diffraction input — one name or a comma-separated sequence (reduced to one element; D4 is closed). **Unset = disabled**: the engine follows the shared `dp_orient` (including autodetect updates when `dp_orient="auto"`). Requires even `nx`/`ny`. CLI: `--dp-orient-iterative`. Offline-validated value for 411993: `rot90_cw`. |
+| `dp_orient_iterative` | str | (Optional) Iterative-engine-only absolute D4 orientation for the diffraction input — one name or a comma-separated sequence (reduced to one element; D4 is closed). **Unset = disabled**: the engine follows the shared `dp_orient` (including autodetect updates when `dp_orient="auto"`). Requires even `nx`/`ny`. CLI: `--dp-orient-iterative`. Offline validation found no rotation is needed — leave unset; see the engine-conventions section. |
 | `max_iterations` | int (str) | (Optional) Safety cap on total iterative-engine iterations. **Default effectively unlimited** — the run ends when data collection completes (+30 refinement iterations). `n_iterations` is NOT the run length: it only sizes the in-RAM snapshot ring buffers. `replay_from_tiled` defaults this to 200 for quick validation runs. CLI: `--max-iterations`. |
 | `prb_path` + `init_prb_flag` | str + bool (str) | (Optional) Warm-start the iterative engine's probe from a `.npy` file (a probe from a prior recon, `(modes, nx, ny)` or `(nx, ny)` complex, matching `nx`/`ny`). Set `init_prb_flag=False` + `prb_path` (CLI: `--probe-path` sets both). Unset = probe-from-diff cold start. The path must be readable by the pipeline process. |
 | `z_m` | float (str) | Sample z position in m |
@@ -972,25 +972,36 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
     ViT branch is never touched. Accepts one D4 name or a comma-separated
     sequence (`rot90_cw,fliplr`), reduced to a single element. Even `nx`/`ny`
     required (the relative D4 is applied post-fftshift, which only commutes
-    for even dims). **For scan 411993 the offline-validated engine
-    orientation is `rot90_cw`** (matches the original holoscan-framework
-    feed, which applied `rot90` before the engine).
+    for even dims). **Offline validation found NO engine rotation is needed**
+    — the DP and positions are both already in the global frame; leave unset.
 
 * **Iterative engine data conventions (`ImageSendOp` → `StreamingRecon`).**
-  The engine's CUDA kernels run plain unshifted `fftn`/`ifftn` and compare
-  modeled vs measured amplitudes POINTWISE (same flat index), so the
-  engine's `diff_d` copy must be **fftshifted to DC-at-corner**.
-  `ImageSendOp` applies this unconditionally after the optional
-  `dp_orient_iterative` re-orientation; the shared `diff_amp` (ViT,
-  dashboard) keeps the natural beam-centered layout. This mirrors
-  `HXN_databroker.py`'s diffamp prep and the original holoscan-framework
-  feed; it was lost in the ptychoml preprocess migration, which scrambled
-  the Fourier constraint (garbage objects, intermittent NaN). The probe is
-  real-space and is NOT shifted (a centered probe in the array is correct —
-  `initial_probe`'s trailing `fftshift` exists precisely to center it).
-  `scripts/offline_epie.py` is a pipeline-free harness that reproduces the
-  full recipe from raw Tiled data (validated on the full 40k-frame 411993
-  scan); use it to pin conventions before touching the pipeline.
+  Offline-validated on the full 40k-frame scan 411993 (warm AND cold-start
+  probe). The recipe is fully deterministic:
+  * **DC**: the engine's CUDA kernels run plain unshifted `fftn`/`ifftn` and
+    compare modeled vs measured amplitudes POINTWISE (same flat index), so
+    the engine's `diff_d` copy must be **fftshifted to DC-at-corner**.
+    `ImageSendOp` applies this unconditionally; the shared `diff_amp` (ViT,
+    dashboard) keeps the natural beam-centered layout. This mirrors
+    `HXN_databroker.py`'s diffamp prep; it was lost in the ptychoml
+    preprocess migration, which scrambled the Fourier constraint (garbage
+    objects, intermittent NaN). The probe is real-space and is NOT shifted
+    (a centered probe in the array is correct — `initial_probe`'s trailing
+    `fftshift` exists precisely to center it).
+  * **Orientation**: `dp_orient_iterative` stays unset (identity). The DP is
+    already global after `detector_orientation`; an empirically-found D4
+    here is a symptom of a position-side convention error, not a real knob.
+  * **Position signs**: the engine needs the x (fast-axis) position sign
+    FLIPPED relative to the shared config (`x_direction_iterative = +1.0`
+    against the shared `x_direction = -1.0`). With the wrong parity the
+    solver converges to the conjugate twin: amplitude looks fine but the
+    phase carries a residual ramp/fringes. (Diagnosed by comparing x-flip /
+    y-flip / both: only the single x flip yields a flat, clean phase;
+    flipping both = 180° rotation = same parity as none.)
+  `scripts/offline_epie.py` is a pipeline-free harness that reproduces all
+  of this from raw Tiled data (fetch cache, warm or cold-start probe,
+  D4/swap/flip knobs); use it to pin conventions before touching the
+  pipeline.
   * `fftshift_dp` (default unset → `None`) — DC convention for the model
     input. `None` lets ptychoml auto-detect via `detect_dc_at_corner` and
     shift only when the central beam sits at the corners. Override with

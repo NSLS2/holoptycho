@@ -53,8 +53,12 @@ def parse_args():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--uid", default="48a107cb-34a5-4a6a-8633-f931db468d35",
                    help="raw run uid in hxn/migration (default: scan 411993)")
-    p.add_argument("--probe", required=True,
-                   help=".npy probe from a prior reconstruction ((modes,n,n) or (n,n) complex)")
+    p.add_argument("--probe", default=None,
+                   help=".npy probe from a prior reconstruction ((modes,n,n) or "
+                   "(n,n) complex). Omit for a cold start: the probe is then "
+                   "initialised from the mean diffraction amplitude (the "
+                   "engine's probe-from-diff formula) and --update-probe is "
+                   "implied.")
     p.add_argument("--n-frames", type=int, default=40000)
     p.add_argument("--crop", default="141,397,80,336",
                    help="row0,row1,col0,col1 of the global-frame crop box "
@@ -75,6 +79,16 @@ def parse_args():
     p.add_argument("--y-ratio", type=float, default=-0.00010309)
     p.add_argument("--x-direction", type=float, default=-1.0)
     p.add_argument("--y-direction", type=float, default=-1.0)
+    p.add_argument("--swap-pos", action="store_true",
+                   help="swap the encoder position channels (INENC2<->INENC3) "
+                   "after calibration — pairs each channel with the other "
+                   "object axis. Equivalent in effect to a transpose-family "
+                   "dp-orient, but expressed deterministically on the "
+                   "position side.")
+    p.add_argument("--flip-pos-x", action="store_true",
+                   help="negate the x positions (on top of --x-direction)")
+    p.add_argument("--flip-pos-y", action="store_true",
+                   help="negate the y positions (on top of --y-direction)")
     p.add_argument("--cache-dir",
                    default=os.path.expanduser("~/.cache/holoptycho/offline"))
     return p.parse_args()
@@ -142,6 +156,18 @@ def main():
     amp_global, pos_x_um, pos_y_um = fetch_cached(args, npix)
     n = args.n_frames
 
+    # Position-side geometry experiments (cache stores calibrated channels,
+    # so these apply cleanly on top).
+    if args.swap_pos:
+        pos_x_um, pos_y_um = pos_y_um, pos_x_um
+        print("positions: channels SWAPPED", flush=True)
+    if args.flip_pos_x:
+        pos_x_um = -pos_x_um
+        print("positions: x negated", flush=True)
+    if args.flip_pos_y:
+        pos_y_um = -pos_y_um
+        print("positions: y negated", flush=True)
+
     # Engine conventions: D4 orientation, then fftshift to DC-at-corner.
     fn = D4[args.dp_orient]
     work = np.empty(amp_global.shape, dtype=np.float16)
@@ -157,11 +183,37 @@ def main():
     rr, cc = px_x + 32, px_y + 32
     print(f"object {H}x{W}, x extent {px_x.max()}px, y extent {px_y.max()}px", flush=True)
 
-    prb0 = np.load(args.probe).squeeze().astype(np.complex64)
-    if prb0.ndim == 3:
-        prb0 = prb0[0]
-    prb = cp.asarray(np.ascontiguousarray(fn(prb0)))
-    print(f"probe {prb.shape}, update={args.update_probe}", flush=True)
+    if args.probe:
+        prb0 = np.load(args.probe).squeeze().astype(np.complex64)
+        if prb0.ndim == 3:
+            prb0 = prb0[0]
+        prb = cp.asarray(np.ascontiguousarray(fn(prb0)))
+    else:
+        # Cold start — the engine's probe-from-diff formula: mean diffraction
+        # amplitude back-transformed (work is corner-DC, so plain ifft2 +
+        # fftshift centers it). Requires probe updates to converge.
+        args.update_probe = True
+        mean_amp = cp.asarray(work[:1024].astype(np.float32)).mean(axis=0)
+        prb = (cp.fft.fftshift(cp.fft.ifft2(mean_amp))
+               * cp.sqrt(cp.float32(npix * npix))).astype(cp.complex64)
+    print(f"probe {prb.shape} ({'file' if args.probe else 'from-diff'}), "
+          f"update={args.update_probe}", flush=True)
+
+    def recenter_probe(p):
+        """Wrap-aware re-centering: the Fourier AMPLITUDE constraint is
+        invariant to circular shifts of the probe, so cold-start updates can
+        drift it into a corner-wrapped degenerate state. Roll the circular
+        intensity centroid back to the array center each epoch (gauge fix)."""
+        w = cp.abs(p) ** 2
+        ii = cp.arange(npix, dtype=cp.float64)
+        ang = 2 * np.pi * ii / npix
+        def cent(waxis):
+            zc = cp.sum(waxis * cp.exp(1j * ang))
+            return (float(cp.angle(zc)) % (2 * np.pi)) * npix / (2 * np.pi)
+        cy = cent(w.sum(axis=1))
+        cx = cent(w.sum(axis=0))
+        return cp.roll(p, (int(round(npix / 2 - cy)), int(round(npix / 2 - cx))),
+                       axis=(0, 1))
 
     dp_show = work[n // 2].astype(np.float32)
 
@@ -199,6 +251,9 @@ def main():
                 obj_max2 = float(cp.max(cp.abs(patch) ** 2)) + 1e-8
                 prb = prb + args.beta_prb * cp.conj(patch) / obj_max2 * dpsi
                 prb_max2 = float(cp.max(cp.abs(prb) ** 2))
+        if args.update_probe:
+            prb = recenter_probe(prb)
+            prb_max2 = float(cp.max(cp.abs(prb) ** 2))
         print(f"epoch {ep}: err/frame {err/n:.0f}", flush=True)
         if (ep + 1) % args.snapshot_every == 0:
             save_png(cp.asnumpy(obj), cp.asnumpy(prb), f"ep{ep+1:03d}")
