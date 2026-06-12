@@ -212,15 +212,17 @@ the config the replay script POSTs to holoptycho):
   `nx//4`). (Replay no longer COM-fills the offset — that bypassed auto-centering.)
 - **`--detector-orientation`** — the local→global coordinate correction (a D4
   name) applied to the whole incoming frame *before* cropping. **Default
-  `rot180`** (raw live Eiger). **Replay forces `identity`** because Tiled data is
-  already corrected — *unless* `--simulate-live` is given. This replaces the old
-  hardcoded horizontal flip, which left live and replay 180° apart.
+  `fliplr`** (raw live Eiger — a flip over the vertical axis). **Replay forces
+  `identity`** because Tiled data is already corrected — *unless* `--simulate-live`
+  is given. This replaces the old hardcoded `flip_image=True`, which applied
+  `fliplr` to *both* sources: that was correct for live but double-flipped replay
+  back into local coords.
 - **`--simulate-live`** — make replay behave like the **live** Eiger to exercise
   the coordinate-correction path: un-rotate the (already-corrected) Tiled frames
   by `detector_orientation⁻¹` so they're raw-like, and set the config's
   `detector_orientation` to the live value (`--detector-orientation`, default
-  `rot180`) so the pipeline re-applies it. The recon is unchanged (round-trip is
-  exact), but the live `rot180` code runs — use it to validate live before
+  `fliplr`) so the pipeline re-applies it. The recon is unchanged (round-trip is
+  exact), but the live `fliplr` code runs — use it to validate live before
   deploying.
 - **`--dp-orient-iterative`, `--x-direction-iterative`, `--y-direction-iterative`**
   — give the **iterative engine** its own diffraction orientation (one D4 name

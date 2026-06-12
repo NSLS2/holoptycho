@@ -824,7 +824,7 @@ def parse_args():
         help="Make replay behave like the LIVE Eiger: un-rotate the (already "
         "corrected) Tiled frames back to raw detector orientation by applying "
         "detector_orientation^-1, and set the config's detector_orientation to "
-        "the live value (--detector-orientation, default rot180) so the pipeline "
+        "the live value (--detector-orientation, default fliplr) so the pipeline "
         "re-applies it. Exercises the live coordinate-correction path; the final "
         "recon is unchanged. Without this, replay publishes Tiled frames as-is "
         "and sets detector_orientation=identity.",

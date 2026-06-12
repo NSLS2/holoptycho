@@ -664,12 +664,13 @@ class PtychoApp(Application):
 
         # Local->global coordinate correction (a ptychoml D4 name) applied to the
         # whole raw frame before cropping. Source-dependent: live Eiger ZMQ is
-        # raw-local (default 'rot180'); replay sets 'identity' because Tiled data
-        # is already corrected. The old `flip_image=True` applied 'fliplr' to BOTH
-        # sources, leaving live and replay 180 deg apart — do NOT map the legacy
-        # flag to 'fliplr'.
+        # raw-local (default 'fliplr' — a flip over the vertical axis); replay
+        # sets 'identity' because Tiled data is already corrected. The old
+        # `flip_image=True` applied 'fliplr' to BOTH sources: that happened to be
+        # correct for live but double-flipped replay back to local coords — do
+        # NOT map the legacy flag to a D4.
         self.detector_orientation = str(
-            getattr(self.param, "detector_orientation", "rot180")
+            getattr(self.param, "detector_orientation", "fliplr")
         )
         if self.detector_orientation not in D4_NAMES:
             raise ValueError(
@@ -681,7 +682,7 @@ class PtychoApp(Application):
         ):
             print(
                 "WARNING: 'flip_image' is deprecated and ignored; use "
-                "'detector_orientation' (D4 name). Live default is 'rot180'.",
+                "'detector_orientation' (D4 name). Live default is 'fliplr'.",
                 file=sys.stderr,
             )
 

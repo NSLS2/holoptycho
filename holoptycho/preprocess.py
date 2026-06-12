@@ -84,7 +84,7 @@ class ImageBatchOp(Operator):
 
         # Local→global coordinate correction (a ptychoml D4 name) applied to the
         # WHOLE raw frame before cropping. Source-dependent: live Eiger ZMQ is
-        # raw-local → 'rot180'; replay-from-Tiled is already corrected → 'identity'.
+        # raw-local → 'fliplr'; replay-from-Tiled is already corrected → 'identity'.
         # Set from config by compose(). Default 'identity' is a zero-cost no-op
         # for safety before compose runs.
         self.detector_orientation = 'identity'
