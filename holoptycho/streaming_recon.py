@@ -520,7 +520,13 @@ class StreamingPtychoRecon:
     # ------------------------------------------------------------------
 
     def initial_probe(self, num_diffs):
-        """Initialise the probe from the first ``num_diffs`` diffraction patterns.
+        """Initialise the probe.
+
+        With ``init_prb_flag=False`` and a readable ``prb_path``, warm-start
+        from that ``.npy`` file (a probe from a prior reconstruction, e.g. the
+        beamline GUI's mADMM result — shape ``(modes, nx, ny)`` or ``(nx, ny)``,
+        complex). Otherwise compute it from the first ``num_diffs`` diffraction
+        patterns.
 
         HXN ref: ``init_live_prb`` lines 3960-3979. Streaming-mode subset:
         single-mode only, no ``shift_sum`` for secondary modes.
@@ -529,13 +535,27 @@ class StreamingPtychoRecon:
 
         from ptycho.cupy_util import copy_to_pinned
 
+        prb_path = str(getattr(self.config, "prb_path", "") or "")
+        if not self.init_prb_flag and prb_path:
+            prb_file = np.load(prb_path)
+            prb_file = np.asarray(prb_file)
+            if prb_file.ndim == 3:
+                prb_file = prb_file[0]  # first mode (streaming is single-mode)
+            if prb_file.shape != (self.nx_prb, self.ny_prb):
+                raise ValueError(
+                    f"prb_path {prb_path!r} has shape {prb_file.shape}; "
+                    f"expected ({self.nx_prb}, {self.ny_prb}) to match nx/ny"
+                )
+            self.prb_d[0, :, :] = cp.asarray(
+                prb_file.astype(self.complex_precision)
+            )
+            copy_to_pinned(self.prb_d, self.prb_mode, self.prb_d.nbytes)
+            logger.info("initial_probe: warm-started from %s", prb_path)
+            return
         if not self.init_prb_flag:
-            # Load-from-file path not wired up in streaming mode. Holoptycho's
-            # config sets init_prb_flag=False but in practice the engine
-            # initialises from diffraction either way. Be permissive.
             logger.warning(
-                "initial_probe: init_prb_flag is False but streaming mode "
-                "only supports probe-from-diff; computing anyway."
+                "initial_probe: init_prb_flag is False but no prb_path is "
+                "set; falling back to probe-from-diff."
             )
 
         prb = cp.fft.fftshift(

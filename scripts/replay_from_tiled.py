@@ -742,6 +742,44 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
     config["detector_orientation"] = (
         str(args.detector_orientation) if args.simulate_live else "identity"
     )
+    # Iterative-engine parameters from the beamline-validated live GUI recon of
+    # scan 411993 (Weiyuan Huang, 2026Q2). The config_from_tiled defaults
+    # diverge the solver (over-tight amp/pha clamps, weak ml_weight, 0.5 um
+    # probe propagation) and size the object canvas with zero headroom over the
+    # commanded scan range, so encoder overshoot indexes outside the object
+    # array (cudaErrorIllegalAddress). Applied here for validation; TODO:
+    # promote to config_from_tiled defaults once confirmed, then delete.
+    if str(args.mode) in ("iterative", "both"):
+        _engine_params = {
+            "alg_percentage": "0.1",
+            "amp_min": "0.1",
+            "pha_min": "-2.0",
+            "ml_weight": "1.0",
+            "distance": "0.0",          # probe propagation off
+            # Freeze probe updates: early in a streaming scan only a thin
+            # band of rows has arrived (~36 px vs the 256 px probe), which
+            # under-constrains probe updates — they smear the warm-started
+            # probe into streaks and intermittently produce NaNs. With a
+            # known-good --probe-path the probe doesn't need updating at all.
+            "start_update_probe": "1000000",
+            "n_iterations": "300",
+            "gpu_batch_size": "1024",
+        }
+        # Object canvas headroom: the GUI sized x/y_range at 13 um for the
+        # commanded 8 um scan (~1.6x) so overshooting positions stay in-bounds.
+        for _k in ("x_range", "y_range"):
+            _engine_params[_k] = str(float(config[_k]) * 1.625)
+        # Replay default: stop after 200 iterations for quick validation
+        # cycles (clean finish + write_final). Override with --max-iterations.
+        if args.max_iterations is None:
+            _engine_params["max_iterations"] = "200"
+        config.update(_engine_params)
+        print(
+            "[iterative] applying beamline-validated engine params "
+            "(overrides config_from_tiled defaults): "
+            + ", ".join(f"{k}={v}" for k, v in sorted(_engine_params.items())),
+            flush=True,
+        )
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
     # Retry-with-backoff for the brief window where a prior runner thread is

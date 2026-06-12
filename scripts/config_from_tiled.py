@@ -706,6 +706,26 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Search margin (px per side) for --auto-center-dp (default: nx//4).",
     )
     recon.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Stop the iterative engine after this many iterations (clean "
+        "finish: write_final + run marked complete). Unset = no cap here; "
+        "the pipeline default is effectively unlimited (the run ends when "
+        "data collection completes). replay_from_tiled defaults this to 200 "
+        "for quick validation runs.",
+    )
+    recon.add_argument(
+        "--probe-path",
+        default=None,
+        help="Warm-start the iterative engine's probe from this .npy file "
+        "(a probe from a prior reconstruction; shape (modes, nx, ny) or "
+        "(nx, ny), complex, matching --nx/--ny). Sets init_prb_flag=False + "
+        "prb_path. Unset (default) = probe-from-diff cold start. The path "
+        "must be readable by the pipeline process (mount it into the "
+        "container if applicable).",
+    )
+    recon.add_argument(
         "--dp-orient",
         default=None,
         help="Shared diffraction orientation on the model-input branch: a D4 "
@@ -901,6 +921,16 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     # autodetect sweep; any D4 name pins that fixed orientation.
     if args.dp_orient is not None:
         config["dp_orient"] = str(args.dp_orient)
+    # Iteration cap: emitted only when set (the pipeline default is
+    # effectively unlimited — runs end when data collection completes).
+    if args.max_iterations is not None:
+        config["max_iterations"] = str(args.max_iterations)
+    # Probe warm-start: only when explicitly requested — the default stays
+    # the probe-from-diff cold start (init_prb_flag=True from the legacy
+    # defaults).
+    if args.probe_path is not None:
+        config["prb_path"] = str(args.probe_path)
+        config["init_prb_flag"] = "False"
     # Iterative-only orientation/direction overrides: emitted ONLY when set.
     # An absent dp_orient_iterative key disables the feature entirely (the
     # engine then follows the shared dp_orient + autodetect); emitting a

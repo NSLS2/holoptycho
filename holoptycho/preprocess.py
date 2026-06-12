@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 import time
 
@@ -473,6 +474,15 @@ class PointProcessorOp(Operator):
         self.nx_prb = 180
         self.ny_prb = 180
         self.obj_pad = 30
+        # Engine object-array dims (StreamingRecon.nx_obj/ny_obj), wired by
+        # compose() in iterative/both mode. Used to (a) center the scan in the
+        # object array so position undershoot below the first-chunk minimum
+        # has real margin instead of obj_pad//2 (= 2 px!) and (b) clamp
+        # out-of-bounds crop windows instead of handing the engine negative
+        # indices (cudaErrorIllegalAddress in the gather/scatter kernels).
+        self.obj_nx_limit = None
+        self.obj_ny_limit = None
+        self._oob_points = 0
         self.x_ratio = 0
         self.y_ratio = 0
 
@@ -586,12 +596,63 @@ class PointProcessorOp(Operator):
                     self.pos_x_base, self.pos_y_base = compute_pos_bases(
                         pos0_pts, pos1_pts, self.y_range_um
                     )
+                    # The bases anchor the scan at the very edge of the object
+                    # array (margin = obj_pad//2 px below the FIRST CHUNK's
+                    # minimum). Real scans undershoot that minimum (settling
+                    # rows, serpentine turnarounds, encoder jitter), producing
+                    # negative window indices. The engine's object array is
+                    # allocated much larger than the scan extent — center the
+                    # scan in it so the slack becomes symmetric margin.
+                    if self.obj_nx_limit:
+                        ext_x = np.ceil(abs(self.x_range_um) * 1e-6 / self.x_pixel_m)
+                        ext_y = np.ceil(abs(self.y_range_um) * 1e-6 / self.y_pixel_m)
+                        mx = max(0, int((self.obj_nx_limit - self.nx_prb - ext_x) // 2))
+                        my = max(0, int((self.obj_ny_limit - self.ny_prb - ext_y) // 2))
+                        self.pos_x_base -= mx * self.x_pixel_m * 1e6
+                        self.pos_y_base -= my * self.y_pixel_m * 1e6
+                        logging.info(
+                            "point_info: centered scan in object array "
+                            "(margin %d px x, %d px y; obj %dx%d)",
+                            mx, my, self.obj_nx_limit, self.obj_ny_limit,
+                        )
 
                 points0 = np.round((pos0_pts-self.pos_x_base)*1.e-6/self.x_pixel_m)
                 points1 = np.round((pos1_pts-self.pos_y_base)*1.e-6/self.y_pixel_m)
 
                 points0 = points0 + self.nx_prb / 2 + self.obj_pad//2
                 points1 = points1 + self.ny_prb / 2 + self.obj_pad//2
+
+                # Clamp windows into the engine's object array. A clamped
+                # frame reconstructs at a slightly wrong location, but an
+                # unclamped one indexes outside the object buffers and kills
+                # the whole run with cudaErrorIllegalAddress.
+                if self.obj_nx_limit:
+                    oob = (
+                        (points0 < self.nx_prb // 2)
+                        | (points0 > self.obj_nx_limit - self.nx_prb // 2)
+                        | (points1 < self.ny_prb // 2)
+                        | (points1 > self.obj_ny_limit - self.ny_prb // 2)
+                    )
+                    n_oob = int(np.count_nonzero(oob))
+                    if n_oob:
+                        self._oob_points += n_oob
+                        logging.warning(
+                            "point_info: clamped %d/%d out-of-bounds windows "
+                            "(total %d) — x px [%g, %g], y px [%g, %g], "
+                            "obj %dx%d",
+                            n_oob, len(points0), self._oob_points,
+                            float(points0.min()), float(points0.max()),
+                            float(points1.min()), float(points1.max()),
+                            self.obj_nx_limit, self.obj_ny_limit,
+                        )
+                    points0 = np.clip(
+                        points0, self.nx_prb // 2,
+                        self.obj_nx_limit - self.nx_prb // 2,
+                    )
+                    points1 = np.clip(
+                        points1, self.ny_prb // 2,
+                        self.obj_ny_limit - self.ny_prb // 2,
+                    )
 
                 for i in range(self.pos_loaded_num,p_total_num):
                     index = i-self.pos_loaded_num
@@ -731,6 +792,32 @@ class ImageSendOp(Operator):
                         diff_d.shape[-2:],
                     )
                     self._warned_nonsquare = True
+            # DC-convention bridge: the shared diff_amp carries the natural
+            # diffraction-pattern layout (beam/DC at the CENTER — the ViT
+            # convention and what the dashboard shows). The engine's kernels
+            # do plain unshifted FFTs and compare amplitudes POINTWISE
+            # (dm_update_amp1: same flat index into fft output and diff), so
+            # its copy must be fftshifted to DC-at-corner — the same shift
+            # HXN_databroker applies when building diffamp for this engine,
+            # and the old holoscan-framework feed applied before it. It was
+            # lost in the ptychoml preprocess migration (confirmed with the
+            # beamline scientists). fftshift == ifftshift for even nx/ny.
+            # Rebind, never mutate in place — the ViT branch consumes the
+            # same diff_d object.
+            diff_d = np.ascontiguousarray(
+                np.fft.fftshift(diff_d, axes=(-2, -1))
+            )
+            # Debug dump: the first 20 DPs exactly as the engine receives
+            # them (post-preprocess, post-fftshift, pre-memcpy). Set
+            # HOLOPTYCHO_DUMP_ENGINE_INPUTS=<dir> on the server; fires once.
+            _dump_dir = os.environ.get("HOLOPTYCHO_DUMP_ENGINE_INPUTS")
+            if _dump_dir and not getattr(self, "_feed_dumped", False):
+                _path = os.path.join(_dump_dir, "engine_feed_dps.npy")
+                np.save(_path, diff_d[:20])
+                self.logger.info(
+                    "Dumped %d engine-feed DPs to %s", min(20, nframe), _path
+                )
+                self._feed_dumped = True
             diff_d_target = self.diff_d_target[self.frame_ready_num:self.frame_ready_num+nframe]
 
             cp.cuda.runtime.memcpy(diff_d_target.data.ptr,diff_d.ctypes.data,diff_d.nbytes,cp.cuda.runtime.memcpyHostToDevice)
