@@ -483,6 +483,10 @@ class PointProcessorOp(Operator):
         self.obj_nx_limit = None
         self.obj_ny_limit = None
         self._oob_points = 0
+        # Engine point capacity (StreamingRecon.num_points_l). The engine's
+        # GPU buffers are sized to live_num_points_max (default 8192), NOT
+        # the scan's nz — writes past it are out-of-bounds GPU memory.
+        self.target_max_points = None
         self.x_ratio = 0
         self.y_ratio = 0
 
@@ -687,7 +691,16 @@ class PointProcessorOp(Operator):
                 fid = self.frame_id_list[i]
                 # point_info_target is the iterative engine's GPU buffer; it's
                 # None in vit-only mode (no engine), so skip the device copy.
-                if fid < self.max_points and self.point_info_target is not None:
+                # Its capacity is target_max_points (num_points_l), which can
+                # be far smaller than the scan — never write past it.
+                if (
+                    fid < self.max_points
+                    and self.point_info_target is not None
+                    and (
+                        self.target_max_points is None
+                        or self.pos_ready_num < self.target_max_points
+                    )
+                ):
                     self.point_info_target[self.pos_ready_num,:] = cp.array(self.point_info[fid,:],\
                                                                             dtype = np.int32, order='C')
                 # sys.stderr.write(f'{self.point_info[fid,:]}'+'\n')
@@ -734,6 +747,9 @@ class ImageSendOp(Operator):
 
         self.diff_d_target = None
         self.max_points = 20000
+        # Engine point capacity (StreamingRecon.num_points_l); see compute().
+        self.target_max_points = None
+        self._engine_full_logged = False
         self.frame_ready_num = 0
         # Iterative-only absolute D4 orientation (config dp_orient_iterative).
         # None = disabled: the engine receives diff_amp exactly as produced
@@ -765,8 +781,22 @@ class ImageSendOp(Operator):
         nframe = diff_d.shape[0]
 
         # diff_d_target is the iterative engine's GPU buffer; None in vit-only
-        # mode (no engine), so skip the device copy.
-        if self.diff_d_target is not None and (self.frame_ready_num + nframe) < self.max_points:
+        # mode (no engine), so skip the device copy. Its capacity is
+        # target_max_points (= StreamingRecon.num_points_l, default 8192) —
+        # this can be far SMALLER than max_points (= the scan's nz), and
+        # writing past it is an out-of-bounds GPU write
+        # (cudaErrorIllegalAddress at frame num_points_l + 1).
+        _engine_capacity = self.target_max_points or self.max_points
+        if self.diff_d_target is not None and (self.frame_ready_num + nframe) > _engine_capacity \
+                and not self._engine_full_logged:
+            self.logger.warning(
+                "Engine point buffer full (%d points) — further frames bypass "
+                "the iterative engine (ViT/tap unaffected). Raise config "
+                "live_num_points_max (GPU memory permitting) to cover more "
+                "of the scan.", _engine_capacity,
+            )
+            self._engine_full_logged = True
+        if self.diff_d_target is not None and (self.frame_ready_num + nframe) <= _engine_capacity:
             # Iterative-only re-orientation: compose the inverse of the D4 this
             # batch was preprocessed with and the configured target. For even
             # square frames this equals having run preprocess_diffraction with

@@ -619,6 +619,12 @@ class PtychoApp(Application):
         self.point_proc.point_info = np.zeros((nz,4),dtype = np.int32)
         if has_recon:
             self.point_proc.point_info_target = self.pty.recon.point_info_d
+            # Engine GPU buffers hold num_points_l points (live_num_points_max,
+            # default 8192) — usually far fewer than the scan's nz. The feed
+            # guards must use THIS capacity: writing past it is an
+            # out-of-bounds GPU write (cudaErrorIllegalAddress).
+            self.point_proc.target_max_points = int(self.pty.recon.num_points_l)
+            self.image_send.target_max_points = int(self.pty.recon.num_points_l)
         # Per-frame scan positions (microns), filled by PointProcessorOp as
         # PandA data arrives. Read by SaveViTResult and published to tiled
         # so the dashboard mosaic stitcher uses real positions.
