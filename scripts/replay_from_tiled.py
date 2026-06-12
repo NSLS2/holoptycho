@@ -1053,8 +1053,14 @@ def main():
     eiger_thread.join()
     panda_thread.join()
 
-    if eiger_ctx is not None:
-        eiger_ctx.term()
+    # Close the pre-bound PUB before terminating its context: publish_eiger
+    # does not close a prebound socket, and zmq.Context.term() blocks until
+    # every socket in the context is closed — leaving it open hung the script
+    # here forever at end-of-stream. The bounded linger gives in-flight tail
+    # frames time to drain to the local SUB without letting a stalled
+    # subscriber hold the exit indefinitely.
+    eiger_sock.close(linger=5000)
+    eiger_ctx.term()
 
     print("Replay complete.", flush=True)
 
