@@ -771,7 +771,11 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
             _engine_params[_k] = str(float(config[_k]) * 1.625)
         # Replay default: stop after 200 iterations for quick validation
         # cycles (clean finish + write_final). Override with --max-iterations.
-        if args.max_iterations is None:
+        # ITERATIVE-ONLY: when the engine finishes it calls stop_execution()
+        # and ends the WHOLE pipeline, so in 'both' mode a 200-iteration cap
+        # would kill the ViT stream mid-scan. In 'both' the cap stays at the
+        # pipeline default (effectively unlimited) unless explicitly passed.
+        if args.max_iterations is None and str(args.mode) == "iterative":
             _engine_params["max_iterations"] = "200"
         config.update(_engine_params)
         print(
