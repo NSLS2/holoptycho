@@ -857,9 +857,15 @@ class StreamingPtychoRecon:
 
         mp = self.prb_mode_num
         mo = self.obj_mode_num
+        # Pass the FULL product array: the accumulate kernels index product_d
+        # with the GLOBAL point index (start + z). Passing a slice already
+        # offset to start_point double-offsets the reads — wrong points'
+        # data for every batch after the first (corrupted object updates),
+        # and out-of-bounds (cudaErrorIllegalAddress) once
+        # start_point >= num_points_l / 2.
         psi = self.product_d.reshape(
             self.num_points_l * mp * mo, self.nx_prb, self.ny_prb
-        )[start_point * mp * mo : (start_point + batch_size) * mp * mo]
+        )
         args = (
             self.prb_norm_d,
             self.obj_upd_d,
@@ -959,9 +965,11 @@ class StreamingPtychoRecon:
 
         mp = self.prb_mode_num
         mo = self.obj_mode_num
+        # Full array, NOT a slice — accumulate_prb_mode indexes product_d
+        # with the global point index (start + z); see _accumulate_obj_single.
         psi = self.product_d.reshape(
             self.num_points_l * mp * mo, self.nx_prb, self.ny_prb
-        )[start_point * mp * mo : (start_point + batch_size) * mp * mo]
+        )
         args = (
             self.obj_norm_d,
             self.prb_upd_d,
