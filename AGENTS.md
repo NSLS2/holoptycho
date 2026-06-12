@@ -592,7 +592,7 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `nx`, `ny` | int (str) | Reconstruction array size (pixels) |
 | `batch_width`, `batch_height` | int (str) | Diffraction pattern tile size |
 | `batch_x0`, `batch_y0` | int (str) | Top-left of the `nx×ny` model crop, a SINGLE offset in the coordinate-corrected (global) frame. Optional when `auto_center_dp` is on (the beam is found from data). |
-| `detector_orientation` | str | Local→global coordinate correction (a D4 name) applied to the WHOLE incoming frame before cropping. **Live = `rot180`** (raw Eiger); **replay = `identity`** (Tiled is already corrected — `replay_from_tiled` forces it). Default `rot180`. See the orientation note below. |
+| `detector_orientation` | str | Local→global coordinate correction (a D4 name) applied to the WHOLE incoming frame before cropping. **Live = `fliplr`** (raw Eiger — a flip over the vertical axis); **replay = `identity`** (Tiled is already corrected — `replay_from_tiled` forces it). Default `fliplr`. See the orientation note below. |
 | `det_roix0`, `det_roiy0` | int (str) | **Deprecated/ignored.** The crop is a single global ROI (`batch_x0/y0`) after coordinate correction; a non-zero value warns. |
 | `gpu_batch_size` | int (str) | Number of patterns per GPU batch |
 | `recon_mode` | str | Which reconstruction branches to wire: `iterative`, `vit`, or `both`. Default `both`. Use `iterative` to skip the ViT op entirely (no engine load); use `vit` to skip the iterative DM/ML solver — the `PtychoRecon`/`StreamingPtychoRecon` engine is **not created at all** (no CuPy context on the ViT GPU, avoiding the PyCUDA+CuPy SIGABRT), and the sample-plane geometry the engine would supply (pixel size, ranges) is derived from config via `ptychoml.compute_sample_pixel_size`. No `live/`/`final/` Tiled writes. |
@@ -922,10 +922,13 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   or via auto-centering. The ROI is therefore never flipped — it's a plain crop
   in global coords. The correction is **source-dependent**: the acquisition/
   file-writer already applies it when saving to Tiled, so **replay = `identity`**
-  (`replay_from_tiled` forces it) while **live = `rot180`** (raw Eiger ZMQ).
-  This fixes a real bug: the old hardcoded `flip_image=True` applied `fliplr`
-  to *both* sources, leaving live (`fliplr(raw)`) and replay (`fliplr(rot180(raw))`)
-  **180° apart**. `flip_image` is deprecated. **To exercise the live `rot180`
+  (`replay_from_tiled` forces it) while **live = `fliplr`** (raw Eiger ZMQ — a
+  flip over the vertical axis). This fixes a real bug: the old hardcoded
+  `flip_image=True` applied `fliplr` to *both* sources. Since Tiled stores
+  `fliplr(raw)`, that left live = `fliplr(raw)` (accidentally correct) but
+  replay = `fliplr(fliplr(raw))` = `raw` (double-flipped back into local coords)
+  — one uniform D4 can't reconcile two sources that start in different coordinate
+  systems. `flip_image` is deprecated. **To exercise the live `fliplr`
   path through replay**, pass `replay … --simulate-live`: it un-rotates the Tiled
   frames by `detector_orientation⁻¹` (raw-like) and sets `detector_orientation`
   to the live value so the pipeline re-applies it (round-trip exact → same recon,

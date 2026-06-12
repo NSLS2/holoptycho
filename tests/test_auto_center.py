@@ -182,7 +182,7 @@ def test_auto_center_defaults_on_without_roi():
 
 
 def test_detector_orientation_default_and_override():
-    assert _parse([]).detector_orientation == "rot180"          # LIVE default
+    assert _parse([]).detector_orientation == "fliplr"          # LIVE default
     assert _parse(["--detector-orientation", "identity"]).detector_orientation == "identity"
 
 

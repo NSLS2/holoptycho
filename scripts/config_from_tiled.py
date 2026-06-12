@@ -678,11 +678,12 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     )
     recon.add_argument(
         "--detector-orientation",
-        default="rot180",
+        default="fliplr",
         help="Local->global coordinate correction applied to the WHOLE incoming "
         "ZMQ frame before cropping (a D4 name: identity, fliplr, flipud, rot180, "
-        "transpose, rot90_ccw, rot90_cw, antitranspose). Default 'rot180' (LIVE "
-        "Eiger raw). replay_from_tiled forces 'identity' because Tiled data is "
+        "transpose, rot90_ccw, rot90_cw, antitranspose). Default 'fliplr' (LIVE "
+        "Eiger raw — a flip over the vertical axis). replay_from_tiled forces "
+        "'identity' because Tiled data is "
         "already corrected. The crop ROI (batch_x0/y0) is then a single offset in "
         "this global frame.",
     )
