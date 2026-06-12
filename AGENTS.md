@@ -610,7 +610,8 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `x_range`, `y_range` | float (str) | Total scan range in µm |
 | `x_direction`, `y_direction` | float (str) | Sign convention for scan axes (`1.0` or `-1.0`). Applies to the shared positions stream (`positions_um` / ViT mosaic) and is the default for the iterative engine. |
 | `x_direction_iterative`, `y_direction_iterative` | float (str) | (Optional) Iterative-engine-only sign override (`1.0`/`-1.0`) for the `point_info` stream. Unset = follow `x_direction`/`y_direction`. The ViT positions stream is never affected. CLI: `--x-direction-iterative` / `--y-direction-iterative`. |
-| `dp_orient_iterative` | str | (Optional) Iterative-engine-only absolute D4 orientation for the diffraction input — one name or a comma-separated sequence (reduced to one element; D4 is closed). **Unset = disabled**: the engine follows the shared `dp_orient`, including orientation-autodetect updates. Requires even `nx`/`ny`. CLI: `--dp-orient-iterative`. |
+| `dp_orient` | str | Shared D4 on the model-input branch. **Default `identity`** (the frame is already global after `detector_orientation`; autodetect OFF). `"auto"` = opt in to the runtime ViT orientation-autodetect sweep. Any other D4 name = pinned. CLI: `--dp-orient`. |
+| `dp_orient_iterative` | str | (Optional) Iterative-engine-only absolute D4 orientation for the diffraction input — one name or a comma-separated sequence (reduced to one element; D4 is closed). **Unset = disabled**: the engine follows the shared `dp_orient` (including autodetect updates when `dp_orient="auto"`). Requires even `nx`/`ny`. CLI: `--dp-orient-iterative`. |
 | `z_m` | float (str) | Sample z position in m |
 | `alg_flag` | str | Primary algorithm: `ML_grad`, `DM`, `ePIE`, etc. |
 | `alg2_flag` | str | Secondary algorithm (after `alg_percentage` fraction) |
@@ -947,18 +948,18 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   * `tap_orient` (default `antitranspose`) — D4 element applied to the saved
     intensity tap (`/dp`). The default reproduces the historical HXN
     anti-diagonal flip; use `identity` to save raw detector frames.
-  * `dp_orient` (default `rot90_cw`) — D4 element on the model-input branch.
-    The default reproduces the prior hardcoded chain (verified equivalent).
-    Determine the right value offline with `scripts/detect_orientation.py`
-    (reads a recorded scan HDF5 + the model engine, sweeps all 8 D4
-    candidates via `ptychoml.autodetect_orientation`, and writes a JSON
-    snippet with the winning `dp_orient` to merge into the scan config).
-    **Live auto-detect:** if the engine carries a baked probe (exported with
-    `--probe`), `PtychoViTInferenceOp` runs the same sweep once on the first
-    batch with ≥64 finite scan positions and overrides `dp_orient` in place —
-    `ImagePreprocessorOp` buffers pre-D4 frames for it (capped 256), and the
-    config `dp_orient` is the pre-sweep default. Engines without a baked probe
-    keep the configured value.
+  * `dp_orient` (default `identity`) — D4 element on the model-input branch.
+    The frame is already in the GLOBAL coordinate system after
+    `detector_orientation`, so by default no further rotation is applied and
+    the runtime orientation autodetect is **OFF** — fully deterministic
+    (validated on replay: ViT recon on global frames with `identity`).
+    Set `dp_orient: "auto"` to opt in to the runtime sweep: if the engine
+    carries a baked probe (exported with `--probe`), `PtychoViTInferenceOp`
+    sweeps all 8 D4 candidates via `ptychoml.autodetect_orientation` once on
+    the first batch with ≥64 finite scan positions and overrides `dp_orient`
+    in place — `ImagePreprocessorOp` buffers pre-D4 frames for it (capped
+    256). Engines without a baked probe keep the seed (`identity`). Any other
+    D4 name pins that fixed orientation (sweep off). CLI: `--dp-orient`.
   * `dp_orient_iterative` (default unset = disabled) — iterative-engine-only
     **absolute** D4 orientation. `ImagePreprocessorOp` stamps each batch with
     the `dp_orient` it was produced with; `ImageSendOp` composes the inverse of
@@ -1029,8 +1030,8 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
 
 * **`patch_flip` (config field, default `identity`) — D4 transform applied to
   each ViT output patch before stitching** (via `ptychoml.apply_d4`). Use when
-  the model's patch orientation doesn't match the scan-position frame; the
-  orientation auto-detector will set it once wired up. **`mosaic_min_overlap`**
+  the model's patch orientation doesn't match the scan-position frame.
+  **`mosaic_min_overlap`**
   (default 0.5) is the minimum fractional coverage for a mosaic pixel to count
   as filled; below it the pixel takes the valid-region median instead.
 

@@ -224,6 +224,12 @@ the config the replay script POSTs to holoptycho):
   `fliplr`) so the pipeline re-applies it. The recon is unchanged (round-trip is
   exact), but the live `fliplr` code runs — use it to validate live before
   deploying.
+- **`--dp-orient`** — shared diffraction orientation on the model-input branch:
+  a D4 name or `auto`. **Default (unset) = `identity`** — the frame is already
+  in the global coordinate system after `detector_orientation`, so no further
+  rotation is applied and the runtime orientation autodetect is **off**
+  (fully deterministic). Pass `auto` to opt in to the ViT autodetect sweep,
+  or a D4 name to pin a different fixed orientation.
 - **`--dp-orient-iterative`, `--x-direction-iterative`, `--y-direction-iterative`**
   — give the **iterative engine** its own diffraction orientation (one D4 name
   or a comma-separated sequence, e.g. `rot90_cw,fliplr`) and scan-axis sign
@@ -231,9 +237,8 @@ the config the replay script POSTs to holoptycho):
   `x_direction` / `y_direction`). **Unset by default = identical behavior to
   before.** Demo flexibility for when the two recons disagree about input
   orientation on live data; once the right values are known, bake them into the
-  config defaults. Note: setting `--dp-orient-iterative` opts the engine out of
-  the live orientation auto-detect (it follows the shared `dp_orient` when
-  unset).
+  config defaults. Note: setting `--dp-orient-iterative` freezes the engine to
+  that value (it follows the shared `dp_orient` when unset).
 
 ### Best practices
 
