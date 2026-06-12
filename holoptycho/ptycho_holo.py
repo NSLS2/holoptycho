@@ -711,14 +711,26 @@ class PtychoApp(Application):
         # auto_center_dp (lossless centered crop) is wired into ImageBatchOp
         # after its ROI is set below.
         # Geometry + normalization for the two output branches. See
-        # ImagePreprocessorOp docstrings for what each does. Defaults reproduce
-        # the prior hardcoded HXN chain for the D4 transforms (antidiag tap +
-        # rot90_cw model branch); orientation auto-detect (when wired up) will
-        # set ``dp_orient`` automatically. ``fftshift_dp`` defaults to None so
-        # ptychoml's auto-detector picks the right DC convention per batch;
-        # override via the scan JSON only when a specific dataset misbehaves.
+        # ImagePreprocessorOp docstrings for what each does. ``fftshift_dp``
+        # defaults to None so ptychoml's auto-detector picks the right DC
+        # convention per batch; override via the scan JSON only when a
+        # specific dataset misbehaves.
         self.image_proc.tap_orient = str(getattr(self.param, "tap_orient", "antitranspose"))
-        self.image_proc.dp_orient = str(getattr(self.param, "dp_orient", "rot90_cw"))
+        # dp_orient: D4 aligning the (global) diffraction frame to the model /
+        # scan convention. The frame is already global after
+        # detector_orientation, so the default is 'identity' — fully
+        # deterministic, no runtime sweep. 'auto' opts in to the ViT
+        # orientation-autodetect sweep (vit/both modes), which overwrites
+        # dp_orient at runtime with the best-scoring D4.
+        _dp_orient_cfg = str(getattr(self.param, "dp_orient", None) or "identity")
+        self.orient_autodetect = _dp_orient_cfg == "auto"
+        if self.orient_autodetect:
+            _dp_orient_cfg = "identity"  # seed only; the sweep overwrites it
+        elif _dp_orient_cfg not in D4_NAMES:
+            raise ValueError(
+                f"dp_orient must be 'auto' or one of {D4_NAMES}; got {_dp_orient_cfg!r}"
+            )
+        self.image_proc.dp_orient = _dp_orient_cfg
         _fftshift_dp = getattr(self.param, "fftshift_dp", None)
         self.image_proc.fftshift_dp = (
             bool(_fftshift_dp) if _fftshift_dp is not None else None
@@ -1016,6 +1028,7 @@ class PtychoApp(Application):
             image_proc=self.image_proc,
             positions_provider=lambda: self.point_proc.positions_um,
             preprocess_kwargs=_preprocess_kwargs,
+            orient_autodetect=self.orient_autodetect,
             name="vit_inference",
         )
         # SaveViTResult publishes positions_um alongside each batch and

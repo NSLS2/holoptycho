@@ -93,6 +93,7 @@ class PtychoViTInferenceOp(Operator):
         image_proc=None,
         positions_provider=None,
         preprocess_kwargs: dict | None = None,
+        orient_autodetect: bool = False,
         **kwargs,
     ):
         super().__init__(fragment, *args, **kwargs)
@@ -107,11 +108,22 @@ class PtychoViTInferenceOp(Operator):
         # enough finite scan positions, then updates image_proc.dp_orient in
         # place. preprocess_kwargs is forwarded to the sweep's internal
         # preprocess_diffraction calls (must NOT include dp_orient — that's the
-        # sweep variable). Disabled when image_proc is None.
+        # sweep variable). The sweep is OPT-IN: it only runs when the config
+        # sets dp_orient='auto' (orient_autodetect=True). Otherwise the fixed
+        # dp_orient (default 'identity' — the frame is already global) is used
+        # deterministically and no sweep runs. Also disabled when image_proc
+        # is None.
         self._image_proc = image_proc
         self._positions_provider = positions_provider
         self._preprocess_kwargs = dict(preprocess_kwargs) if preprocess_kwargs else {}
-        self._orient_detect_pending = image_proc is not None
+        self._orient_detect_pending = image_proc is not None and orient_autodetect
+        if image_proc is not None and not orient_autodetect:
+            # Stop ImagePreprocessorOp from accumulating the sweep buffer.
+            image_proc._autodetect_done = True
+            self._logger.info(
+                "Orientation autodetect disabled: dp_orient pinned to %r",
+                image_proc.dp_orient,
+            )
 
         # Lazy-initialized on first compute()
         self._session = None

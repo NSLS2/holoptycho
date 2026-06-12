@@ -706,6 +706,16 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Search margin (px per side) for --auto-center-dp (default: nx//4).",
     )
     recon.add_argument(
+        "--dp-orient",
+        default=None,
+        help="Shared diffraction orientation on the model-input branch: a D4 "
+        "name or 'auto'. Default (unset) = 'identity' — the frame is already "
+        "in the global coordinate system after detector_orientation, so no "
+        "further rotation is applied and the runtime orientation autodetect is "
+        "OFF. Pass 'auto' to opt in to the ViT autodetect sweep, or a D4 name "
+        "to pin a different fixed orientation.",
+    )
+    recon.add_argument(
         "--dp-orient-iterative",
         default=None,
         help="Iterative-engine-only diffraction orientation: one D4 name "
@@ -886,6 +896,11 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         # full live detector is 1062x1028 and the beam can be anywhere, so a
         # bounded headroom around offset 0 would miss it.
         config["auto_center_headroom"] = "-1"
+    # Shared dp_orient: emitted ONLY when set. Absent key = the pipeline
+    # default ('identity', autodetect off). 'auto' opts in to the runtime
+    # autodetect sweep; any D4 name pins that fixed orientation.
+    if args.dp_orient is not None:
+        config["dp_orient"] = str(args.dp_orient)
     # Iterative-only orientation/direction overrides: emitted ONLY when set.
     # An absent dp_orient_iterative key disables the feature entirely (the
     # engine then follows the shared dp_orient + autodetect); emitting a

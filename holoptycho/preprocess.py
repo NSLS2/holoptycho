@@ -291,10 +291,10 @@ class ImagePreprocessorOp(Operator):
         #               beamline operator's view; the saved DP looks how the
         #               operator expects.
         #   dp_orient:  D4 element on the model-input branch. Default
-        #               'rot90_cw' reproduces the old chain
-        #               (antidiag flip ∘ rot90 ∘ transpose) for backwards
-        #               compatibility; orientation auto-detect will overwrite
-        #               this once it's wired up.
+        #               'identity' — the frame is already in the global
+        #               coordinate system (detector_orientation). Set
+        #               dp_orient='auto' in the config to opt in to the ViT
+        #               orientation-autodetect sweep, which overwrites this.
         #   fftshift_dp: model-input DC-convention control. ``None``
         #               (default) lets ptychoml auto-detect via
         #               ``detect_dc_at_corner`` and shift only when the
@@ -303,7 +303,7 @@ class ImagePreprocessorOp(Operator):
         #               specific dataset misbehaves; otherwise leave alone.
         # All three are settable from the scan config; see ptycho_holo.py.
         self.tap_orient = 'antitranspose'
-        self.dp_orient = 'rot90_cw'
+        self.dp_orient = 'identity'
         self.fftshift_dp: bool | None = None
         # Intensity normalization passed straight through to
         # ptychoml.preprocess_diffraction so each DP gets scaled by the

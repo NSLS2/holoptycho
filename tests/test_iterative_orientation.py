@@ -164,6 +164,23 @@ def test_iterative_flags_parse():
     assert reduce_d4_sequence(args.dp_orient_iterative) in D4_NAMES
 
 
+def test_dp_orient_flag_default_unset_and_parse():
+    """--dp-orient unset (None) = the pipeline default 'identity' with the
+    autodetect OFF; 'auto' opts in to the sweep; a D4 name pins it."""
+    assert _parse([]).dp_orient is None
+    assert _parse(["--dp-orient", "auto"]).dp_orient == "auto"
+    assert _parse(["--dp-orient", "rot90_cw"]).dp_orient == "rot90_cw"
+
+
+def test_dp_orient_config_key_absent_unless_set():
+    """build_full_config must omit dp_orient when the flag is unset — the
+    pipeline then applies its deterministic default ('identity', no sweep)."""
+    import inspect
+
+    src = inspect.getsource(_cft.build_full_config)
+    assert 'if args.dp_orient is not None' in src
+
+
 def test_config_keys_absent_unless_set():
     """build_full_config must omit the iterative keys when flags are unset —
     an absent dp_orient_iterative key is what keeps the engine following the
