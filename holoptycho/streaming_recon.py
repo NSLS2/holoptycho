@@ -890,8 +890,17 @@ class StreamingPtychoRecon:
         copy_to_pinned(self.obj_upd_d, self.obj_update_l, self.obj_upd_d.nbytes)
         copy_to_pinned(self.prb_norm_d, self.prb_norm_l, self.prb_norm_d.nbytes)
 
-        # obj_mode[...] = obj_update_l / prb_norm_l
-        self.obj_mode[...] = self.obj_update_l / self.prb_norm_l
+        # obj_mode = obj_update_l / prb_norm_l, guarded: prb_norm is zero
+        # everywhere no probe window has contributed yet (most of the object
+        # early in a streaming scan), and 0/0 NaNs there poisoned the
+        # write_live finite check and the dashboard display. Leave uncovered
+        # pixels at their current value instead.
+        np.divide(
+            self.obj_update_l,
+            self.prb_norm_l,
+            out=self.obj_mode,
+            where=self.prb_norm_l > 0,
+        )
 
         copy_from_pinned(self.obj_mode, self.obj_d, self.obj_mode.nbytes)
 
