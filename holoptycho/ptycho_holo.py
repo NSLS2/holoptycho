@@ -938,6 +938,20 @@ class PtychoApp(Application):
             run_metadata["x_direction_iterative"] = _xd_it
         if _yd_it != _yd:
             run_metadata["y_direction_iterative"] = _yd_it
+        # Record which ViT engine produced this run's vit/ outputs (issue #34),
+        # so a run's provenance doesn't require log-archaeology. Forwarded from
+        # the server via env (runner.py); absent for standalone/non-server runs.
+        # Only meaningful when the ViT branch actually ran.
+        if recon_mode in ("vit", "both"):
+            _model_name = os.environ.get("HOLOPTYCHO_MODEL_NAME")
+            _model_version = os.environ.get("HOLOPTYCHO_MODEL_VERSION")
+            _engine_path = os.environ.get("HOLOPTYCHO_ENGINE_PATH")
+            if _model_name:
+                run_metadata["model_name"] = str(_model_name)
+            if _model_version:
+                run_metadata["model_version"] = str(_model_version)
+            if _engine_path:
+                run_metadata["engine_path"] = str(_engine_path)
         _writer.start_run(self.run_uid, metadata=run_metadata)
 
         # Detector-frame downsampling. ViT-only runs default to keeping 1

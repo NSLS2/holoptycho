@@ -217,6 +217,12 @@ def start(state: AppState, config: dict | None = None) -> None:
     child_env["HOLOPTYCHO_READY_SENTINEL"] = str(_READY_SENTINEL)
     if state.current_engine_path:
         child_env["HOLOPTYCHO_ENGINE_PATH"] = state.current_engine_path
+    # Forward the selected model's name/version so the pipeline can stamp them
+    # into the run's Tiled metadata for provenance (issue #34).
+    if state.current_model_name:
+        child_env["HOLOPTYCHO_MODEL_NAME"] = str(state.current_model_name)
+    if state.current_model_version:
+        child_env["HOLOPTYCHO_MODEL_VERSION"] = str(state.current_model_version)
 
     # Clear stale sentinels from any prior run.
     _WORK_COMPLETE_SENTINEL.unlink(missing_ok=True)

@@ -1094,7 +1094,8 @@ reconstructed, so multiple runs of the same `scan_num` never collide:
 hxn/processed/holoptycho/
   {run_uid}/                    ← uuid4 hex; metadata: {run_uid, raw_uid,
                                                          scan_id, scan_num,
-                                                         started_at, recon_mode}
+                                                         started_at, recon_mode,
+                                                         model_name, model_version}
     live/
       probe      ← overwritten every display_interval iterations
       object     ← overwritten every display_interval iterations
@@ -1140,10 +1141,16 @@ hxn/processed/holoptycho/
 ```
 
 Run metadata also includes `xray_energy_kev`, `wavelength_m`, `distance_m`,
-`fine_tunable: bool`, and `complete: bool`.
+`fine_tunable: bool`, `complete: bool`, and (for `vit`/`both` runs)
+`model_name`, `model_version`, `engine_path`.
 
 - `xray_energy_kev`, `wavelength_m`, `distance_m` — needed by physics-aware
   loaders.
+- `model_name` / `model_version` / `engine_path` — which ViT engine produced
+  the `vit/` outputs (provenance). Stamped only when the ViT branch ran;
+  forwarded from the server's selected model via env (`runner.py` →
+  `HOLOPTYCHO_MODEL_NAME`/`_VERSION`). Group runs by engine via
+  `Eq("model_name", ...)` / `Eq("model_version", ...)`.
 - `fine_tunable` — `True` iff `recon_mode` is `iterative` or `both` (i.e.
   the iterative branch will populate `final/probe` and `final/object`,
   which ptycho-vit's training loader requires). Filter for fine-tuning
