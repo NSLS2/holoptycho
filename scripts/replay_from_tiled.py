@@ -561,13 +561,13 @@ def iter_frame_chunks(
     (chunk_size=1024 × 256x256 uint16). Multiple parallel fetchers provide
     throughput in excess of one connection's share, up to the tiled server
     limit. The default of 4 workers stays well within the httpx connection
-    pool (typically ~10 connections) to avoid ``httpx.PoolTimeout`` when
-    all pool slots are held by long-running chunk fetches.
-
-    Increasing n_workers beyond the pool limit causes requests to pile up
-    waiting for a free connection; when they wait longer than the httpx
-    pool_timeout (5 s by default) they raise ``PoolTimeout`` and abort the
-    replay. Keep n_workers <= 8 unless you configure a larger httpx pool.
+    pool. NOTE: tiled does not configure httpx limits, so the pool is the
+    httpx default of max_connections=100 — worker counts up to ~32 are
+    safe. 16 workers ≈ 700 fps against the NSLS2 tiled server when the
+    network allows. Watch memory: in-flight chunks cost
+    n_workers × chunk_size × frame_bytes; pair high worker counts with a
+    smaller --chunk-size (e.g. 16 workers × 256 frames ≈ 1.8 GB for
+    full-detector HXN frames).
 
     Order is preserved with a sliding window: at most ``n_workers`` fetches
     are in flight, and ``yield`` waits on them in submission order. Memory
