@@ -291,7 +291,12 @@ class StreamingPtychoRecon:
         self.diff_d = cp.empty(
             (self.num_points_l, nx, ny), dtype=self.float_precision, order="C"
         )
-        self.point_info_d = cp.empty(
+        # MUST be zeros, not empty: iter_once's it==0 init kernel processes
+        # ALL num_points_l slots, including ones whose windows haven't been
+        # written yet. Garbage int32s from recycled pool memory become object
+        # array indices -> nondeterministic cudaErrorIllegalAddress. A zero
+        # window reads obj[0:nx, 0:ny], which is always in bounds.
+        self.point_info_d = cp.zeros(
             (self.num_points_l, 4), dtype=cp.int32, order="C"
         )
 
