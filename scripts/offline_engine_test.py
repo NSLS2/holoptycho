@@ -39,6 +39,12 @@ def main():
     p.add_argument("--iterations", type=int, default=300)
     p.add_argument("--update-probe", action="store_true",
                    help="enable probe updates (default frozen, like the runs)")
+    p.add_argument("--from-cache", type=int, default=None, metavar="N",
+                   help="instead of the pipeline dumps, build engine inputs "
+                   "for the first N frames from the offline_epie fetch cache "
+                   "(identity orientation + fftshift + x-flip positions — the "
+                   "validated recipe)")
+    p.add_argument("--uid", default="48a107cb-34a5-4a6a-8633-f931db468d35")
     args = p.parse_args()
 
     import cupy as cp
@@ -46,10 +52,35 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    diff = np.load(os.path.join(args.dump_dir, "diff_d.npy"))
-    pinf = np.load(os.path.join(args.dump_dir, "point_info_d.npy"))
-    N = diff.shape[0]
-    print(f"{N} points from dumps; windows x {pinf[:,0].min()}..{pinf[:,1].max()} "
+    if args.from_cache:
+        # Build engine inputs from the offline_epie fetch cache with the
+        # validated recipe (identity DP + fftshift; x positions negated).
+        import glob
+        N = args.from_cache
+        amp_c = pos_c = None
+        for cand in sorted(glob.glob(os.path.join(args.dump_dir, f"amp_{args.uid[:8]}_*.npy"))):
+            m = int(cand.rsplit("_", 1)[1].split(".")[0])
+            cpos = os.path.join(args.dump_dir, f"pos_{args.uid[:8]}_{m}.npz")
+            if m >= N and os.path.exists(cand + ".done") and os.path.exists(cpos):
+                amp_c, pos_c = cand, cpos
+                break
+        assert amp_c, "no big-enough fetch cache; run offline_epie first"
+        amp = np.load(amp_c, mmap_mode="r")[:N]
+        diff = np.fft.ifftshift(np.asarray(amp, dtype=np.float32), axes=(-2, -1))
+        z = np.load(pos_c)
+        pos_x = -z["posx_um"][:N]                       # validated x flip
+        pos_y = z["posy_um"][:N]
+        PX_M = 0.137146014993e-9 * 2.0500008 / (256 * 75e-6)
+        px_x = np.round((pos_x - pos_x.min()) * 1e-6 / PX_M).astype(np.int32)
+        px_y = np.round((pos_y - pos_y.min()) * 1e-6 / PX_M).astype(np.int32)
+        rr, cc = px_x + 32, px_y + 32
+        pinf = np.stack([rr, rr + 256, cc, cc + 256], axis=1).astype(np.int32)
+        print(f"{N} points from cache")
+    else:
+        diff = np.load(os.path.join(args.dump_dir, "diff_d.npy"))
+        pinf = np.load(os.path.join(args.dump_dir, "point_info_d.npy"))
+        N = diff.shape[0]
+    print(f"windows x {pinf[:,0].min()}..{pinf[:,1].max()} "
           f"y {pinf[:,2].min()}..{pinf[:,3].max()}")
 
     # Mirror the replay run's engine config (see GUI config + replay overrides).
