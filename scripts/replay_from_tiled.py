@@ -772,14 +772,14 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
         # canvas/points sparsity ratio over the clear_region gate (>16), so
         # every streaming advance zeroed a 256 px stripe of already-converged
         # object (the windows of new points overlap prior rows).
-        # Replay default: stop after 200 iterations for quick validation
-        # cycles (clean finish + write_final). Override with --max-iterations.
-        # ITERATIVE-ONLY: when the engine finishes it calls stop_execution()
-        # and ends the WHOLE pipeline, so in 'both' mode a 200-iteration cap
-        # would kill the ViT stream mid-scan. In 'both' the cap stays at the
-        # pipeline default (effectively unlimited) unless explicitly passed.
-        if args.max_iterations is None and str(args.mode) == "iterative":
-            _engine_params["max_iterations"] = "200"
+        # Post-stream refinement: with fast ingest (16 tiled workers) the data
+        # completes in tens of seconds and the default it_ends_after=30 gives
+        # the engine almost no full-data iterations. 300 refinement iterations
+        # roughly matches the offline ePIE reference passes.
+        # NOTE: no max_iterations default here — an earlier 200-iteration
+        # default truncated runs mid-stream once ingest got fast. Use
+        # --max-frames to bound quick validation runs instead.
+        _engine_params["it_ends_after"] = "300"
         config.update(_engine_params)
         print(
             "[iterative] applying beamline-validated engine params "

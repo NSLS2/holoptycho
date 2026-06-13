@@ -203,7 +203,11 @@ class PtychoRecon(Operator):
         self.num_points_min = 300
         self.it = 0
         self.it_last_update = np.inf
-        self.it_ends_after = 30
+        # Refinement iterations after data collection completes (the run ends
+        # it_ends_after iterations after the last point-count advance). With
+        # fast replay ingest the stream finishes in tens of seconds, so this
+        # is most of the engine's full-data iteration budget.
+        self.it_ends_after = int(getattr(param, "it_ends_after", 30))
         # n_iterations sizes the in-RAM probe/object history ring buffers in
         # StreamingRecon (it % n_iterations) — it is NOT the run length. The
         # run normally ends via finished_collecting (all points received +

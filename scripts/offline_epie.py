@@ -106,6 +106,20 @@ def fetch_cached(args, npix):
         z = np.load(pos_path)
         return np.load(amp_path, mmap_mode="r"), z["posx_um"], z["posy_um"]
 
+    # Reuse a larger cache of the same uid by slicing its first n frames.
+    import glob
+    for cand in sorted(glob.glob(os.path.join(args.cache_dir, f"amp_{args.uid[:8]}_*.npy"))):
+        try:
+            m = int(cand.rsplit("_", 1)[1].split(".")[0])
+        except ValueError:
+            continue
+        cpos = os.path.join(args.cache_dir, f"pos_{args.uid[:8]}_{m}.npz")
+        if m >= args.n_frames and os.path.exists(cand + ".done") and os.path.exists(cpos):
+            print(f"slicing first {args.n_frames} frames from cache {cand}", flush=True)
+            z = np.load(cpos)
+            return (np.load(cand, mmap_mode="r")[: args.n_frames],
+                    z["posx_um"][: args.n_frames], z["posy_um"][: args.n_frames])
+
     from tiled.client import from_profile
 
     run = from_profile("nsls2")["hxn"]["migration"][args.uid]
