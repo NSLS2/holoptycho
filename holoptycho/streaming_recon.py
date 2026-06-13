@@ -291,7 +291,12 @@ class StreamingPtychoRecon:
         self.diff_d = cp.empty(
             (self.num_points_l, nx, ny), dtype=self.float_precision, order="C"
         )
-        self.point_info_d = cp.empty(
+        # MUST be zeros, not empty: iter_once's it==0 init kernel processes
+        # ALL num_points_l slots, including ones whose windows haven't been
+        # written yet. Garbage int32s from recycled pool memory become object
+        # array indices -> nondeterministic cudaErrorIllegalAddress. A zero
+        # window reads obj[0:nx, 0:ny], which is always in bounds.
+        self.point_info_d = cp.zeros(
             (self.num_points_l, 4), dtype=cp.int32, order="C"
         )
 
@@ -520,7 +525,13 @@ class StreamingPtychoRecon:
     # ------------------------------------------------------------------
 
     def initial_probe(self, num_diffs):
-        """Initialise the probe from the first ``num_diffs`` diffraction patterns.
+        """Initialise the probe.
+
+        With ``init_prb_flag=False`` and a readable ``prb_path``, warm-start
+        from that ``.npy`` file (a probe from a prior reconstruction, e.g. the
+        beamline GUI's mADMM result — shape ``(modes, nx, ny)`` or ``(nx, ny)``,
+        complex). Otherwise compute it from the first ``num_diffs`` diffraction
+        patterns.
 
         HXN ref: ``init_live_prb`` lines 3960-3979. Streaming-mode subset:
         single-mode only, no ``shift_sum`` for secondary modes.
@@ -529,13 +540,27 @@ class StreamingPtychoRecon:
 
         from ptycho.cupy_util import copy_to_pinned
 
+        prb_path = str(getattr(self.config, "prb_path", "") or "")
+        if not self.init_prb_flag and prb_path:
+            prb_file = np.load(prb_path)
+            prb_file = np.asarray(prb_file)
+            if prb_file.ndim == 3:
+                prb_file = prb_file[0]  # first mode (streaming is single-mode)
+            if prb_file.shape != (self.nx_prb, self.ny_prb):
+                raise ValueError(
+                    f"prb_path {prb_path!r} has shape {prb_file.shape}; "
+                    f"expected ({self.nx_prb}, {self.ny_prb}) to match nx/ny"
+                )
+            self.prb_d[0, :, :] = cp.asarray(
+                prb_file.astype(self.complex_precision)
+            )
+            copy_to_pinned(self.prb_d, self.prb_mode, self.prb_d.nbytes)
+            logger.info("initial_probe: warm-started from %s", prb_path)
+            return
         if not self.init_prb_flag:
-            # Load-from-file path not wired up in streaming mode. Holoptycho's
-            # config sets init_prb_flag=False but in practice the engine
-            # initialises from diffraction either way. Be permissive.
             logger.warning(
-                "initial_probe: init_prb_flag is False but streaming mode "
-                "only supports probe-from-diff; computing anyway."
+                "initial_probe: init_prb_flag is False but no prb_path is "
+                "set; falling back to probe-from-diff."
             )
 
         prb = cp.fft.fftshift(
@@ -800,6 +825,38 @@ class StreamingPtychoRecon:
             self.num_points_l, mp, mo, nx, ny
         )
 
+    def init_product_range(self, start, end):
+        """Initialize product_d = prb * obj(window) for points [start, end).
+
+        Called when newly streamed points activate. Same kernel call as the
+        it==0 initialization in ``_update_psi``, but scoped to the new range —
+        without it, points arriving after iteration 0 carry a stale dual
+        state (computed from a zero window before their positions existed)
+        for the rest of the run.
+        """
+        from ptycho.cupy_util import get_3d_block_grid_config
+
+        count = int(end) - int(start)
+        if count <= 0:
+            return
+        nx, ny = self.nx_prb, self.ny_prb
+        block, grid = get_3d_block_grid_config((count, nx, ny))
+        args = (
+            self.prb_d,
+            self.obj_d,
+            self.product_d,
+            self.point_info_d,
+            nx,
+            ny,
+            self.prb_mode_num,
+            self.nx_obj,
+            self.ny_obj,
+            self.obj_mode_num,
+            int(start),
+            count,
+        )
+        self.kernel_multiply_with_support_mode(grid, block, args)
+
     def _accumulate_obj(self):
         """HXN ref: ``accumulate_obj_gpu`` lines 2783-2799."""
         import cupy as cp
@@ -832,9 +889,15 @@ class StreamingPtychoRecon:
 
         mp = self.prb_mode_num
         mo = self.obj_mode_num
+        # Pass the FULL product array: the accumulate kernels index product_d
+        # with the GLOBAL point index (start + z). Passing a slice already
+        # offset to start_point double-offsets the reads — wrong points'
+        # data for every batch after the first (corrupted object updates),
+        # and out-of-bounds (cudaErrorIllegalAddress) once
+        # start_point >= num_points_l / 2.
         psi = self.product_d.reshape(
             self.num_points_l * mp * mo, self.nx_prb, self.ny_prb
-        )[start_point * mp * mo : (start_point + batch_size) * mp * mo]
+        )
         args = (
             self.prb_norm_d,
             self.obj_upd_d,
@@ -865,8 +928,17 @@ class StreamingPtychoRecon:
         copy_to_pinned(self.obj_upd_d, self.obj_update_l, self.obj_upd_d.nbytes)
         copy_to_pinned(self.prb_norm_d, self.prb_norm_l, self.prb_norm_d.nbytes)
 
-        # obj_mode[...] = obj_update_l / prb_norm_l
-        self.obj_mode[...] = self.obj_update_l / self.prb_norm_l
+        # obj_mode = obj_update_l / prb_norm_l, guarded: prb_norm is zero
+        # everywhere no probe window has contributed yet (most of the object
+        # early in a streaming scan), and 0/0 NaNs there poisoned the
+        # write_live finite check and the dashboard display. Leave uncovered
+        # pixels at their current value instead.
+        np.divide(
+            self.obj_update_l,
+            self.prb_norm_l,
+            out=self.obj_mode,
+            where=self.prb_norm_l > 0,
+        )
 
         copy_from_pinned(self.obj_mode, self.obj_d, self.obj_mode.nbytes)
 
@@ -925,9 +997,11 @@ class StreamingPtychoRecon:
 
         mp = self.prb_mode_num
         mo = self.obj_mode_num
+        # Full array, NOT a slice — accumulate_prb_mode indexes product_d
+        # with the global point index (start + z); see _accumulate_obj_single.
         psi = self.product_d.reshape(
             self.num_points_l * mp * mo, self.nx_prb, self.ny_prb
-        )[start_point * mp * mo : (start_point + batch_size) * mp * mo]
+        )
         args = (
             self.obj_norm_d,
             self.prb_upd_d,

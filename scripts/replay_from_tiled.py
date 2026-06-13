@@ -561,13 +561,13 @@ def iter_frame_chunks(
     (chunk_size=1024 × 256x256 uint16). Multiple parallel fetchers provide
     throughput in excess of one connection's share, up to the tiled server
     limit. The default of 4 workers stays well within the httpx connection
-    pool (typically ~10 connections) to avoid ``httpx.PoolTimeout`` when
-    all pool slots are held by long-running chunk fetches.
-
-    Increasing n_workers beyond the pool limit causes requests to pile up
-    waiting for a free connection; when they wait longer than the httpx
-    pool_timeout (5 s by default) they raise ``PoolTimeout`` and abort the
-    replay. Keep n_workers <= 8 unless you configure a larger httpx pool.
+    pool. NOTE: tiled does not configure httpx limits, so the pool is the
+    httpx default of max_connections=100 — worker counts up to ~32 are
+    safe. 16 workers ≈ 700 fps against the NSLS2 tiled server when the
+    network allows. Watch memory: in-flight chunks cost
+    n_workers × chunk_size × frame_bytes; pair high worker counts with a
+    smaller --chunk-size (e.g. 16 workers × 256 frames ≈ 1.8 GB for
+    full-detector HXN frames).
 
     Order is preserved with a sliding window: at most ``n_workers`` fetches
     are in flight, and ``yield`` waits on them in submission order. Memory
@@ -742,6 +742,54 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
     config["detector_orientation"] = (
         str(args.detector_orientation) if args.simulate_live else "identity"
     )
+    # Iterative-engine parameters from the beamline-validated live GUI recon of
+    # scan 411993 (Weiyuan Huang, 2026Q2). The config_from_tiled defaults
+    # diverge the solver (over-tight amp/pha clamps, weak ml_weight, 0.5 um
+    # probe propagation) and size the object canvas with zero headroom over the
+    # commanded scan range, so encoder overshoot indexes outside the object
+    # array (cudaErrorIllegalAddress). Applied here for validation; TODO:
+    # promote to config_from_tiled defaults once confirmed, then delete.
+    if str(args.mode) in ("iterative", "both"):
+        _engine_params = {
+            "alg_percentage": "0.1",
+            "amp_min": "0.1",
+            "pha_min": "-2.0",
+            "ml_weight": "1.0",
+            "distance": "0.0",          # probe propagation off
+            # Freeze probe updates: early in a streaming scan only a thin
+            # band of rows has arrived (~36 px vs the 256 px probe), which
+            # under-constrains probe updates — they smear the warm-started
+            # probe into streaks and intermittently produce NaNs. With a
+            # known-good --probe-path the probe doesn't need updating at all.
+            "start_update_probe": "1000000",
+            "n_iterations": "300",
+            "gpu_batch_size": "1024",
+        }
+        # Object canvas headroom (the GUI sized 13 um for an 8 um scan): the
+        # object array and the dashboard snapshot crop are sized from
+        # x/y_range, so without headroom the scan band fills the array edge
+        # to edge and the display crop cuts it off. The side effect this
+        # scaling used to have — pushing the canvas/points sparsity ratio
+        # over clear_region's >16 gate, wiping converged object on every
+        # streaming advance — is now disabled explicitly below.
+        for _k in ("x_range", "y_range"):
+            _engine_params[_k] = str(float(config[_k]) * 1.625)
+        _engine_params["clear_region_enabled"] = "False"
+        # Post-stream refinement: with fast ingest (16 tiled workers) the data
+        # completes in tens of seconds and the default it_ends_after=30 gives
+        # the engine almost no full-data iterations. 300 refinement iterations
+        # roughly matches the offline ePIE reference passes.
+        # NOTE: no max_iterations default here — an earlier 200-iteration
+        # default truncated runs mid-stream once ingest got fast. Use
+        # --max-frames to bound quick validation runs instead.
+        _engine_params["it_ends_after"] = "300"
+        config.update(_engine_params)
+        print(
+            "[iterative] applying beamline-validated engine params "
+            "(overrides config_from_tiled defaults): "
+            + ", ".join(f"{k}={v}" for k, v in sorted(_engine_params.items())),
+            flush=True,
+        )
     status = _json_request(f"{hp_url}/status")
     endpoint = "/restart" if status.get("status") in ("starting", "running", "finished", "error") else "/run"
     # Retry-with-backoff for the brief window where a prior runner thread is

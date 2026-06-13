@@ -203,8 +203,21 @@ class PtychoRecon(Operator):
         self.num_points_min = 300
         self.it = 0
         self.it_last_update = np.inf
-        self.it_ends_after = 30
+        # Refinement iterations after data collection completes (the run ends
+        # it_ends_after iterations after the last point-count advance). With
+        # fast replay ingest the stream finishes in tens of seconds, so this
+        # is most of the engine's full-data iteration budget.
+        self.it_ends_after = int(getattr(param, "it_ends_after", 30))
+        _cre = getattr(param, "clear_region_enabled", True)
+        self.clear_region_enabled = bool(_cre) if not isinstance(_cre, str) else _cre.lower() != "false"
+        # n_iterations sizes the in-RAM probe/object history ring buffers in
+        # StreamingRecon (it % n_iterations) — it is NOT the run length. The
+        # run normally ends via finished_collecting (all points received +
+        # it_ends_after refinement iterations); max_iterations is only a
+        # safety cap. Capping at n_iterations used to kill streaming runs
+        # mid-scan (300 iterations ~= 4k of 40k frames).
         self.n_iterations = int(getattr(param, "n_iterations", 500))
+        self.max_iterations = int(getattr(param, "max_iterations", 1_000_000))
         self.pos_ready_num = 0
         self.frame_ready_num = 0
         self.points_total = 0
@@ -263,7 +276,7 @@ class PtychoRecon(Operator):
         # External stop request: trip the natural-termination path so SaveResult
         # fires on this tick (write_final lands in Tiled), then go quiescent.
         if _finish_event.is_set() and self.num_points_min < np.inf:
-            self.n_iterations = self.it
+            self.max_iterations = self.it
             self._logger.info("Finish requested — flushing and saving final results")
             _finish_event.clear()
 
@@ -311,8 +324,21 @@ class PtychoRecon(Operator):
         # cp.cuda.set_pinned_memory_allocator()
 
         if ready_num > self.recon.num_points_recon and self.num_points_min < np.inf:
-            if np.ceil(self.recon.x_range_um*1e-6/self.recon.x_pixel_m)*np.ceil(self.recon.y_range_um*1e-6/self.recon.x_pixel_m)/self.points_total > 16:
+            # clear_region zeroes the object under the NEW points' windows —
+            # those 256 px windows overlap previously reconstructed rows, so
+            # on dense fly scans every streaming advance wipes a stripe of
+            # converged object. The sparsity heuristic (canvas/points > 16)
+            # was meant for sparse scans; config clear_region_enabled=False
+            # disables it outright (the replay does).
+            if self.clear_region_enabled and np.ceil(self.recon.x_range_um*1e-6/self.recon.x_pixel_m)*np.ceil(self.recon.y_range_um*1e-6/self.recon.x_pixel_m)/self.points_total > 16:
                 self.recon.clear_region(self.recon.num_points_recon, ready_num)
+            # Initialize the DM dual state (product = prb * obj at the point's
+            # window) for the newly activated points. product_d is otherwise
+            # only initialized once at iteration 0 — when most points haven't
+            # arrived and their windows were zeros — leaving every
+            # later-arriving point with a stale dual for its whole life and
+            # wrecking the streaming reconstruction.
+            self.recon.init_product_range(self.recon.num_points_recon, ready_num)
             self.recon.num_points_recon = ready_num
             if ready_num > np.minimum(self.recon.num_points_l,self.points_total)*0.97:
                 self.it_last_update = self.it
@@ -353,24 +379,36 @@ class PtychoRecon(Operator):
         sleep(0.1)
 
 
-            # #save
-            # if self.recon.num_points_recon >= 2500:
-            #     print('saving..')
-            #     np.save('diff_d.npy',self.recon.diff_d.get())
-            #     np.save('point_info_d.npy',self.recon.point_info_d.get())
+        # Debug dump of the engine's exact inputs, for offline inspection /
+        # offline ptycho recon. Set HOLOPTYCHO_DUMP_ENGINE_INPUTS=<dir> on the
+        # server; fires once when 2500+ points are in.
+        _dump_dir = os.environ.get("HOLOPTYCHO_DUMP_ENGINE_INPUTS")
+        if (
+            _dump_dir
+            and not getattr(self, "_engine_inputs_dumped", False)
+            and self.recon.num_points_recon >= 2500
+        ):
+            n = int(self.recon.num_points_recon)
+            np.save(os.path.join(_dump_dir, "diff_d.npy"), self.recon.diff_d[:n].get())
+            np.save(os.path.join(_dump_dir, "point_info_d.npy"), self.recon.point_info_d[:n].get())
+            self._logger.info("Dumped engine inputs (%d points) to %s", n, _dump_dir)
+            self._engine_inputs_dumped = True
         
         # Terminate when we've either (a) finished collecting data and run
-        # `it_ends_after` more iterations, or (b) hit the configured iteration
+        # `it_ends_after` more iterations, or (b) hit the safety iteration
         # cap. Both gated on `num_points_min < inf` so we only fire once.
+        # NOTE: the cap is max_iterations, NOT n_iterations — n_iterations is
+        # the history ring-buffer depth and is far smaller than a full
+        # streaming scan's iteration count.
         finished_collecting = (
             self.it - self.it_last_update >= self.it_ends_after
         )
-        hit_iteration_cap = self.it >= self.n_iterations
+        hit_iteration_cap = self.it >= self.max_iterations
         if (finished_collecting or hit_iteration_cap) and self.num_points_min < np.inf:
             reason = "iteration cap" if hit_iteration_cap else "data collection complete"
             self._logger.info(
-                "Iterative recon finishing (%s, it=%d, n_iterations=%d)",
-                reason, self.it, self.n_iterations,
+                "Iterative recon finishing (%s, it=%d, max_iterations=%d)",
+                reason, self.it, self.max_iterations,
             )
             self.num_points_min = np.inf
             op_output.emit((self.recon,self.timestamp_iter,self.num_points_recv_iter),"output")
@@ -600,6 +638,12 @@ class PtychoApp(Application):
         self.point_proc.point_info = np.zeros((nz,4),dtype = np.int32)
         if has_recon:
             self.point_proc.point_info_target = self.pty.recon.point_info_d
+            # Engine GPU buffers hold num_points_l points (live_num_points_max,
+            # default 8192) — usually far fewer than the scan's nz. The feed
+            # guards must use THIS capacity: writing past it is an
+            # out-of-bounds GPU write (cudaErrorIllegalAddress).
+            self.point_proc.target_max_points = int(self.pty.recon.num_points_l)
+            self.image_send.target_max_points = int(self.pty.recon.num_points_l)
         # Per-frame scan positions (microns), filled by PointProcessorOp as
         # PandA data arrives. Read by SaveViTResult and published to tiled
         # so the dashboard mosaic stitcher uses real positions.
@@ -619,6 +663,12 @@ class PtychoApp(Application):
             self.point_proc.x_pixel_m = self.pty.recon.x_pixel_m
             self.point_proc.y_pixel_m = self.pty.recon.y_pixel_m
             self.point_proc.obj_pad = self.pty.recon.obj_pad
+            # Engine object-array dims: lets PointProcessorOp center the scan
+            # in the (over-allocated) object array and clamp out-of-bounds
+            # crop windows instead of handing the gather/scatter kernels
+            # negative indices (cudaErrorIllegalAddress).
+            self.point_proc.obj_nx_limit = int(self.pty.recon.nx_obj)
+            self.point_proc.obj_ny_limit = int(self.pty.recon.ny_obj)
         else:
             # x_direction/y_direction are already set on point_proc at
             # construction from config; here we only need the pixel size so
