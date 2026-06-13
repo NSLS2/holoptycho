@@ -765,13 +765,16 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
             "n_iterations": "300",
             "gpu_batch_size": "1024",
         }
-        # NOTE: an earlier revision scaled x/y_range by 1.625 for object-canvas
-        # headroom (the GUI used 13 um for an 8 um scan). That is now handled
-        # properly by PointProcessorOp centering the scan in the over-allocated
-        # object array — and the scaling was actively harmful: it pushed the
-        # canvas/points sparsity ratio over the clear_region gate (>16), so
-        # every streaming advance zeroed a 256 px stripe of already-converged
-        # object (the windows of new points overlap prior rows).
+        # Object canvas headroom (the GUI sized 13 um for an 8 um scan): the
+        # object array and the dashboard snapshot crop are sized from
+        # x/y_range, so without headroom the scan band fills the array edge
+        # to edge and the display crop cuts it off. The side effect this
+        # scaling used to have — pushing the canvas/points sparsity ratio
+        # over clear_region's >16 gate, wiping converged object on every
+        # streaming advance — is now disabled explicitly below.
+        for _k in ("x_range", "y_range"):
+            _engine_params[_k] = str(float(config[_k]) * 1.625)
+        _engine_params["clear_region_enabled"] = "False"
         # Post-stream refinement: with fast ingest (16 tiled workers) the data
         # completes in tens of seconds and the default it_ends_after=30 gives
         # the engine almost no full-data iterations. 300 refinement iterations

@@ -208,6 +208,8 @@ class PtychoRecon(Operator):
         # fast replay ingest the stream finishes in tens of seconds, so this
         # is most of the engine's full-data iteration budget.
         self.it_ends_after = int(getattr(param, "it_ends_after", 30))
+        _cre = getattr(param, "clear_region_enabled", True)
+        self.clear_region_enabled = bool(_cre) if not isinstance(_cre, str) else _cre.lower() != "false"
         # n_iterations sizes the in-RAM probe/object history ring buffers in
         # StreamingRecon (it % n_iterations) — it is NOT the run length. The
         # run normally ends via finished_collecting (all points received +
@@ -322,7 +324,13 @@ class PtychoRecon(Operator):
         # cp.cuda.set_pinned_memory_allocator()
 
         if ready_num > self.recon.num_points_recon and self.num_points_min < np.inf:
-            if np.ceil(self.recon.x_range_um*1e-6/self.recon.x_pixel_m)*np.ceil(self.recon.y_range_um*1e-6/self.recon.x_pixel_m)/self.points_total > 16:
+            # clear_region zeroes the object under the NEW points' windows —
+            # those 256 px windows overlap previously reconstructed rows, so
+            # on dense fly scans every streaming advance wipes a stripe of
+            # converged object. The sparsity heuristic (canvas/points > 16)
+            # was meant for sparse scans; config clear_region_enabled=False
+            # disables it outright (the replay does).
+            if self.clear_region_enabled and np.ceil(self.recon.x_range_um*1e-6/self.recon.x_pixel_m)*np.ceil(self.recon.y_range_um*1e-6/self.recon.x_pixel_m)/self.points_total > 16:
                 self.recon.clear_region(self.recon.num_points_recon, ready_num)
             # Initialize the DM dual state (product = prb * obj at the point's
             # window) for the newly activated points. product_d is otherwise
