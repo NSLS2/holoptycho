@@ -765,10 +765,13 @@ def start_holoptycho_pipeline(args, panda_upsample: int = 1) -> None:
             "n_iterations": "300",
             "gpu_batch_size": "1024",
         }
-        # Object canvas headroom: the GUI sized x/y_range at 13 um for the
-        # commanded 8 um scan (~1.6x) so overshooting positions stay in-bounds.
-        for _k in ("x_range", "y_range"):
-            _engine_params[_k] = str(float(config[_k]) * 1.625)
+        # NOTE: an earlier revision scaled x/y_range by 1.625 for object-canvas
+        # headroom (the GUI used 13 um for an 8 um scan). That is now handled
+        # properly by PointProcessorOp centering the scan in the over-allocated
+        # object array — and the scaling was actively harmful: it pushed the
+        # canvas/points sparsity ratio over the clear_region gate (>16), so
+        # every streaming advance zeroed a 256 px stripe of already-converged
+        # object (the windows of new points overlap prior rows).
         # Replay default: stop after 200 iterations for quick validation
         # cycles (clean finish + write_final). Override with --max-iterations.
         # ITERATIVE-ONLY: when the engine finishes it calls stop_execution()
