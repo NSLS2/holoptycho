@@ -728,38 +728,6 @@ class StreamingPtychoRecon:
         self.last = self.num_points_recon % self.gpu_batch_size
         self.recon_gpu_launch(self.recon_ml_grad_trans_gpu_single)
 
-    def init_product_range(self, start, end):
-        """Initialize product_d = prb * obj(window) for points [start, end).
-
-        Called when newly streamed points activate. Same kernel call as the
-        it==0 initialization in ``_update_psi``, but scoped to the new range —
-        without it, points arriving after iteration 0 carry a stale dual
-        state (computed from a zero window before their positions existed)
-        for the rest of the run.
-        """
-        from ptycho.cupy_util import get_3d_block_grid_config
-
-        count = int(end) - int(start)
-        if count <= 0:
-            return
-        nx, ny = self.nx_prb, self.ny_prb
-        block, grid = get_3d_block_grid_config((count, nx, ny))
-        args = (
-            self.prb_d,
-            self.obj_d,
-            self.product_d,
-            self.point_info_d,
-            nx,
-            ny,
-            self.prb_mode_num,
-            self.nx_obj,
-            self.ny_obj,
-            self.obj_mode_num,
-            int(start),
-            count,
-        )
-        self.kernel_multiply_with_support_mode(grid, block, args)
-
     def _update_mmap(self, it):
         """Snapshot the current probe/object into the mmap numpy buffers.
 
