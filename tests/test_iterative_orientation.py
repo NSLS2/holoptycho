@@ -146,7 +146,10 @@ def _parse(argv):
 
 def test_iterative_flags_default_unset():
     args = _parse([])
-    assert args.dp_orient_iterative is None
+    # dp_orient_iterative defaults to 'rot90_cw' — holoscan-framework's hardcoded
+    # engine-DP np.rot90(axes=(2,1)); pass 'identity' to follow the shared
+    # dp_orient + autodetect. The direction overrides stay unset by default.
+    assert args.dp_orient_iterative == "rot90_cw"
     assert args.x_direction_iterative is None
     assert args.y_direction_iterative is None
 
