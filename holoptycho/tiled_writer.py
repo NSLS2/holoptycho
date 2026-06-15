@@ -192,10 +192,19 @@ class TiledWriter:
             return
         probe_ap = self._complex_to_amp_phase(probe)
         obj_ap = self._complex_to_amp_phase(obj)
-        if not np.isfinite(probe_ap).all() or not np.isfinite(obj_ap).all():
+        # The probe is always fully covered, so any non-finite value there means
+        # the engine diverged -> skip. The object legitimately carries NaN on
+        # no-data background pixels (the dashboard renders those transparent),
+        # so NaN must NOT skip the frame. Skip the object only on genuine
+        # corruption: any Inf, or no finite (reconstructed) pixels at all.
+        if (
+            not np.isfinite(probe_ap).all()
+            or np.isinf(obj_ap).any()
+            or not np.isfinite(obj_ap).any()
+        ):
             logger.warning(
-                "write_live skipped: non-finite values in probe/object at iter=%d "
-                "(keeping last finite snapshot)",
+                "write_live skipped: probe non-finite / object Inf or empty at "
+                "iter=%d (keeping last finite snapshot)",
                 iteration,
             )
             return

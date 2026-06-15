@@ -758,15 +758,30 @@ class StreamingPtychoRecon:
         """Return a snapshot of the current probe/object for SaveLiveResult.
 
         Returns a tuple ``(probe, object, iteration, scan_num)``.
+
+        No-data object pixels (where no probe has contributed yet) are set to
+        NaN so the dashboard renders them transparent instead of colormapping
+        the uniform seed value as if it were reconstructed data. This is done
+        on a *copy*, so the stored ``mmap_obj`` and any saved reconstruction
+        keep their finite seed background. ``prb_norm_l`` is exactly ``alpha``
+        where no probe overlapped (accumulate_obj_gpu seeds it to ``alpha`` then
+        adds ``|prb|^2`` only on covered pixels), so ``> alpha`` marks coverage.
         """
         if self.mmap_prb is None or self.mmap_obj is None:
             raise RuntimeError(
                 "StreamingPtychoRecon.snapshot called before gpu_setup()"
             )
         it_mmap = self._last_iter % self.n_iterations
+        obj = self.mmap_obj[it_mmap].copy()
+        if self.prb_norm_l is not None:
+            ix = (self.nx_prb + self.obj_pad) // 2
+            iy = (self.ny_prb + self.obj_pad) // 2
+            coverage = self.prb_norm_l[:, ix:-ix, iy:-iy]
+            if coverage.shape == obj.shape:
+                obj[coverage <= self.float_precision(self.alpha)] = np.nan
         return (
             self.mmap_prb[it_mmap],
-            self.mmap_obj[it_mmap],
+            obj,
             self._last_iter,
             self.scan_num,
         )
