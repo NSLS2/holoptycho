@@ -412,25 +412,62 @@ class StreamingPtychoRecon:
         self.kernel_get_amp = get_amp(mp * mo)
 
         func_mod = get_mod2(mp, mo)
+        # Bind the *_local kernels: master's plain accumulate_obj/prb_mode index
+        # product_d globally (start+z, full array), but the inherited HXN
+        # accumulate_*_gpu_single methods pass a per-batch slice and need the
+        # batch-local (z) indexing. The _local variants (NSLS2/ptycho#88) are the
+        # HXN kernels under a new name so the method+kernel pair is faithful.
+        # TODO(dedup): once the streaming engine is validated, investigate
+        # whether we can drop the _local kernels and drive master's plain
+        # accumulate_obj/prb_mode by passing the full product_d instead of a
+        # slice — see NSLS2/ptycho#89.
         self.kernel_accumulate_prb_mode = func_mod.get_function(
-            f"accumulate_prb_mode<{dtype_str}, {mp}, {mo}>"
+            f"accumulate_prb_mode_local<{dtype_str}, {mp}, {mo}>"
         )
         self.kernel_accumulate_obj_mode = func_mod.get_function(
-            f"accumulate_obj_mode<{dtype_str}, {mp}, {mo}>"
+            f"accumulate_obj_mode_local<{dtype_str}, {mp}, {mo}>"
         )
 
-        # Bind ptycho master's ML_grad reconstruction methods onto this instance
-        # so they execute against our buffers — verbatim beamline code, no
-        # reimplementation (NSLS2/ptycho#87). refine_data_gpu is intentionally
-        # not bound: it is only reached when refine_data_flag is True (kept False).
+        # Import the recon math from ptycho master by binding its methods onto
+        # this instance (verbatim beamline code, NSLS2/ptycho#87) — we do NOT
+        # duplicate any of it here. Only the streaming wrapper lives in
+        # holoptycho. This covers both the per-batch ML_grad algorithm and the
+        # object/probe accumulate+gather (the standard update, not streaming).
+        # refine_data_gpu is intentionally not bound: it is only reached when
+        # refine_data_flag is True (kept False).
         for _name in (
             "recon_gpu_launch",
             "recon_ml_grad_trans_gpu_single",
             "calc_prb_obj_gpu",
             "forward_prop_gpu",
             "back_prop_gpu",
+            "accumulate_obj_gpu",
+            "accumulate_obj_gpu_single",
+            "gather_obj_gpu",
+            "accumulate_prb_gpu",
+            "accumulate_prb_gpu_single",
+            "gather_prb_gpu",
         ):
             setattr(self, _name, getattr(ptycho_trans, _name).__get__(self))
+
+        # Flags the inherited gather/accumulate read. The ONLY deviations from
+        # the beamline batch code are forced by running on holoptycho main:
+        #   * single-GPU: comm=None / NCCL off / CUDA-MPI off -> the inherited
+        #     gather_*_gpu take the `if self.comm:`-guarded else (no Allreduce).
+        #   * ML_grad is a gradient method, so grad_upd=True selects the
+        #     additive object/probe update in gather_*_gpu (update_psi_gpu sets
+        #     this for alg=='ML_grad'; we have no dispatcher, so set it here).
+        self.grad_upd = True
+        self.comm = None
+        self.mpi = None
+        self.use_NCCL = False
+        self.use_CUDA_MPI = False
+        self.obj_stream = cp.cuda.Stream()
+        # Probe post-processing branches in gather_prb_gpu — all off for
+        # single-mode live recon (their bodies never execute).
+        self.prb_center_flag = False
+        self.afly_flag = False
+        self.norm_prb_amp_flag = False
 
         # --- mmap buffers for live snapshots (plain numpy; Holoptycho reads
         # them in-process via SaveLiveResult) ---
@@ -665,11 +702,11 @@ class StreamingPtychoRecon:
         # probe and object update together from a near-uniform seed and the
         # gradient loop diverges.
         if it >= self.start_update_object:
-            self._accumulate_obj()
-            self._gather_obj()
+            self.accumulate_obj_gpu()
+            self.gather_obj_gpu()
         if it >= self.start_update_probe:
-            self._accumulate_prb()
-            self._gather_prb()
+            self.accumulate_prb_gpu()
+            self.gather_prb_gpu()
 
         # snapshot into mmap arrays (for SaveLiveResult)
         self._update_mmap(it)
@@ -722,184 +759,6 @@ class StreamingPtychoRecon:
             count,
         )
         self.kernel_multiply_with_support_mode(grid, block, args)
-
-    def _accumulate_obj(self):
-        """HXN ref: ``accumulate_obj_gpu`` lines 2783-2799."""
-        import cupy as cp
-
-        from ptycho.cupy_util import get_3d_block_grid_config
-
-        n_batch = self.num_points_recon // self.gpu_batch_size
-        self.obj_upd_d[...] = 0.0
-        self.prb_norm_d[...] = self.float_precision(self.alpha)
-        self.prb_sqr_d = cp.abs(self.prb_d) ** 2
-        self.prb_conj_d = cp.conj(self.prb_d)
-        block, grid = get_3d_block_grid_config(
-            (self.gpu_batch_size, self.nx_prb, self.ny_prb)
-        )
-        for i in range(n_batch):
-            self._accumulate_obj_single(
-                i * self.gpu_batch_size, self.gpu_batch_size, block, grid
-            )
-        if self.last > 0:
-            block, grid = get_3d_block_grid_config(
-                (self.last, self.nx_prb, self.ny_prb)
-            )
-            self._accumulate_obj_single(
-                n_batch * self.gpu_batch_size, self.last, block, grid
-            )
-
-    def _accumulate_obj_single(self, start_point, batch_size, block, grid):
-        """HXN ref: ``accumulate_obj_gpu_single`` lines 1877-1890."""
-        import cupy as cp
-
-        mp = self.prb_mode_num
-        mo = self.obj_mode_num
-        # Pass the FULL product array: the accumulate kernels index product_d
-        # with the GLOBAL point index (start + z). Passing a slice already
-        # offset to start_point double-offsets the reads — wrong points'
-        # data for every batch after the first (corrupted object updates),
-        # and out-of-bounds (cudaErrorIllegalAddress) once
-        # start_point >= num_points_l / 2.
-        psi = self.product_d.reshape(
-            self.num_points_l * mp * mo, self.nx_prb, self.ny_prb
-        )
-        args = (
-            self.prb_norm_d,
-            self.obj_upd_d,
-            self.prb_sqr_d,
-            self.prb_conj_d,
-            psi,
-            self.point_info_d,
-            cp.uint32(self.nx_prb),
-            cp.uint32(self.ny_prb),
-            cp.uint32(self.nx_obj),
-            cp.uint32(self.ny_obj),
-            cp.uint32(start_point),
-            cp.uint32(batch_size),
-        )
-        self.kernel_accumulate_obj_mode(grid, block, args)
-
-    def _gather_obj(self):
-        """Single-rank flavour of ``gather_obj_gpu`` (grad_upd path).
-
-        Skips the MPI Allreduce and NCCL branches; we're single-process.
-        Also skips the ``mask_obj_flag`` kernel by default — re-enable
-        below if your config sets it.
-        """
-        import cupy as cp
-
-        from ptycho.cupy_util import copy_to_pinned, copy_from_pinned
-
-        copy_to_pinned(self.obj_upd_d, self.obj_update_l, self.obj_upd_d.nbytes)
-        copy_to_pinned(self.prb_norm_d, self.prb_norm_l, self.prb_norm_d.nbytes)
-
-        # ML_grad is a gradient method: HXN's gather runs the grad_upd branch
-        # (update_psi_gpu sets grad_upd=True for alg=='ML_grad'), i.e.
-        #   obj_mode += obj_update_l / prb_norm_l
-        # NOT the DM-style replace. Guarded against 0/0 where no probe has
-        # covered a pixel yet (prb_norm_l ~ 0 if alpha is tiny); those pixels
-        # are left unchanged so the streaming dashboard never sees NaNs.
-        quotient = np.zeros_like(self.obj_update_l)
-        np.divide(
-            self.obj_update_l,
-            self.prb_norm_l,
-            out=quotient,
-            where=self.prb_norm_l > 0,
-        )
-        self.obj_mode += quotient
-
-        copy_from_pinned(self.obj_mode, self.obj_d, self.obj_mode.nbytes)
-
-        if self.mask_obj_flag:
-            mo = self.obj_mode_num
-            o_nx = np.int32(self.nx_obj)
-            o_ny = np.int32(self.ny_obj)
-            amp_max = self.float_precision(self.amp_max)
-            amp_min = self.float_precision(self.amp_min)
-            pha_max = self.float_precision(self.pha_max)
-            pha_min = self.float_precision(self.pha_min)
-            N_block = 256
-            N_grid = int((mo * o_nx * o_ny - 1) // N_block + 1)
-            args = (
-                self.obj_d,
-                cp.uint32(mo),
-                cp.uint32(o_nx),
-                cp.uint32(o_ny),
-                amp_max,
-                amp_min,
-                pha_max,
-                pha_min,
-            )
-            self.kernel_restrict_range((N_grid, 1, 1), (N_block, 1, 1), args)
-            copy_to_pinned(self.obj_d, self.obj_mode, self.obj_mode.nbytes)
-
-    def _accumulate_prb(self):
-        """HXN ref: ``accumulate_prb_gpu`` lines 2857-2870."""
-        import cupy as cp
-
-        from ptycho.cupy_util import get_3d_block_grid_config
-
-        self.prb_upd_d[...] = 0.0
-        self.obj_norm_d[...] = self.float_precision(self.alpha)
-        self.obj_sqr_d = cp.abs(self.obj_d) ** 2
-        self.obj_conj_d = self.obj_d.conj()
-        n_batch = self.num_points_recon // self.gpu_batch_size
-        block, grid = get_3d_block_grid_config(
-            (self.gpu_batch_size, self.nx_prb, self.ny_prb)
-        )
-        for i in range(n_batch):
-            self._accumulate_prb_single(
-                i * self.gpu_batch_size, self.gpu_batch_size, block, grid
-            )
-        if self.last > 0:
-            block, grid = get_3d_block_grid_config(
-                (self.last, self.nx_prb, self.ny_prb)
-            )
-            self._accumulate_prb_single(
-                n_batch * self.gpu_batch_size, self.last, block, grid
-            )
-
-    def _accumulate_prb_single(self, start_point, batch_size, block, grid):
-        """HXN ref: ``accumulate_prb_gpu_single`` lines 1892-1915."""
-        import cupy as cp
-
-        mp = self.prb_mode_num
-        mo = self.obj_mode_num
-        # Full array, NOT a slice — accumulate_prb_mode indexes product_d
-        # with the global point index (start + z); see _accumulate_obj_single.
-        psi = self.product_d.reshape(
-            self.num_points_l * mp * mo, self.nx_prb, self.ny_prb
-        )
-        args = (
-            self.obj_norm_d,
-            self.prb_upd_d,
-            self.obj_sqr_d,
-            self.obj_conj_d,
-            psi,
-            self.point_info_d,
-            cp.uint32(self.nx_prb),
-            cp.uint32(self.ny_prb),
-            cp.uint32(self.nx_obj),
-            cp.uint32(self.ny_obj),
-            cp.uint32(start_point),
-            cp.uint32(batch_size),
-        )
-        self.kernel_accumulate_prb_mode(grid, block, args)
-
-    def _gather_prb(self):
-        """Single-rank flavour of ``gather_prb_gpu`` (grad_upd path)."""
-        from ptycho.cupy_util import copy_to_pinned, copy_from_pinned
-
-        copy_to_pinned(self.obj_norm_d, self.obj_norm_l, self.obj_norm_d.nbytes)
-        copy_to_pinned(self.prb_upd_d, self.prb_update_l, self.prb_upd_d.nbytes)
-
-        # ML_grad grad_upd path: prb_mode += prb_update_l / obj_norm_l (not the
-        # DM-style replace). obj_norm_l >= alpha > 0 over the probe window, so no
-        # divide-by-zero guard is needed here.
-        self.prb_mode += self.prb_update_l / self.obj_norm_l
-
-        copy_from_pinned(self.prb_mode, self.prb_d, self.prb_mode.nbytes)
 
     def _update_mmap(self, it):
         """Snapshot the current probe/object into the mmap numpy buffers.
