@@ -611,7 +611,7 @@ starts, the JSON is serialised to an INI file with a single `[GUI]` section.
 | `x_direction`, `y_direction` | float (str) | Sign convention for scan axes (`1.0` or `-1.0`). Applies to the shared positions stream (`positions_um` / ViT mosaic) and is the default for the iterative engine. |
 | `x_direction_iterative`, `y_direction_iterative` | float (str) | (Optional) Iterative-engine-only sign override (`1.0`/`-1.0`) for the `point_info` stream. Unset = follow `x_direction`/`y_direction`. The ViT positions stream is never affected. CLI: `--x-direction-iterative` / `--y-direction-iterative`. |
 | `dp_orient` | str | Shared D4 on the model-input branch. **Default `identity`** (the frame is already global after `detector_orientation`; autodetect OFF). `"auto"` = opt in to the runtime ViT orientation-autodetect sweep. Any other D4 name = pinned. CLI: `--dp-orient`. |
-| `dp_orient_iterative` | str | (Optional) Iterative-engine-only absolute D4 orientation for the diffraction input — one name or a comma-separated sequence (reduced to one element; D4 is closed). **Unset = disabled**: the engine follows the shared `dp_orient` (including autodetect updates when `dp_orient="auto"`). Requires even `nx`/`ny`. CLI: `--dp-orient-iterative`. Offline validation found no rotation is needed — leave unset; see the engine-conventions section. |
+| `dp_orient_iterative` | str | Iterative-engine-only absolute D4 orientation for the diffraction input — one name or a comma-separated sequence (reduced to one element; D4 is closed). **Default `rot90_cw`** — restores holoscan-framework's hardcoded `np.rot90(amplitude, axes=(2,1))` on the engine DP; without it the reconstructed object **phase is wrong** (amplitude still reconstructs). Pass `identity` to disable and follow the shared `dp_orient` (including autodetect when `dp_orient="auto"`). Requires even `nx`/`ny`. CLI: `--dp-orient-iterative`. See the engine-conventions section. |
 | `max_iterations` | int (str) | (Optional) Safety cap on total iterative-engine iterations. **Default effectively unlimited** — the run ends when data collection completes (+30 refinement iterations). `n_iterations` is NOT the run length: it only sizes the in-RAM snapshot ring buffers. `replay_from_tiled` defaults this to 200 for quick validation runs. CLI: `--max-iterations`. |
 | `prb_path` + `init_prb_flag` | str + bool (str) | (Optional) Warm-start the iterative engine's probe from a `.npy` file (a probe from a prior recon, `(modes, nx, ny)` or `(nx, ny)` complex, matching `nx`/`ny`). Set `init_prb_flag=False` + `prb_path` (CLI: `--probe-path` sets both). Unset = probe-from-diff cold start. The path must be readable by the pipeline process. |
 | `z_m` | float (str) | Sample z position in m |
@@ -962,7 +962,7 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
     in place — `ImagePreprocessorOp` buffers pre-D4 frames for it (capped
     256). Engines without a baked probe keep the seed (`identity`). Any other
     D4 name pins that fixed orientation (sweep off). CLI: `--dp-orient`.
-  * `dp_orient_iterative` (default unset = disabled) — iterative-engine-only
+  * `dp_orient_iterative` (**default `rot90_cw`**) — iterative-engine-only
     **absolute** D4 orientation. `ImagePreprocessorOp` stamps each batch with
     the `dp_orient` it was produced with; `ImageSendOp` composes the inverse of
     that stamp with this target before the GPU copy, so the engine receives
@@ -972,8 +972,10 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
     ViT branch is never touched. Accepts one D4 name or a comma-separated
     sequence (`rot90_cw,fliplr`), reduced to a single element. Even `nx`/`ny`
     required (the relative D4 is applied post-fftshift, which only commutes
-    for even dims). **Offline validation found NO engine rotation is needed**
-    — the DP and positions are both already in the global frame; leave unset.
+    for even dims). **`rot90_cw` restores holoscan-framework's hardcoded
+    `np.rot90(axes=(2,1))` on the engine DP** — the live pipeline split that
+    into configurable knobs and the iterative copy lost it, leaving the
+    reconstructed phase wrong. Pass `identity` to disable.
 
 * **Iterative engine data conventions (`ImageSendOp` → `StreamingRecon`).**
   Offline-validated on the full 40k-frame scan 411993 (warm AND cold-start
@@ -988,9 +990,13 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
     objects, intermittent NaN). The probe is real-space and is NOT shifted
     (a centered probe in the array is correct — `initial_probe`'s trailing
     `fftshift` exists precisely to center it).
-  * **Orientation**: `dp_orient_iterative` stays unset (identity). The DP is
-    already global after `detector_orientation`; an empirically-found D4
-    here is a symptom of a position-side convention error, not a real knob.
+  * **Orientation**: `dp_orient_iterative` defaults to `rot90_cw` —
+    holoscan-framework's hardcoded `np.rot90(amplitude, axes=(2,1))` on every
+    engine DP, which the live pipeline's configurable-orientation refactor
+    dropped. The earlier "no rotation needed" conclusion was wrong: DM was too
+    blobby to reveal the phase, so the missing 90° rotation only showed once
+    the ML_grad engine produced a clean phase (correct amplitude, ramped/wrong
+    phase). Restored as the default; pass `identity` to disable.
   * **Position signs**: the engine needs the x (fast-axis) position sign
     FLIPPED relative to the shared config (`x_direction_iterative = +1.0`
     against the shared `x_direction = -1.0`). With the wrong parity the

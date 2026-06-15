@@ -737,13 +737,16 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     )
     recon.add_argument(
         "--dp-orient-iterative",
-        default=None,
+        default="rot90_cw",
         help="Iterative-engine-only diffraction orientation: one D4 name "
         "(identity, fliplr, flipud, rot180, transpose, rot90_ccw, rot90_cw, "
         "antitranspose) or a comma-separated sequence applied left to right "
         "(e.g. 'rot90_cw,fliplr' — D4 is closed, so it reduces to a single "
-        "element). Unset = the engine follows the shared dp_orient, including "
-        "orientation-autodetect updates. The ViT branch is never affected.",
+        "element). Default 'rot90_cw' restores holoscan-framework's hardcoded "
+        "np.rot90(axes=(2,1)) on the engine DP (the live pipeline split that "
+        "into configurable knobs and the iterative copy had lost it — without "
+        "it the reconstructed phase is wrong). Pass 'identity' to follow the "
+        "shared dp_orient / autodetect instead. The ViT branch is never affected.",
     )
     recon.add_argument(
         "--x-direction-iterative",
@@ -931,10 +934,11 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     if args.probe_path is not None:
         config["prb_path"] = str(args.probe_path)
         config["init_prb_flag"] = "False"
-    # Iterative-only orientation/direction overrides: emitted ONLY when set.
-    # An absent dp_orient_iterative key disables the feature entirely (the
-    # engine then follows the shared dp_orient + autodetect); emitting a
-    # fallback value here would freeze the engine to the config orientation.
+    # Iterative-only orientation/direction overrides.
+    # dp_orient_iterative defaults to 'rot90_cw' (holoscan-framework's hardcoded
+    # engine-DP rotation); emitted so the iterative engine is pinned to it and
+    # the reconstructed phase is correct. Pass --dp-orient-iterative identity to
+    # disable and follow the shared dp_orient + autodetect instead.
     if args.dp_orient_iterative is not None:
         config["dp_orient_iterative"] = str(args.dp_orient_iterative)
     if args.x_direction_iterative is not None:

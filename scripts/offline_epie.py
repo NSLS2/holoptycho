@@ -71,6 +71,15 @@ def parse_args():
     p.add_argument("--update-probe", action="store_true",
                    help="enable ePIE probe updates (default: frozen probe)")
     p.add_argument("--beta-prb", type=float, default=0.8, help="ePIE probe step")
+    p.add_argument("--algo", default="epie", choices=["epie", "ml"],
+                   help="reconstruction algorithm: epie (sequential, default) or "
+                   "ml (maximum-likelihood gradient — the beamline/recon_ml_trans "
+                   "method, simultaneous object update). Validates the ML algorithm "
+                   "before porting it into streaming_recon.")
+    p.add_argument("--ml-mode", default="Poisson", choices=["Poisson", "Gaussian"])
+    p.add_argument("--ml-weight", type=float, default=0.1)
+    p.add_argument("--ml-alpha", type=float, default=1e-3,
+                   help="prb_norm regularization seed for the ML object divide")
     p.add_argument("--hot-pixel-threshold", type=float, default=50000.0)
     p.add_argument("--lambda-nm", type=float, default=0.137146014993)
     p.add_argument("--z-m", type=float, default=2.0500008)
@@ -248,6 +257,51 @@ def main():
 
     obj = cp.ones((H, W), dtype=cp.complex64)
     prb_max2 = float(cp.max(cp.abs(prb) ** 2))
+
+    if args.algo == "ml":
+        # Maximum-likelihood gradient (recon_ml_trans_gpu): simultaneous update.
+        # Each iteration: with the CURRENT object fixed, compute every frame's
+        # likelihood-optimal exit wave, accumulate conj(prb)*psi into obj_upd
+        # and |prb|^2 into prb_norm, then replace obj = obj_upd / prb_norm.
+        prb_sqr = cp.abs(prb) ** 2
+        prb_conj = cp.conj(prb)
+        diff_max = float(np.asarray(work).max())   # max amplitude across scan
+        w_pois = 25.0 / diff_max
+        for ep in range(args.epochs):
+            obj_upd = cp.zeros((H, W), dtype=cp.complex64)
+            prb_norm = cp.full((H, W), args.ml_alpha, dtype=cp.float32)
+            err = 0.0
+            for i in range(n):
+                dk = cp.asarray(work[i]).astype(cp.float32)
+                a, b = int(rr[i]), int(rr[i]) + npix
+                c, d = int(cc[i]), int(cc[i]) + npix
+                psi = prb * obj[a:b, c:d]
+                PSI = cp.fft.fft2(psi, norm="ortho")
+                aPSI = cp.abs(PSI)
+                err += float(cp.sum((aPSI - dk) ** 2))
+                if args.ml_mode == "Poisson":
+                    sol = (-w_pois + cp.sqrt(w_pois**2 + 4.0 * (dk**2 + w_pois * aPSI))) / 2.0
+                    v = sol * cp.exp(1j * cp.angle(PSI))
+                else:  # Gaussian
+                    di = dk**2
+                    A = -3.0 * (di + 1e-9)
+                    B = 2.0 * di - 0.5 * args.ml_weight * aPSI * dk - args.ml_weight
+                    C = -args.ml_weight * aPSI * dk + args.ml_weight * di
+                    sol = (-B + cp.sqrt(B**2 - 4.0 * A * C)) / (2.0 * A)
+                    v = (dk * cp.sqrt(1.0 + sol)) * cp.exp(1j * cp.angle(PSI))
+                psi_new = cp.fft.ifft2(v, norm="ortho")
+                obj_upd[a:b, c:d] += prb_conj * psi_new
+                prb_norm[a:b, c:d] += prb_sqr
+            obj = obj_upd / prb_norm
+            print(f"iter {ep}: err/frame {err/n:.0f}", flush=True)
+            if (ep + 1) % args.snapshot_every == 0:
+                save_png(cp.asnumpy(obj), cp.asnumpy(prb), f"ep{ep+1:03d}")
+        o = cp.asnumpy(obj)
+        np.save(os.path.join(args.cache_dir, "ml_object.npy"), o)
+        save_png(o, cp.asnumpy(prb), "final")
+        print("ML done")
+        return
+
     for ep in range(args.epochs):
         err = 0.0
         for i in range(n):

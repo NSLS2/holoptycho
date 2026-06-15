@@ -234,11 +234,13 @@ the config the replay script POSTs to holoptycho):
   — give the **iterative engine** its own diffraction orientation (one D4 name
   or a comma-separated sequence, e.g. `rot90_cw,fliplr`) and scan-axis sign
   conventions, independent of the ViT/AI branch (which keeps `dp_orient` /
-  `x_direction` / `y_direction`). **Unset by default = identical behavior to
-  before.** Demo flexibility for when the two recons disagree about input
-  orientation on live data; once the right values are known, bake them into the
-  config defaults. Note: setting `--dp-orient-iterative` freezes the engine to
-  that value (it follows the shared `dp_orient` when unset).
+  `x_direction` / `y_direction`). **`--dp-orient-iterative` defaults to
+  `rot90_cw`** — holoscan-framework's hardcoded engine-DP `np.rot90(axes=(2,1))`,
+  which the live pipeline's configurable-orientation refactor dropped; without
+  it the reconstructed object phase is wrong. Pass `identity` to disable and
+  follow the shared `dp_orient`. The `x`/`y_direction_iterative` overrides stay
+  unset by default. Note: setting `--dp-orient-iterative` to a value freezes the
+  engine to that orientation.
 
 ### Best practices
 

@@ -332,13 +332,9 @@ class PtychoRecon(Operator):
             # disables it outright (the replay does).
             if self.clear_region_enabled and np.ceil(self.recon.x_range_um*1e-6/self.recon.x_pixel_m)*np.ceil(self.recon.y_range_um*1e-6/self.recon.x_pixel_m)/self.points_total > 16:
                 self.recon.clear_region(self.recon.num_points_recon, ready_num)
-            # Initialize the DM dual state (product = prb * obj at the point's
-            # window) for the newly activated points. product_d is otherwise
-            # only initialized once at iteration 0 — when most points haven't
-            # arrived and their windows were zeros — leaving every
-            # later-arriving point with a stale dual for its whole life and
-            # wrecking the streaming reconstruction.
-            self.recon.init_product_range(self.recon.num_points_recon, ready_num)
+            # ML_grad recomputes product_d from the current probe/object every
+            # batch (no running dual state), so newly activated points need no
+            # product initialisation here — matches holoscan-framework.
             self.recon.num_points_recon = ready_num
             if ready_num > np.minimum(self.recon.num_points_l,self.points_total)*0.97:
                 self.it_last_update = self.it
