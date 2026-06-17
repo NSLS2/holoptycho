@@ -716,6 +716,18 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         "for quick validation runs.",
     )
     recon.add_argument(
+        "--live-num-points-max",
+        type=int,
+        default=None,
+        help="Max number of scan points the iterative engine pre-allocates GPU "
+        "buffers for (sets live_num_points_max). The recon is hard-clamped to "
+        "this, so it bounds how many frames are reconstructed. Unset (default) "
+        "= the full scan (nz = x_num * y_num), so the whole scan is covered. "
+        "The pipeline's own fallback when the key is absent is only 8192, which "
+        "silently truncates large scans to a section. Lower this to cap GPU "
+        "memory on big scans.",
+    )
+    recon.add_argument(
         "--probe-path",
         default=None,
         help="Warm-start the iterative engine's probe from this .npy file "
@@ -855,6 +867,12 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     roi_passed = args.batch_x0 is not None and args.batch_y0 is not None
     auto_center = bool(args.auto_center_dp or not roi_passed)
 
+    nz = int(config["x_num"]) * int(config["y_num"])
+    # Pre-allocate iterative-engine GPU buffers for the full scan by default so
+    # the recon covers every frame. The pipeline's absent-key fallback is only
+    # 8192, which silently truncates large scans to a section.
+    live_num_points_max = args.live_num_points_max or nz
+
     config.update(
         {
             # Provenance for the per-run Tiled container metadata.
@@ -875,9 +893,10 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
             "y_direction": str(args.y_direction if args.y_direction is not None else config.get("y_direction", "-1.0")),
             "gpu_batch_size": str(args.gpu_batch_size),
             "distance": str(args.distance),
-            "nz": str(int(config["x_num"]) * int(config["y_num"])),
+            "nz": str(nz),
             "x_arr_size": config["x_num"],
             "y_arr_size": config["y_num"],
+            "live_num_points_max": str(live_num_points_max),
             "alg_flag": args.alg_flag,
             "alg2_flag": args.alg_flag,
             "alg_percentage": "0.5",
