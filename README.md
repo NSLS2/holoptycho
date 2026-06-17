@@ -277,30 +277,59 @@ the config the replay script POSTs to holoptycho):
 
 ## Development container
 
-On hosts with a glibc too old to run the pixi env directly (e.g. older RHEL), use [`start_editable.sh`](start_editable.sh) to drop into a minimal CUDA+pixi container with the repo bind-mounted. Edit, commit, and push from the host as normal; only run code inside the container.
+On hosts with a glibc too old to run the pixi env directly (e.g. older RHEL), use [`start_editable.sh`](start_editable.sh) to drop into a minimal CUDA+pixi container with the repo bind-mounted. Edit, commit, and push from the host as normal; only run code inside the container. This is the path to use when you need to run **patched pipeline code** (e.g. `holoptycho/*.py`) without rebuilding and redeploying the production image — the repo is mounted live at `/app`, and the pipeline runs as an editable install from there.
+
+### Prerequisites (one-time)
+
+- **`az login` on the host.** `start_editable.sh` resolves all Azure secrets at launch via the `az` CLI (service-principal cert, and the `ptychoml` deploy key) and injects them into the container. Your host account needs read access to the `genesisdemoskv` Key Vault.
+- **The `ptychoml` deploy key must be in Key Vault.** `pixi install` clones the **private** `NSLS2/ptychoml` repo over `git+ssh`. Since no SSH keys are kept on the dev host, the script pulls a deploy key from the KV secret `holoptycho-ptycho-deploy-key` (stored **base64-encoded**), loads it into a throwaway `ssh-agent`, and forwards the agent into the container. To (re)store it:
+
+  ```bash
+  # generate a read-only deploy key, register the .pub on NSLS2/ptychoml's
+  # "Deploy keys", then store the private half base64-encoded:
+  az keyvault secret set --vault-name genesisdemoskv \
+    --name holoptycho-ptycho-deploy-key \
+    --value "$(base64 -w0 < deploy_key)"     # macOS: drop -w0
+  ```
+
+  If the secret is missing, the script warns and `pixi install` will fail to fetch `ptychoml`.
+
+### Launch
 
 ```bash
 ./start_editable.sh
 ```
 
-The first run builds a small `cuda-dev` image (nvidia/cuda runtime + pixi) — about a minute. Subsequent runs reuse it. Inside the shell:
+The first run builds a small `cuda-dev` image (nvidia/cuda runtime + pixi + `git`/`openssh-client`) — about a minute. Subsequent runs reuse it; after editing the image's `Dockerfile` block, force a rebuild with `podman rmi cuda-dev` first. Inside the shell:
 
 ```bash
 pixi install                                                              # first time / after pixi.lock changes
-pixi run tiled profile create https://tiled.nsls2.bnl.gov --name nsls2    # once per dev shell
+pixi run tiled profile create https://tiled.nsls2.bnl.gov --name nsls2    # once per dev shell (HOME=/tmp is ephemeral)
 pixi run tiled login --profile nsls2
-export ENGINE_CACHE_DIR=/tmp/models
+export ENGINE_CACHE_DIR=/tmp/models && mkdir -p /tmp/models
 pixi run api
 ```
 
+Then drive it from the host as usual — e.g. `pixi run -e client hp ...` and `pixi run -e replay replay ...` (the `client`/`replay` envs run fine on the host; only the GPU `api` needs the container).
+
 Why this works:
-- `--network host` so the holoscan app reaches host services (Azure ML / MLflow, Tiled, ZMQ streams) as if it were running on the host.
+- `--network host` so the holoscan app reaches host services (Azure ML / MLflow, Tiled, ZMQ streams) as if it were running on the host, and `hp`/replay on the host reach the `api` at `localhost:8000`.
 - The whole repo (incl. `.pixi/`) is bind-mounted at `/app`, so host-side edits show up inside immediately.
-- `HOME=/tmp` keeps caches and tiled tokens out of the mounted repo; they die with `--rm`.
-- Azure secrets are piped via `--env-file <(...)` — an in-kernel FIFO — so they never touch disk and don't appear in `ps`.
+- `HOME=/tmp` keeps caches and tiled tokens out of the mounted repo; they die with `--rm`. (This is also why the `nsls2` tiled profile must be re-created each shell.)
+- Azure secrets and the deploy key are piped via `--env-file <(...)` / loaded into an `ssh-agent` — they never touch disk and don't appear in `ps`. The agent is killed on exit via a `trap`.
 - Tiled uses your personal identity (via `tiled login`) instead of a shared `TILED_API_KEY`, so you get the right access scope and a real audit trail.
 
 Always run `pixi install` **inside** the dev container, never on the host — that way the env's binaries link against the container's glibc, which is what they run against in production. If you previously ran `pixi install` on the host, delete `.pixi/` and re-install inside the container the first time so nothing is stale.
+
+### Rootless podman notes
+
+On Slurm compute nodes where `docker` is rootless **podman**, `start_editable.sh` already handles the usual friction so you shouldn't have to: it fully-qualifies the base image (`docker.io/...`), uses `--cgroup-manager=cgroupfs` (no systemd user session is required), disables apt's sandbox user during the image build, and drops `--user` (rootless podman maps container-root to your host user, so files written to the mounted repo stay owned by you). If a build still fails with `Interactive authentication required` you can enable a persistent user session once with `loginctl enable-linger $(id -u)`.
+
+### Troubleshooting
+
+- **`pixi install` fails to clone `ptychoml` (`Permission denied (publickey)`)** — the KV deploy key is missing, not registered on `NSLS2/ptychoml`, or stored without base64. Re-store it (see Prerequisites) and verify it round-trips: `az keyvault secret show --vault-name genesisdemoskv --name holoptycho-ptycho-deploy-key --query value -o tsv | base64 -d | ssh-keygen -yf /dev/stdin`.
+- **`Git executable not found`** — the cached `cuda-dev` image predates the `git` addition; rebuild with `podman rmi cuda-dev && ./start_editable.sh`.
+- **`tiled login` says profile `nsls2` not found** — `HOME=/tmp` is ephemeral, so run `tiled profile create ... --name nsls2` again in each new shell before `tiled login`.
 
 ---
 
