@@ -44,6 +44,24 @@ RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=r
 EOF
 fi
 
+# --- Load the private ptychoml deploy key into an ssh-agent ----------------
+# `pixi install` clones the private NSLS2/ptychoml repo over git+ssh. No SSH
+# keys are kept on the dev host, so the deploy key lives in Key Vault. Start an
+# agent, load the key from KV via stdin (never touches disk), and forward the
+# agent socket into the container. Store the key base64-encoded:
+#   az keyvault secret set --vault-name genesisdemoskv \
+#     --name holoptycho-ptycho-deploy-key --value "$(base64 -w0 < deploy_key)"
+DEPLOY_KEY_B64="$(az keyvault secret show --vault-name genesisdemoskv \
+  --name holoptycho-ptycho-deploy-key --query value -o tsv 2>/dev/null || true)"
+if [ -n "$DEPLOY_KEY_B64" ]; then
+  eval "$(ssh-agent -s)" >/dev/null
+  trap 'ssh-agent -k >/dev/null 2>&1' EXIT
+  printf '%s' "$DEPLOY_KEY_B64" | base64 -d | ssh-add - >/dev/null 2>&1 \
+    || echo "WARN: failed to load ptychoml deploy key from Key Vault" >&2
+else
+  echo "WARN: secret holoptycho-ptycho-deploy-key not in Key Vault — pixi install may fail to clone the private ptychoml repo" >&2
+fi
+
 # --- Run the dev shell ----------------------------------------------------
 # --network host
 #     The holoscan app reaches host services (Azure ML / MLflow, Tiled,
@@ -65,7 +83,6 @@ fi
 #     inside the container so each developer auths with their own identity.
 docker run --rm -it --cgroup-manager=cgroupfs --gpus all --shm-size=32g --network host \
   -v "$REPO_DIR":/app -e HOME=/tmp -w /app \
-  -v "$HOME/.ssh":/tmp/.ssh:ro \
   ${SSH_AUTH_SOCK:+-v $SSH_AUTH_SOCK:/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent} \
   --env-file <(cat <<EOF
 AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)
@@ -77,5 +94,6 @@ AZURE_ML_WORKSPACE=genesis-mlw
 TILED_BASE_URL=https://tiled.nsls2.bnl.gov
 SERVER_STREAM_SOURCE=tcp://localhost:5555
 PANDA_STREAM_SOURCE=tcp://localhost:5556
+GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 EOF
 ) "$DEV_IMAGE" bash
