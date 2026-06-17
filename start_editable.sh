@@ -35,10 +35,10 @@ chmod 700 "$XDG_RUNTIME_DIR"
 # in here, so it's reusable across any pixi/CUDA project.
 if ! docker image inspect "$DEV_IMAGE" >/dev/null 2>&1; then
   echo "Building $DEV_IMAGE..."
-  docker build -t "$DEV_IMAGE" - <<'EOF'
-FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgl1 curl ca-certificates && \
+  docker build --cgroup-manager=cgroupfs -t "$DEV_IMAGE" - <<'EOF'
+FROM docker.io/nvidia/cuda:12.8.1-runtime-ubuntu22.04
+RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
+      libgl1 curl ca-certificates git openssh-client && \
     rm -rf /var/lib/apt/lists/* && \
     curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/usr/local bash
 EOF
@@ -63,8 +63,10 @@ fi
 #     disk and don't appear in ps. Re-pulled fresh from Azure each run.
 #     TILED_API_KEY is intentionally omitted: use `pixi run tiled login`
 #     inside the container so each developer auths with their own identity.
-docker run --rm -it --gpus all --shm-size=32g --network host \
-  --user "$(id -u):$(id -g)" -v "$REPO_DIR":/app -e HOME=/tmp -w /app \
+docker run --rm -it --cgroup-manager=cgroupfs --gpus all --shm-size=32g --network host \
+  -v "$REPO_DIR":/app -e HOME=/tmp -w /app \
+  -v "$HOME/.ssh":/tmp/.ssh:ro \
+  ${SSH_AUTH_SOCK:+-v $SSH_AUTH_SOCK:/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent} \
   --env-file <(cat <<EOF
 AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)
 AZURE_CLIENT_ID=$(az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv)
