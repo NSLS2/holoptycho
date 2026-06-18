@@ -757,10 +757,7 @@ class PtychoApp(Application):
         # auto_center_dp (lossless centered crop) is wired into ImageBatchOp
         # after its ROI is set below.
         # Geometry + normalization for the two output branches. See
-        # ImagePreprocessorOp docstrings for what each does. ``fftshift_dp``
-        # defaults to None so ptychoml's auto-detector picks the right DC
-        # convention per batch; override via the scan JSON only when a
-        # specific dataset misbehaves.
+        # ImagePreprocessorOp docstrings for what each does.
         self.image_proc.tap_orient = str(getattr(self.param, "tap_orient", "antitranspose"))
         # dp_orient: D4 aligning the (global) diffraction frame to the model /
         # scan convention. The frame is already global after
@@ -777,10 +774,6 @@ class PtychoApp(Application):
                 f"dp_orient must be 'auto' or one of {D4_NAMES}; got {_dp_orient_cfg!r}"
             )
         self.image_proc.dp_orient = _dp_orient_cfg
-        _fftshift_dp = getattr(self.param, "fftshift_dp", None)
-        self.image_proc.fftshift_dp = (
-            bool(_fftshift_dp) if _fftshift_dp is not None else None
-        )
         # Per-scan ViT normalization: the max intensity across all DPs in
         # this scan, with hot pixels excluded. In live mode we don't have
         # the full DP stack to compute it from, so it must come from the
@@ -1050,22 +1043,18 @@ class PtychoApp(Application):
         # Prefer a second GPU for PyCUDA/TRT when available, but fall back to
         # the recon GPU on single-GPU nodes instead of hard-failing.
         vit_gpu = self.param.gpus[1] if len(self.param.gpus) > 1 else self.param.gpus[0]
-        # DC-convention handling is auto-detected end-to-end by ptychoml
-        # (ImagePreprocessorOp's preprocess_diffraction centers the beam, and
-        # the session's own detect_dc_at_corner check verifies it), so no
-        # manual fftshift flag is needed here — leave fftshift at its default
-        # None.
-        #
         # Orientation auto-detect wiring: the op runs ptychoml.autodetect_
         # orientation on the first batch with enough finite positions, then
         # sets image_proc.dp_orient. preprocess_kwargs mirrors the live
         # preprocessing so the sweep scores under the same normalization/scale/
         # hot-pixel/fftshift settings (dp_orient excluded — it's the sweep var).
+        # fftshift is forced False to match the inference branch — the ViT
+        # expects un-shifted diffraction.
         _preprocess_kwargs = {
             "normalization": float(self.image_proc.normalization),
             "scale": float(self.image_proc.scale),
             "hot_pixel_count_threshold": self.image_proc.hot_pixel_count_threshold,
-            "fftshift": self.image_proc.fftshift_dp,
+            "fftshift": False,
         }
         self.vit = PtychoViTInferenceOp(
             self,
