@@ -296,16 +296,13 @@ class ImagePreprocessorOp(Operator):
         #               coordinate system (detector_orientation). Set
         #               dp_orient='auto' in the config to opt in to the ViT
         #               orientation-autodetect sweep, which overwrites this.
-        #   fftshift_dp: model-input DC-convention control. ``None``
-        #               (default) lets ptychoml auto-detect via
-        #               ``detect_dc_at_corner`` and shift only when the
-        #               central beam is at the corners. Override with
-        #               ``True``/``False`` from the scan config if a
-        #               specific dataset misbehaves; otherwise leave alone.
-        # All three are settable from the scan config; see ptycho_holo.py.
+        # Both are settable from the scan config; see ptycho_holo.py.
+        #
+        # fftshift is intentionally NOT a knob: the model-input branch is always
+        # built with fftshift=False — the ViT expects un-shifted diffraction, so
+        # ptychoml's DC auto-detect must not be allowed to shift inference DPs.
         self.tap_orient = 'antitranspose'
         self.dp_orient = 'identity'
-        self.fftshift_dp: bool | None = None
         # Intensity normalization passed straight through to
         # ptychoml.preprocess_diffraction so each DP gets scaled by the
         # same constant the offline pipeline used. ``normalization`` is the
@@ -396,13 +393,13 @@ class ImagePreprocessorOp(Operator):
         tap = np.ascontiguousarray(apply_d4(processed_images, self.tap_orient))
         op_output.emit(tap, "intensity")
 
-        # Model branch: delegate the entire normalize → mask → sqrt → D4 →
-        # fftshift sequence to ptychoml.preprocess_diffraction. Bad pixels
-        # are already inpainted above; the intensity floor (low-threshold)
-        # stays a holoptycho-side knob applied before the call because
-        # preprocess_diffraction doesn't expose it. fftshift=None (the
-        # default for this op) lets ptychoml auto-detect the central beam
-        # position and shift only when needed.
+        # Model branch: delegate the entire normalize → mask → sqrt → D4
+        # sequence to ptychoml.preprocess_diffraction. Bad pixels are already
+        # inpainted above; the intensity floor (low-threshold) stays a
+        # holoptycho-side knob applied before the call because
+        # preprocess_diffraction doesn't expose it. fftshift is forced False —
+        # the ViT expects un-shifted diffraction, so we never let ptychoml's
+        # DC auto-detect shift the inference DPs.
         if self.detmap_threshold > 0:
             apply_intensity_floor(processed_images, self.detmap_threshold)
         # Snapshot dp_orient once so the preprocess call and the stamp emitted
@@ -414,7 +411,7 @@ class ImagePreprocessorOp(Operator):
             scale=self.scale,
             hot_pixel_count_threshold=self.hot_pixel_count_threshold,
             dp_orient=dp_orient,
-            fftshift=self.fftshift_dp,
+            fftshift=False,
         )
 
         op_output.emit(diff_amp, "diff_amp")
