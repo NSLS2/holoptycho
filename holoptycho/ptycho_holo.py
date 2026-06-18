@@ -925,15 +925,6 @@ class PtychoApp(Application):
             if self.pty.num_points_min < self.pty.recon.gpu_batch_size:
                 self.pty.num_points_min = self.pty.recon.gpu_batch_size
             self.pty.probe_initialized = False
-            # config_ops() (called above) set point_proc.obj_nx_limit from the
-            # gpu_setup over-allocation (max(required, nx*8)), but reset_for_scan
-            # just shrank recon.nx_obj/ny_obj to the actual per-scan object size.
-            # Re-sync so PointProcessorOp centers the scan and clamps OOB windows
-            # against the REAL object dims; otherwise the centering margin is
-            # computed against the larger buffer and the reconstruction is
-            # offset on the canvas (e.g. 452 px instead of obj_pad//2).
-            self.point_proc.obj_nx_limit = int(self.pty.recon.nx_obj)
-            self.point_proc.obj_ny_limit = int(self.pty.recon.ny_obj)
 
         # Override the positions_um buffer that config_ops sized to
         # `pty.recon.num_points` (the recon engine's max-points cap, default
