@@ -1109,6 +1109,11 @@ class PtychoApp(Application):
                         "inner_crop=%d derived from probe in %s",
                         _inner_crop, _onnx_path.name,
                     )
+        # Pixels trimmed off each mosaic edge before writing to Tiled, to drop
+        # the low-overlap artifact ring. Optional; None lets SaveViTResult
+        # default it to half the model patch dimension (e.g. 128 for 256).
+        _edge_trim_cfg = getattr(self.param, "mosaic_edge_trim", None)
+        _edge_trim = int(_edge_trim_cfg) if _edge_trim_cfg is not None else None
         self.vit_save = SaveViTResult(
             self,
             positions_provider=lambda: self.point_proc.positions_um,
@@ -1122,6 +1127,7 @@ class PtychoApp(Application):
             min_overlap_count=_min_overlap,
             patch_flip=_patch_flip,
             inner_crop=_inner_crop,
+            edge_trim=_edge_trim,
             enable_batch_writes=enable_batch_writes,
             name="vit_save",
         )

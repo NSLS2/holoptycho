@@ -809,6 +809,17 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--mosaic-edge-trim",
+        type=int,
+        default=None,
+        help=(
+            "Pixels to trim off each edge of the ViT mosaic before it is "
+            "written to Tiled, dropping the low-overlap/artifact border ring. "
+            "Optional; default (unset) = half the model patch dimension "
+            "(e.g. 128 for a 256-px model). Pass 0 to disable trimming."
+        ),
+    )
+    recon.add_argument(
         "--distance", type=float, default=0.5, help="Sample-to-detector distance in m"
     )
     recon.add_argument("--alg-flag", default="ML_grad")
@@ -912,6 +923,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_overshoot_factor"] = str(args.overshoot_factor)
     if args.min_overlap_count is not None:
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
+    if args.mosaic_edge_trim is not None:
+        config["mosaic_edge_trim"] = str(args.mosaic_edge_trim)
     if args.auto_center_headroom is not None:
         config["auto_center_headroom"] = str(int(args.auto_center_headroom))
     elif auto_center and not roi_passed:

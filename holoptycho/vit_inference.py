@@ -383,6 +383,7 @@ class SaveViTResult(Operator):
         y_range_um: float | None = None,
         inner_crop: int | None = None,
         canvas_pad: int = 0,
+        edge_trim: int | None = None,
         min_overlap_count: float = 0.5,
         phase_channel_index: int = 1,
         overshoot_factor: float = 1.0,
@@ -420,6 +421,11 @@ class SaveViTResult(Operator):
         self._y_range_um = y_range_um
         self._inner_crop = inner_crop
         self._canvas_pad = canvas_pad
+        # Pixels trimmed off each edge of the mosaic before it ships to Tiled,
+        # to drop the low-overlap/artifact border ring. None = auto = half the
+        # model patch dimension (resolved in _ensure_canvas once the patch size
+        # is known — e.g. 128 for a 256-px model).
+        self._edge_trim = edge_trim
         self._min_overlap_count = max(0.5, float(min_overlap_count))
         self._phase_channel_index = phase_channel_index
         self._overshoot_factor = overshoot_factor
@@ -491,6 +497,12 @@ class SaveViTResult(Operator):
             self._logger.info(
                 "Auto-derived inner_crop=%d for %dx%d ViT patches",
                 self._inner_crop, patch_h, patch_w,
+            )
+        if self._edge_trim is None:
+            self._edge_trim = patch_h // 2
+            self._logger.info(
+                "Auto-derived mosaic edge_trim=%d (half the %d-px patch)",
+                self._edge_trim, patch_h,
             )
         cropped_h = patch_h - 2 * self._inner_crop
         cropped_w = patch_w - 2 * self._inner_crop
@@ -765,12 +777,22 @@ class SaveViTResult(Operator):
         canvas_h, canvas_w = self._mosaic.shape
         py_min, py_max, px_min, px_max = _bbox
 
-        # Crop the canvas_pad border before handing off — the padding pixels
-        # are needed internally for FFT wrap-around safety but should not be
-        # shipped to Tiled (they'd show as a uniform median-fill border
-        # around the scan). Translate origin_um and bbox into cropped coords
+        # Crop the internal padding plus the configured edge trim before handing
+        # off. canvas_pad pixels are FFT wrap-around safety; edge_trim drops the
+        # low-overlap/artifact ring around the scan (default = half the patch).
+        # The full canvas is kept for stitching, so the cropped edge pixels
+        # still received contributions from patches just outside the crop — we
+        # simply don't ship the noisy border. Clamp so the cropped mosaic keeps
+        # a sane minimum size. Translate origin_um and bbox into cropped coords
         # so pixel↔position mapping stays correct on the dashboard side.
-        cp = self._canvas_pad
+        cp = self._canvas_pad + (self._edge_trim or 0)
+        max_cp = (min(canvas_h, canvas_w) - 2) // 2
+        if cp > max_cp:
+            self._logger.warning(
+                "ViT mosaic: canvas_pad+edge_trim=%d exceeds half the canvas "
+                "(%dx%d); clamping to %d.", cp, canvas_h, canvas_w, max(0, max_cp),
+            )
+            cp = max(0, max_cp)
         if cp > 0:
             cropped_h = canvas_h - 2 * cp
             cropped_w = canvas_w - 2 * cp
