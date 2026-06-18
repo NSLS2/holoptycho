@@ -62,6 +62,15 @@ else
   echo "WARN: secret holoptycho-ptycho-deploy-key not in Key Vault — pixi install may fail to clone the private ptychoml repo" >&2
 fi
 
+# --- Persistent engine cache ----------------------------------------------
+# Bind-mount /models (the ENGINE_CACHE_DIR default; same path the prod
+# container uses) so compiled TensorRT .engine files survive container
+# restarts instead of dying with the ephemeral /tmp. The model DB is kept
+# ephemeral (HOLOPTYCHO_DB_PATH=/tmp/...) so its "ready" state can't outlive
+# the cache and report a stale engine path — re-set the model each session
+# (instant: the engine is already cached, no recompile/Azure pull).
+mkdir -p "$HOME/.cache/holoptycho/models"
+
 # --- Run the dev shell ----------------------------------------------------
 # --network host
 #     The holoscan app reaches host services (Azure ML / MLflow, Tiled,
@@ -73,6 +82,9 @@ fi
 # -v "$REPO_DIR":/app
 #     The whole repo (incl. .pixi/) is mounted live. Host-side edits show
 #     up inside the container immediately.
+# -v "$HOME/.cache/holoptycho/models":/models
+#     Persistent TensorRT engine cache (ENGINE_CACHE_DIR), shared with prod,
+#     so compiled engines survive restarts.
 # -e HOME=/tmp
 #     Keeps ~/.cache/, ~/.config/, tiled tokens, etc. out of the mounted
 #     repo. Ephemeral — dies with --rm.
@@ -82,7 +94,7 @@ fi
 #     TILED_API_KEY is intentionally omitted: use `pixi run tiled login`
 #     inside the container so each developer auths with their own identity.
 docker run --rm -it --cgroup-manager=cgroupfs --gpus all --shm-size=32g --network host \
-  -v "$REPO_DIR":/app -e HOME=/tmp -w /app \
+  -v "$REPO_DIR":/app -v "$HOME/.cache/holoptycho/models":/models -e HOME=/tmp -w /app \
   ${SSH_AUTH_SOCK:+-v $SSH_AUTH_SOCK:/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent} \
   --env-file <(cat <<EOF
 AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)
@@ -94,6 +106,8 @@ AZURE_ML_WORKSPACE=genesis-mlw
 TILED_BASE_URL=https://tiled.nsls2.bnl.gov
 SERVER_STREAM_SOURCE=tcp://localhost:5555
 PANDA_STREAM_SOURCE=tcp://localhost:5556
+ENGINE_CACHE_DIR=/models
+HOLOPTYCHO_DB_PATH=/tmp/holoptycho.db
 GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 EOF
 ) "$DEV_IMAGE" bash

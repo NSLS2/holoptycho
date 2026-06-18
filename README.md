@@ -306,16 +306,22 @@ The first run builds a small `cuda-dev` image (nvidia/cuda runtime + pixi + `git
 pixi install                                                              # first time / after pixi.lock changes
 pixi run tiled profile create https://tiled.nsls2.bnl.gov --name nsls2    # once per dev shell (HOME=/tmp is ephemeral)
 pixi run tiled login --profile nsls2
-export ENGINE_CACHE_DIR=/tmp/models && mkdir -p /tmp/models
 pixi run api
 ```
 
-Then drive it from the host as usual — e.g. `pixi run -e client hp ...` and `pixi run -e replay replay ...` (the `client`/`replay` envs run fine on the host; only the GPU `api` needs the container).
+Then drive it from the host as usual — e.g. `pixi run -e client hp ...` and `pixi run -e replay replay ...` (the `client`/`replay` envs run fine on the host; only the GPU `api` needs the container). Because the model DB is ephemeral (see below), set the engine once per session from the host — instant, since the engine is cached in the mounted `/models`:
+
+```bash
+hp model set <model-name>    # e.g. model_405667_epoch025_onnx_wprobe
+hp model status
+```
 
 Why this works:
 - `--network host` so the holoscan app reaches host services (Azure ML / MLflow, Tiled, ZMQ streams) as if it were running on the host, and `hp`/replay on the host reach the `api` at `localhost:8000`.
 - The whole repo (incl. `.pixi/`) is bind-mounted at `/app`, so host-side edits show up inside immediately.
 - `HOME=/tmp` keeps caches and tiled tokens out of the mounted repo; they die with `--rm`. (This is also why the `nsls2` tiled profile must be re-created each shell.)
+- The engine cache is bind-mounted from `~/.cache/holoptycho/models` → `/models` (`ENGINE_CACHE_DIR`), so compiled TensorRT `.engine` files persist across container restarts (no recompile) and are shared with the prod container.
+- The model DB is ephemeral (`HOLOPTYCHO_DB_PATH=/tmp/holoptycho.db`), so model/run state resets each session and `hp model status` stays honest ("not set" until you set it) instead of pointing at an engine path that no longer exists. Re-set the model each session (instant, since the engine is cached).
 - Azure secrets and the deploy key are piped via `--env-file <(...)` / loaded into an `ssh-agent` — they never touch disk and don't appear in `ps`. The agent is killed on exit via a `trap`.
 - Tiled uses your personal identity (via `tiled login`) instead of a shared `TILED_API_KEY`, so you get the right access scope and a real audit trail.
 
