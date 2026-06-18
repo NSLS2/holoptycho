@@ -338,6 +338,11 @@ class ImagePreprocessorOp(Operator):
         spec.input("image_batch").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.input("image_indices_in").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.output("diff_amp")
+        # Separate RAW-amplitude output for the iterative engine (normalization=1,
+        # scale=1 => sqrt(intensity)). The ViT branch consumes the vit-normalized
+        # ``diff_amp``; the engine must NOT — its frozen warm-start probe has a
+        # fixed amplitude scale, so the ViT normalization collapses |object|.
+        spec.output("diff_amp_engine")
         spec.output("image_indices")
         # Detector-frame intensity tap, captured before rot90/fftshift/floor/sqrt.
         # Consumed only by FrameWriterOp when fine_tune writes are enabled.
@@ -413,6 +418,18 @@ class ImagePreprocessorOp(Operator):
         )
 
         op_output.emit(diff_amp, "diff_amp")
+        # Iterative-engine branch: feed RAW sqrt(intensity) (normalization=1,
+        # scale=1), matching the holoscan-framework split (a dedicated
+        # ``self.normalization = 1.0`` for the engine vs a separate
+        # ``vit_normalization`` for the model) and the offline_engine_test.py
+        # reference. ``normalization``/``scale`` are pure global scalars inside
+        # the sqrt, so recover the raw amplitude by rescaling ``diff_amp``
+        # (= sqrt((I/normalization)*scale)) rather than re-running the
+        # D4/fftshift: sqrt((I/n)*s) * sqrt(n/s) = sqrt(I). A frozen warm-start
+        # probe has a fixed scale, so feeding the ViT-normalized amplitude
+        # instead collapses |object|.
+        engine_amp = diff_amp * np.float32((self.normalization / self.scale) ** 0.5)
+        op_output.emit(engine_amp, "diff_amp_engine")
         op_output.emit(indices, "image_indices")
         op_output.emit(dp_orient, "dp_orient_used")
         self._diag_total_ms += (time.perf_counter() - t0) * 1000.0

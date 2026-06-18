@@ -1149,7 +1149,7 @@ class PtychoApp(Application):
         self.add_flow(self.eiger_zmq_rx, self.eiger_decompress, {("image_index_encoding", "image_index_encoding")})
         self.add_flow(self.eiger_decompress, self.image_batch, {("decompressed_image", "image"), ("image_index", "image_index")})
         self.add_flow(self.image_batch, self.image_proc, {("image_batch", "image_batch"), ("image_indices", "image_indices_in")})
-        self.add_flow(self.image_proc, self.image_send, {("diff_amp", "diff_amp"), ("image_indices", "image_indices"), ("dp_orient_used", "dp_orient_used")})
+        self.add_flow(self.image_proc, self.image_send, {("diff_amp_engine", "diff_amp"), ("image_indices", "image_indices"), ("dp_orient_used", "dp_orient_used")})
         # Tap detector-frame intensity (pre-rot/shift) into the Tiled
         # diffraction buffer. Always wired so the dashboard tile and
         # downstream ptycho-vit fine-tuning have the data on any run.
