@@ -757,8 +757,8 @@ class PtychoApp(Application):
         # auto_center_dp (lossless centered crop) is wired into ImageBatchOp
         # after its ROI is set below.
         # Geometry + normalization for the two output branches. See
-        # ImagePreprocessorOp docstrings for what each does.
-        self.image_proc.tap_orient = str(getattr(self.param, "tap_orient", "antitranspose"))
+        # ImagePreprocessorOp docstrings for what each does. The saved /dp tap
+        # follows dp_orient (no separate tap_orient knob).
         # dp_orient: D4 aligning the (global) diffraction frame to the model /
         # scan convention. The frame is already global after
         # detector_orientation, so the default is 'identity' — fully
