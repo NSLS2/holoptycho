@@ -385,7 +385,7 @@ class SaveViTResult(Operator):
         canvas_pad: int = 0,
         min_overlap_count: float = 0.5,
         phase_channel_index: int = 1,
-        overshoot_factor: float = 1.2,
+        overshoot_factor: float = 1.0,
         enable_batch_writes: bool = False,
         patch_flip: str = 'identity',
         **kwargs,
@@ -502,15 +502,16 @@ class SaveViTResult(Operator):
             self._stitch_enabled = False
             return False
 
-        # Pre-allocate the canvas large enough to hold the full scan including
-        # encoder overshoot on settling rows. Tiled does not allow node
-        # deletion via the writer client, so the canvas shape must be fixed
-        # for the lifetime of the run — we cannot grow.
+        # Pre-allocate the canvas to the commanded scan extent. Tiled does not
+        # allow node deletion via the writer client, so the canvas shape must be
+        # fixed for the lifetime of the run — we cannot grow.
         #
-        # Strategy: take max(observed, commanded * safety_factor) on each
-        # axis and center on the observed midpoint. The safety factor
-        # (3×) covers the HXN settling-row overshoot seen in practice
-        # (commanded 2 µm → observed 6 µm).
+        # Strategy: take max(observed, commanded * overshoot_factor) on each
+        # axis and center on the commanded midpoint. With the default
+        # overshoot_factor=1.0 the canvas spans exactly the commanded range
+        # (plus the patch footprint added below), matching the iterative
+        # engine's object array; settling-row overshoot is handled upstream by
+        # --skip-frames rather than by inflating the canvas here.
         half_h = cropped_h // 2
         half_w = cropped_w // 2
         x_min_um = float(np.nanmin(positions_um[finite, 0]))

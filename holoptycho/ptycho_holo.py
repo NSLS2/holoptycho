@@ -1083,12 +1083,18 @@ class PtychoApp(Application):
         # Per-batch pred + indices export is gated by the config field
         # vit_batch_writes (default off) — see SaveViTResult docstring.
         enable_batch_writes = bool(getattr(self.param, "vit_batch_writes", False))
-        # Canvas safety margin. 1.2 fits ~83% of the canvas with painted
-        # scan area on a typical 5 µm scan; bump for HXN scans with
-        # settling-row overshoot (e.g. 404611 commanded 2 µm → observed
-        # 6 µm needs ≥3.0). Off-canvas frames trigger a warning in
-        # SaveViTResult and are dropped.
-        mosaic_overshoot = float(getattr(self.param, "mosaic_overshoot_factor", 1.2))
+        # Canvas size as a multiple of the commanded scan range. Default 1.0
+        # sizes the mosaic to exactly the commanded scan extent (plus the patch
+        # footprint and a small fixed pad) — the same geometry the iterative
+        # engine uses for its object array
+        # (streaming_recon._required_object_shape: nx_prb + ceil(range/pixel) +
+        # obj_pad), so both reconstructions of the same scan cover the same area
+        # with no blank border. Settling-row overshoot beyond the commanded
+        # range is handled upstream by --skip-frames, not by inflating the
+        # canvas; raise this only if you need to capture overshoot frames
+        # instead. Off-canvas frames trigger a warning in SaveViTResult and are
+        # dropped.
+        mosaic_overshoot = float(getattr(self.param, "mosaic_overshoot_factor", 1.0))
         # Min fractional overlap for a mosaic pixel to count as "covered"
         # when normalising canvas / counts; below this the pixel is filled
         # with the valid-region median instead of a thin-coverage value.
