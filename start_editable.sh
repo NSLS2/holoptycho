@@ -35,14 +35,41 @@ chmod 700 "$XDG_RUNTIME_DIR"
 # in here, so it's reusable across any pixi/CUDA project.
 if ! docker image inspect "$DEV_IMAGE" >/dev/null 2>&1; then
   echo "Building $DEV_IMAGE..."
-  docker build -t "$DEV_IMAGE" - <<'EOF'
-FROM nvidia/cuda:12.8.1-runtime-ubuntu22.04
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgl1 curl ca-certificates && \
+  docker build --cgroup-manager=cgroupfs -t "$DEV_IMAGE" - <<'EOF'
+FROM docker.io/nvidia/cuda:12.8.1-runtime-ubuntu22.04
+RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
+      libgl1 curl ca-certificates git openssh-client && \
     rm -rf /var/lib/apt/lists/* && \
     curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/usr/local bash
 EOF
 fi
+
+# --- Load the private ptychoml deploy key into an ssh-agent ----------------
+# `pixi install` clones the private NSLS2/ptychoml repo over git+ssh. No SSH
+# keys are kept on the dev host, so the deploy key lives in Key Vault. Start an
+# agent, load the key from KV via stdin (never touches disk), and forward the
+# agent socket into the container. Store the key base64-encoded:
+#   az keyvault secret set --vault-name genesisdemoskv \
+#     --name holoptycho-ptycho-deploy-key --value "$(base64 -w0 < deploy_key)"
+DEPLOY_KEY_B64="$(az keyvault secret show --vault-name genesisdemoskv \
+  --name holoptycho-ptycho-deploy-key --query value -o tsv 2>/dev/null || true)"
+if [ -n "$DEPLOY_KEY_B64" ]; then
+  eval "$(ssh-agent -s)" >/dev/null
+  trap 'ssh-agent -k >/dev/null 2>&1' EXIT
+  printf '%s' "$DEPLOY_KEY_B64" | base64 -d | ssh-add - >/dev/null 2>&1 \
+    || echo "WARN: failed to load ptychoml deploy key from Key Vault" >&2
+else
+  echo "WARN: secret holoptycho-ptycho-deploy-key not in Key Vault — pixi install may fail to clone the private ptychoml repo" >&2
+fi
+
+# --- Persistent engine cache ----------------------------------------------
+# Bind-mount /models (the ENGINE_CACHE_DIR default; same path the prod
+# container uses) so compiled TensorRT .engine files survive container
+# restarts instead of dying with the ephemeral /tmp. The model DB is kept
+# ephemeral (HOLOPTYCHO_DB_PATH=/tmp/...) so its "ready" state can't outlive
+# the cache and report a stale engine path — re-set the model each session
+# (instant: the engine is already cached, no recompile/Azure pull).
+mkdir -p "$HOME/.cache/holoptycho/models"
 
 # --- Run the dev shell ----------------------------------------------------
 # --network host
@@ -55,6 +82,9 @@ fi
 # -v "$REPO_DIR":/app
 #     The whole repo (incl. .pixi/) is mounted live. Host-side edits show
 #     up inside the container immediately.
+# -v "$HOME/.cache/holoptycho/models":/models
+#     Persistent TensorRT engine cache (ENGINE_CACHE_DIR), shared with prod,
+#     so compiled engines survive restarts.
 # -e HOME=/tmp
 #     Keeps ~/.cache/, ~/.config/, tiled tokens, etc. out of the mounted
 #     repo. Ephemeral — dies with --rm.
@@ -63,8 +93,9 @@ fi
 #     disk and don't appear in ps. Re-pulled fresh from Azure each run.
 #     TILED_API_KEY is intentionally omitted: use `pixi run tiled login`
 #     inside the container so each developer auths with their own identity.
-docker run --rm -it --gpus all --shm-size=32g --network host \
-  --user "$(id -u):$(id -g)" -v "$REPO_DIR":/app -e HOME=/tmp -w /app \
+docker run --rm -it --cgroup-manager=cgroupfs --gpus all --shm-size=32g --network host \
+  -v "$REPO_DIR":/app -v "$HOME/.cache/holoptycho/models":/models -e HOME=/tmp -w /app \
+  ${SSH_AUTH_SOCK:+-v $SSH_AUTH_SOCK:/ssh-agent -e SSH_AUTH_SOCK=/ssh-agent} \
   --env-file <(cat <<EOF
 AZURE_TENANT_ID=$(az account show --query tenantId -o tsv)
 AZURE_CLIENT_ID=$(az ad app list --display-name 'NSLS2-Genesis-Holoptycho' --query '[0].appId' -o tsv)
@@ -75,5 +106,8 @@ AZURE_ML_WORKSPACE=genesis-mlw
 TILED_BASE_URL=https://tiled.nsls2.bnl.gov
 SERVER_STREAM_SOURCE=tcp://localhost:5555
 PANDA_STREAM_SOURCE=tcp://localhost:5556
+ENGINE_CACHE_DIR=/models
+HOLOPTYCHO_DB_PATH=/tmp/holoptycho.db
+GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 EOF
 ) "$DEV_IMAGE" bash
