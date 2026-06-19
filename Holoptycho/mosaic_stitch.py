@@ -235,7 +235,7 @@ def stitch_batch_livestitch_into(
     x1 = x0 + pw
 
     # Up-down flip the patch before placement
-    patches = patches[:, ::-1, :]
+    #patches = patches[:, ::-1, :]
 
     valid = (y1 > 0) & (x1 > 0) & (y0 < H) & (x0 < W)
 

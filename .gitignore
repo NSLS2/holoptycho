@@ -46,6 +46,7 @@ venv/
 eiger_simulation/test_data/*
 eiger_dir/live_test
 models/*
+!models/.gitkeep
 Holoptycho/edgePtychoViT/
 
 # reconstruction results

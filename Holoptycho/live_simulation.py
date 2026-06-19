@@ -67,10 +67,10 @@ class InitSimul(Operator):
             _m = self.scan_motor_x.lower()
             if _m.endswith('x'):
                 print(f'rescale x axis (motor: {self.scan_motor_x}) by {self.param.angle} degrees')
-                self.param.x_range *= np.cos(self.param.angle*np.pi/180.)
+                self.param.x_range *= np.abs(np.cos(self.param.angle*np.pi/180.))
             elif _m.endswith('z'):
                 print(f'rescale x axis (motor: {self.scan_motor_x}) by {self.param.angle} degrees')
-                self.param.x_range *= np.sin(self.param.angle*np.pi/180.)
+                self.param.x_range *= np.abs(np.sin(self.param.angle*np.pi/180.))
             elif _m == '':
                 if np.abs(self.param.angle) <= 45.:
                     self.param.x_range *= np.abs(np.cos(self.param.angle*np.pi/180.))

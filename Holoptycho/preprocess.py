@@ -97,6 +97,8 @@ class ImageBatchOp(Operator):
         image = op_input.receive("image")
         image_index = op_input.receive("image_index")
 
+        if image_index == 0:
+            np.save(f'/data/users/Holoscan/image_batch_op_before_flip_{image_index}.npy',image)
         if self.roi is None:
             return
 
