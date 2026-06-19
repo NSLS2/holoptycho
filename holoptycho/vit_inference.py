@@ -15,7 +15,9 @@ Usage:
 
 import logging
 import os
+import re
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -30,6 +32,93 @@ from .tiled_writer import get_writer
 
 # Module-level writer shared with ptycho_holo.py operators.
 _writer = get_writer()
+
+
+def find_onnx_for_engine(engine_path: str) -> Path | None:
+    """Return the ONNX path corresponding to a compiled .engine file, or None.
+
+    Convention (set by model_manager.py):
+        engine:  {ENGINE_CACHE_DIR}/{model_name}_v{version}.engine
+        onnx:    {ENGINE_CACHE_DIR}/onnx/{model_name}/{version}/*.onnx
+    """
+    ep = Path(engine_path)
+    m = re.fullmatch(r"(.+?)_v(\d+)\.engine", ep.name)
+    if not m:
+        return None
+    model_name, version = m.group(1), m.group(2)
+    onnx_dir = ep.parent / "onnx" / model_name / version
+    onnx_files = sorted(onnx_dir.glob("*.onnx"))
+    return onnx_files[0] if onnx_files else None
+
+
+def inner_crop_from_onnx(onnx_path: str | Path, threshold: float = 0.50) -> int | None:
+    """Derive ``inner_crop`` from the probe stored in an ONNX model.
+
+    The probe defines which pixels in each output patch carry meaningful
+    reconstruction signal.  For a circular probe of radius R pixels the
+    largest axis-aligned square that fits inside the circle has half-side
+    R / sqrt(2), so the appropriate inner crop is::
+
+        inner_crop = patch_size // 2 - floor(R / sqrt(2))
+
+    Probe tensors are identified by name (``probe_real`` / ``probe_imag``)
+    when available, falling back to any graph outputs beyond ``output`` that
+    are also initializers (constants baked into the model).
+
+    Parameters
+    ----------
+    onnx_path : path to the .onnx file
+    threshold : fraction of peak amplitude defining the probe boundary.
+                Default 0.50 (FWHM of the amplitude, i.e. half-maximum).
+
+    Returns
+    -------
+    inner_crop : int, or None if the ONNX cannot be loaded / probe not found
+    """
+    try:
+        import onnx
+        import onnx.numpy_helper as nph
+    except ImportError:
+        return None
+
+    try:
+        model = onnx.load(str(onnx_path))
+    except Exception:
+        return None
+
+    init_map = {i.name: nph.to_array(i) for i in model.graph.initializer}
+    out_names = [o.name for o in model.graph.output]
+
+    if "probe_real" in init_map and "probe_imag" in init_map:
+        p_re = init_map["probe_real"]
+        p_im = init_map["probe_imag"]
+    else:
+        probe_cands = [
+            init_map[n] for n in out_names
+            if n != "output" and n in init_map and init_map[n].ndim == 2
+        ]
+        if len(probe_cands) < 2:
+            return None
+        p_re, p_im = probe_cands[0], probe_cands[1]
+
+    if p_re.shape != p_im.shape or p_re.ndim != 2:
+        return None
+
+    amp = np.sqrt(p_re.astype(np.float64) ** 2 + p_im.astype(np.float64) ** 2)
+    patch_h, patch_w = amp.shape
+    cy, cx = patch_h / 2.0, patch_w / 2.0
+    y_idx, x_idx = np.ogrid[:patch_h, :patch_w]
+    r = np.sqrt((y_idx - cy) ** 2 + (x_idx - cx) ** 2)
+
+    support = r[amp >= threshold * amp.max()]
+    if not len(support):
+        return None
+
+    radius = float(support.max())
+    inscribed_half = radius / np.sqrt(2)
+    inner_crop = int(np.floor(min(patch_h, patch_w) / 2.0 - inscribed_half))
+    # Clamp: non-negative, never more than patch_size // 4
+    return max(0, min(inner_crop, min(patch_h, patch_w) // 4))
 
 
 def read_engine_batch_size(engine_path: str) -> int:
@@ -382,7 +471,8 @@ class SaveViTResult(Operator):
         x_range_um: float | None = None,
         y_range_um: float | None = None,
         inner_crop: int | None = None,
-        canvas_pad: int = 0,
+        canvas_pad: int | None = None,
+        half_patch: int = 128,
         min_overlap_count: float = 0.5,
         phase_channel_index: int = 1,
         overshoot_factor: float = 1.0,
@@ -420,6 +510,7 @@ class SaveViTResult(Operator):
         self._y_range_um = y_range_um
         self._inner_crop = inner_crop
         self._canvas_pad = canvas_pad
+        self._half_patch = half_patch
         self._min_overlap_count = max(0.5, float(min_overlap_count))
         self._phase_channel_index = phase_channel_index
         self._overshoot_factor = overshoot_factor
@@ -491,6 +582,12 @@ class SaveViTResult(Operator):
             self._logger.info(
                 "Auto-derived inner_crop=%d for %dx%d ViT patches",
                 self._inner_crop, patch_h, patch_w,
+            )
+        if self._canvas_pad is None:
+            self._canvas_pad = self._half_patch - self._inner_crop
+            self._logger.info(
+                "Auto-derived canvas_pad=%d (half_patch=%d - inner_crop=%d)",
+                self._canvas_pad, self._half_patch, self._inner_crop,
             )
         cropped_h = patch_h - 2 * self._inner_crop
         cropped_w = patch_w - 2 * self._inner_crop
@@ -938,7 +1035,14 @@ class MosaicWriterOp(Operator):
     unique.
     """
 
-    def __init__(self, fragment, *args, **kwargs):
+    def __init__(
+        self,
+        fragment,
+        *args,
+        mosaic_rotation: int = 0,
+        mosaic_flip_lr: bool = False,
+        **kwargs,
+    ):
         super().__init__(fragment, *args, **kwargs)
         self._logger = logging.getLogger("holoptycho.MosaicWriterOp")
         # Every write goes through the full-canvas path.  The accumulated
@@ -958,6 +1062,26 @@ class MosaicWriterOp(Operator):
         self._last_seen_batch_num = -1
         self._fill_value = 0.0
         self._fill_value_amp = 0.0
+        # Orientation correction applied after normalize_mosaic() before writing
+        # to Tiled.  These transforms affect BOTH the stored array in Tiled and
+        # its visual display — they are not display-only.
+        #
+        # The correct values depend on the beamline's scan geometry and the
+        # coordinate convention expected by the Tiled dashboard.  Adjust per
+        # beamline setup:
+        #   mosaic_rotation: CCW rotation in degrees (0, 90, 180, or 270).
+        #                    For HXN with the standard raster scan, 90 is typical.
+        #   mosaic_flip_lr:  Left-right flip applied after rotation.
+        #                    Depends on whether the fast axis increases left-to-right
+        #                    or right-to-left in the scan.
+        # Defaults are identity (no transform) — verify on first live run and
+        # adjust if the Tiled display appears rotated or mirrored.
+        if mosaic_rotation not in (0, 90, 180, 270):
+            raise ValueError(
+                f"mosaic_rotation must be 0, 90, 180, or 270; got {mosaic_rotation}"
+            )
+        self._rotation_k = mosaic_rotation // 90
+        self._flip_lr = bool(mosaic_flip_lr)
 
     def setup(self, spec: OperatorSpec):
         # capacity=1 + POP gives single-slot, latest-wins semantics: while
@@ -1001,6 +1125,14 @@ class MosaicWriterOp(Operator):
                 mosaic, counts, min_overlap_count
             )
             t_norm = time.perf_counter()
+            # Apply beamline-specific orientation correction before writing to
+            # Tiled.  This affects both the stored array and visual display.
+            # Adjust mosaic_rotation / mosaic_flip_lr in the constructor to
+            # match your beamline's scan geometry.
+            if self._rotation_k:
+                normalised = np.rot90(normalised, k=self._rotation_k)
+            if self._flip_lr:
+                normalised = np.fliplr(normalised)
             _writer.write_vit_mosaic(
                 normalised,
                 batch_num=batch_num,
@@ -1011,6 +1143,10 @@ class MosaicWriterOp(Operator):
                 self._fill_value_amp, norm_amp = normalize_mosaic(
                     mosaic_amp, counts_amp, min_overlap_count
                 )
+                if self._rotation_k:
+                    norm_amp = np.rot90(norm_amp, k=self._rotation_k)
+                if self._flip_lr:
+                    norm_amp = np.fliplr(norm_amp)
                 _writer.write_vit_amp_mosaic(
                     norm_amp,
                     batch_num=batch_num,
