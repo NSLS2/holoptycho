@@ -117,8 +117,11 @@ def inner_crop_from_onnx(onnx_path: str | Path, threshold: float = 0.50) -> int 
     radius = float(support.max())
     inscribed_half = radius / np.sqrt(2)
     inner_crop = int(np.floor(min(patch_h, patch_w) / 2.0 - inscribed_half))
-    # Clamp: non-negative, never more than patch_size // 4
-    return max(0, min(inner_crop, min(patch_h, patch_w) // 4))
+    # Clamp to non-negative only. The upper bound is intentionally not capped at
+    # patch_size // 4 — a small probe may legitimately need a larger crop.
+    # _ensure_canvas will disable stitching if inner_crop is so large that no
+    # usable patch area remains.
+    return max(0, inner_crop)
 
 
 def read_engine_batch_size(engine_path: str) -> int:
