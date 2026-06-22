@@ -285,23 +285,20 @@ class ImagePreprocessorOp(Operator):
         # compute_center_box). This operator no longer shifts frames; it receives
         # them already centered, so the intensity tap and model input stay in
         # lockstep exactly as before.
-        # Geometry knobs for the two output branches.
-        #   tap_orient: D4 element applied to the intensity tap (saved /dp).
-        #               Default 'antitranspose' matches the historical HXN
-        #               anti-diagonal flip applied to bring data into the
-        #               beamline operator's view; the saved DP looks how the
-        #               operator expects.
-        #   dp_orient:  D4 element on the model-input branch. Default
-        #               'identity' — the frame is already in the global
-        #               coordinate system (detector_orientation). Set
-        #               dp_orient='auto' in the config to opt in to the ViT
-        #               orientation-autodetect sweep, which overwrites this.
-        # Both are settable from the scan config; see ptycho_holo.py.
+        # Diffraction orientation for BOTH output branches.
+        #   dp_orient: D4 element aligning the (global) diffraction frame to the
+        #              model/scan convention. Default 'identity' — the frame is
+        #              already global after detector_orientation. 'auto' opts in
+        #              to the ViT orientation-autodetect sweep, which overwrites
+        #              this. Settable from the scan config; see ptycho_holo.py.
+        #
+        # The saved intensity tap (/dp, the dashboard's "Detector frame") uses
+        # this SAME dp_orient, so what is stored matches the DP passed to the
+        # model — there is no separate tap_orient knob.
         #
         # fftshift is intentionally NOT a knob: the model-input branch is always
         # built with fftshift=False — the ViT expects un-shifted diffraction, so
         # ptychoml's DC auto-detect must not be allowed to shift inference DPs.
-        self.tap_orient = 'antitranspose'
         self.dp_orient = 'identity'
         # Intensity normalization passed straight through to
         # ptychoml.preprocess_diffraction so each DP gets scaled by the
@@ -374,8 +371,8 @@ class ImagePreprocessorOp(Operator):
 
         # Buffer pre-D4 frames for the one-shot orientation auto-detect.
         # autodetect_orientation sweeps the D4 candidates itself, so it needs
-        # the frames *before* tap_orient/dp_orient are applied. Once
-        # PtychoViTInferenceOp has run the sweep it sets _autodetect_done=True.
+        # the frames *before* dp_orient is applied. Once PtychoViTInferenceOp
+        # has run the sweep it sets _autodetect_done=True.
         if not self._autodetect_done:
             n_buffered = sum(f.shape[0] for f, _ in self._autodetect_buf)
             if n_buffered < self._AUTODETECT_BUF_MAX_FRAMES:
@@ -383,14 +380,17 @@ class ImagePreprocessorOp(Operator):
                     (processed_images.copy(), indices.copy())
                 )
 
-        # Tap branch: apply the configured D4 to put the saved intensity
-        # into whatever orientation the operator wants to see on the
-        # dashboard. Default 'antitranspose' reproduces the historical HXN
-        # anti-diagonal flip (transpose ∘ flip-both-axes); set
-        # tap_orient='identity' to save raw detector frames. Contiguous
-        # copy so the emitted buffer doesn't alias processed_images, which
-        # is mutated in place below.
-        tap = np.ascontiguousarray(apply_d4(processed_images, self.tap_orient))
+        # Snapshot the (possibly autodetect-resolved) orientation once so the
+        # saved tap, the model input, and the emitted stamp can't disagree — the
+        # autodetect mutates self.dp_orient from another thread.
+        dp_orient = self.dp_orient
+
+        # Tap branch: saved detector intensity, oriented with the SAME dp_orient
+        # as the model input so the stored /dp (the dashboard's "Detector
+        # frame") matches the DP passed to the ViT. Contiguous copy so the
+        # emitted buffer doesn't alias processed_images, which is mutated in
+        # place below.
+        tap = np.ascontiguousarray(apply_d4(processed_images, dp_orient))
         op_output.emit(tap, "intensity")
 
         # Model branch: delegate the entire normalize → mask → sqrt → D4
@@ -402,9 +402,6 @@ class ImagePreprocessorOp(Operator):
         # DC auto-detect shift the inference DPs.
         if self.detmap_threshold > 0:
             apply_intensity_floor(processed_images, self.detmap_threshold)
-        # Snapshot dp_orient once so the preprocess call and the stamp emitted
-        # below can't disagree (the autodetect mutates it from another thread).
-        dp_orient = self.dp_orient
         diff_amp = preprocess_diffraction(
             processed_images,
             normalization=self.normalization,

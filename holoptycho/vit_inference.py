@@ -21,6 +21,7 @@ import numpy as np
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 from ptychoml.stitch import (
+    crop_mosaic_border,
     normalize_mosaic,
     stitch_batch_livestitch_into,
 )
@@ -383,6 +384,7 @@ class SaveViTResult(Operator):
         y_range_um: float | None = None,
         inner_crop: int | None = None,
         canvas_pad: int = 0,
+        edge_trim: int | None = None,
         min_overlap_count: float = 0.5,
         phase_channel_index: int = 1,
         overshoot_factor: float = 1.0,
@@ -420,6 +422,11 @@ class SaveViTResult(Operator):
         self._y_range_um = y_range_um
         self._inner_crop = inner_crop
         self._canvas_pad = canvas_pad
+        # Pixels trimmed off each edge of the mosaic before it ships to Tiled,
+        # to drop the low-overlap/artifact border ring. None = auto = half the
+        # model patch dimension (resolved in _ensure_canvas once the patch size
+        # is known — e.g. 128 for a 256-px model).
+        self._edge_trim = edge_trim
         self._min_overlap_count = max(0.5, float(min_overlap_count))
         self._phase_channel_index = phase_channel_index
         self._overshoot_factor = overshoot_factor
@@ -491,6 +498,12 @@ class SaveViTResult(Operator):
             self._logger.info(
                 "Auto-derived inner_crop=%d for %dx%d ViT patches",
                 self._inner_crop, patch_h, patch_w,
+            )
+        if self._edge_trim is None:
+            self._edge_trim = patch_h // 2
+            self._logger.info(
+                "Auto-derived mosaic edge_trim=%d (half the %d-px patch)",
+                self._edge_trim, patch_h,
             )
         cropped_h = patch_h - 2 * self._inner_crop
         cropped_w = patch_w - 2 * self._inner_crop
@@ -765,45 +778,38 @@ class SaveViTResult(Operator):
         canvas_h, canvas_w = self._mosaic.shape
         py_min, py_max, px_min, px_max = _bbox
 
-        # Crop the canvas_pad border before handing off — the padding pixels
-        # are needed internally for FFT wrap-around safety but should not be
-        # shipped to Tiled (they'd show as a uniform median-fill border
-        # around the scan). Translate origin_um and bbox into cropped coords
-        # so pixel↔position mapping stays correct on the dashboard side.
-        cp = self._canvas_pad
-        if cp > 0:
-            cropped_h = canvas_h - 2 * cp
-            cropped_w = canvas_w - 2 * cp
-            mosaic_snap = self._mosaic[cp:cp + cropped_h, cp:cp + cropped_w].copy()
-            counts_snap = self._counts[cp:cp + cropped_h, cp:cp + cropped_w].copy()
-            mosaic_amp_snap = (
-                self._mosaic_amp[cp:cp + cropped_h, cp:cp + cropped_w].copy()
-                if self._mosaic_amp is not None else None
-            )
-            counts_amp_snap = (
-                self._counts_amp[cp:cp + cropped_h, cp:cp + cropped_w].copy()
-                if self._counts_amp is not None else None
-            )
-            oy_um, ox_um = self._canvas_origin_um
-            origin_snap = (oy_um + cp * ps * 1e6, ox_um + cp * ps * 1e6)
-            bbox = (
-                max(0, py_min - cp),
-                min(cropped_h, py_max - cp),
-                max(0, px_min - cp),
-                min(cropped_w, px_max - cp),
-            )
-        else:
-            mosaic_snap = self._mosaic.copy()
-            counts_snap = self._counts.copy()
-            mosaic_amp_snap = self._mosaic_amp.copy() if self._mosaic_amp is not None else None
-            counts_amp_snap = self._counts_amp.copy() if self._counts_amp is not None else None
-            origin_snap = self._canvas_origin_um
-            bbox = (
-                max(0, py_min),
-                min(canvas_h, py_max),
-                max(0, px_min),
-                min(canvas_w, px_max),
-            )
+        # Crop the internal padding plus the configured edge trim before handing
+        # off. canvas_pad pixels are FFT wrap-around safety; edge_trim drops the
+        # low-overlap/artifact ring around the scan (default = half the patch).
+        # The full canvas is kept for stitching, so the cropped edge pixels
+        # still received contributions from patches just outside the crop — we
+        # simply don't ship the noisy border. crop_mosaic_border raises if the
+        # trim would leave no pixels; the canvas size is fixed from the commanded
+        # scan range at scan start, so that is a deterministic config error and
+        # is allowed to surface rather than be silently clamped. Translate
+        # origin_um and bbox into cropped coords so pixel↔position mapping stays
+        # correct on the dashboard side.
+        cp = self._canvas_pad + (self._edge_trim or 0)
+        cropped_h = canvas_h - 2 * cp
+        cropped_w = canvas_w - 2 * cp
+        mosaic_snap = crop_mosaic_border(self._mosaic, cp).copy()
+        counts_snap = crop_mosaic_border(self._counts, cp).copy()
+        mosaic_amp_snap = (
+            crop_mosaic_border(self._mosaic_amp, cp).copy()
+            if self._mosaic_amp is not None else None
+        )
+        counts_amp_snap = (
+            crop_mosaic_border(self._counts_amp, cp).copy()
+            if self._counts_amp is not None else None
+        )
+        oy_um, ox_um = self._canvas_origin_um
+        origin_snap = (oy_um + cp * ps * 1e6, ox_um + cp * ps * 1e6)
+        bbox = (
+            max(0, py_min - cp),
+            min(cropped_h, py_max - cp),
+            max(0, px_min - cp),
+            min(cropped_w, px_max - cp),
+        )
 
         # Hand off to MosaicWriterOp via a copy. The downstream operator runs
         # on its own scheduler thread and does the (heavier) normalize +
