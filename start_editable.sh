@@ -37,18 +37,22 @@ if ! docker image inspect "$DEV_IMAGE" >/dev/null 2>&1; then
   echo "Building $DEV_IMAGE..."
   docker build --cgroup-manager=cgroupfs -t "$DEV_IMAGE" - <<'EOF'
 FROM docker.io/nvidia/cuda:12.8.1-runtime-ubuntu22.04
+# Pin pixi to a version that writes the v6 lock format. Newer pixi (>=0.50)
+# silently upgrades pixi.lock to v7 on any re-lock, which the v6-only pixi used
+# elsewhere (CI, older hosts) can no longer read. Bump this deliberately and
+# re-lock everywhere together, never by accident inside the dev container.
 RUN apt-get -o APT::Sandbox::User=root update && apt-get -o APT::Sandbox::User=root install -y --no-install-recommends \
       libgl1 curl ca-certificates git openssh-client && \
     rm -rf /var/lib/apt/lists/* && \
-    curl -fsSL https://pixi.sh/install.sh | PIXI_HOME=/usr/local bash
+    curl -fsSL https://pixi.sh/install.sh | PIXI_VERSION=v0.48.1 PIXI_HOME=/usr/local bash
 EOF
 fi
 
-# --- Load the private ptychoml deploy key into an ssh-agent ----------------
-# `pixi install` clones the private NSLS2/ptychoml repo over git+ssh. No SSH
-# keys are kept on the dev host, so the deploy key lives in Key Vault. Start an
-# agent, load the key from KV via stdin (never touches disk), and forward the
-# agent socket into the container. Store the key base64-encoded:
+# --- Load the private ptycho deploy key into an ssh-agent ------------------
+# `pixi install` clones the private NSLS2/ptycho repo over git+ssh (ptychoml
+# is public). No SSH keys are kept on the dev host, so the deploy key lives in
+# Key Vault. Start an agent, load the key from KV via stdin (never touches
+# disk), and forward the agent socket into the container. Store it base64:
 #   az keyvault secret set --vault-name genesisdemoskv \
 #     --name holoptycho-ptycho-deploy-key --value "$(base64 -w0 < deploy_key)"
 DEPLOY_KEY_B64="$(az keyvault secret show --vault-name genesisdemoskv \
@@ -57,9 +61,9 @@ if [ -n "$DEPLOY_KEY_B64" ]; then
   eval "$(ssh-agent -s)" >/dev/null
   trap 'ssh-agent -k >/dev/null 2>&1' EXIT
   printf '%s' "$DEPLOY_KEY_B64" | base64 -d | ssh-add - >/dev/null 2>&1 \
-    || echo "WARN: failed to load ptychoml deploy key from Key Vault" >&2
+    || echo "WARN: failed to load ptycho deploy key from Key Vault" >&2
 else
-  echo "WARN: secret holoptycho-ptycho-deploy-key not in Key Vault — pixi install may fail to clone the private ptychoml repo" >&2
+  echo "WARN: secret holoptycho-ptycho-deploy-key not in Key Vault — pixi install may fail to clone the private ptycho repo" >&2
 fi
 
 # --- Persistent engine cache ----------------------------------------------
