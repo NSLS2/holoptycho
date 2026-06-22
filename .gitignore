@@ -22,6 +22,9 @@ target/
 .DS_Store
 *~
 
+# NFS temp files (created when an open file is deleted on NFS mounts)
+.nfs*
+
 *.npy
 
 #vim
