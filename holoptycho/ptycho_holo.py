@@ -753,7 +753,13 @@ class PtychoApp(Application):
         )
 
         self.image_batch = ImageBatchOp(self, name="image_batch")
-        self.image_proc = ImagePreprocessorOp(self, name="image_proc")
+        self.image_proc = ImagePreprocessorOp(
+            self, name="image_proc",
+            # diff_amp is consumed only by the ViT branch; tell the op whether
+            # that branch exists so it can drop diff_amp's blocking condition in
+            # iterative mode (otherwise image_proc never ticks — Holoscan E00042).
+            vit_connected=recon_mode in ("vit", "both"),
+        )
         # auto_center_dp (lossless centered crop) is wired into ImageBatchOp
         # after its ROI is set below.
         # Geometry + normalization for the two output branches. See
