@@ -1134,6 +1134,7 @@ class PtychoApp(Application):
             patch_flip=_patch_flip,
             inner_crop=_inner_crop,
             edge_trim=_edge_trim,
+            oversample=int(getattr(self.param, "mosaic_oversample", 1) or 1),
             enable_batch_writes=enable_batch_writes,
             name="vit_save",
         )

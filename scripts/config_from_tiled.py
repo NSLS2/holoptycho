@@ -820,6 +820,19 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--mosaic-oversample",
+        type=int,
+        default=None,
+        help=(
+            "Super-sample the ViT mosaic canvas by this integer factor S, then "
+            "mean-bin back to the target grid at write time. The sub-pixel scan "
+            "step rounds to <=0.5/S px instead of 0.5 px, removing the 1px "
+            "nearest-integer placement streaks along the scan axes (real-space, "
+            "no Fourier/phase-wrap artifacts). Costs ~S^2 memory/compute. "
+            "Try 3-4; default 1 (off)."
+        ),
+    )
+    recon.add_argument(
         "--distance", type=float, default=0.5, help="Sample-to-detector distance in m"
     )
     recon.add_argument("--alg-flag", default="ML_grad")
@@ -925,6 +938,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.mosaic_edge_trim is not None:
         config["mosaic_edge_trim"] = str(args.mosaic_edge_trim)
+    if getattr(args, "mosaic_oversample", None) is not None:
+        config["mosaic_oversample"] = str(int(args.mosaic_oversample))
     if args.auto_center_headroom is not None:
         config["auto_center_headroom"] = str(int(args.auto_center_headroom))
     elif auto_center and not roi_passed:

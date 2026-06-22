@@ -390,6 +390,7 @@ class SaveViTResult(Operator):
         overshoot_factor: float = 1.0,
         enable_batch_writes: bool = False,
         patch_flip: str = 'identity',
+        oversample: int = 1,
         **kwargs,
     ):
         # Holoscan's Operator.__init__ calls setup(spec), so any attribute
@@ -430,6 +431,17 @@ class SaveViTResult(Operator):
         self._min_overlap_count = max(0.5, float(min_overlap_count))
         self._phase_channel_index = phase_channel_index
         self._overshoot_factor = overshoot_factor
+        # Super-sampling factor S: the canvas is accumulated at S× the target
+        # pixel resolution so the sub-pixel scan step rounds to ≤0.5/S target
+        # pixels instead of ≤0.5, then mean-binned back down to the target grid
+        # at snapshot time. This removes the nearest-integer placement comb
+        # (1px streaks along the scan axes) in real space — no Fourier wrap or
+        # phase-wrap artifacts. S=1 (default) = original behaviour.
+        self._oversample = max(1, int(oversample))
+        # Target-grid canvas dims (set in _ensure_canvas); the in-memory canvas
+        # is S× larger on each axis.
+        self._target_h: int = 0
+        self._target_w: int = 0
 
         # Lazy state — built on first batch once we know the model's patch
         # size (``pred.shape[-1]``). Reset on each new scan.
@@ -580,22 +592,55 @@ class SaveViTResult(Operator):
         origin_x_um = x_mid_um - (canvas_w / 2.0) * ps * 1e6
         origin_y_um = y_mid_um - (canvas_h / 2.0) * ps * 1e6
 
-        self._mosaic = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+        # Super-sample: accumulate on an S× finer grid (same µm extent), then
+        # mean-bin to (canvas_h, canvas_w) at snapshot time. ``canvas_h/w`` are
+        # the TARGET dims; the in-memory arrays are S× larger on each axis and
+        # every position/footprint quantity below is in fine pixels.
+        S = self._oversample
+        self._target_h = canvas_h
+        self._target_w = canvas_w
+        fine_h = canvas_h * S
+        fine_w = canvas_w * S
+
+        self._mosaic = np.zeros((fine_h, fine_w), dtype=np.float32)
         self._counts = np.zeros_like(self._mosaic)
         self._mosaic_amp = np.zeros_like(self._mosaic)
         self._counts_amp = np.zeros_like(self._mosaic)
         self._canvas_origin_um = (origin_y_um, origin_x_um)
-        self._half_h = half_h
-        self._half_w = half_w
+        # Patch footprint is block-upsampled by S before placement, so the
+        # half-extent and bounds margins are in fine pixels too.
+        self._half_h = half_h * S
+        self._half_w = half_w * S
         self._logger.info(
-            "ViT mosaic canvas allocated: %dx%d px (%.2f x %.2f um), origin=(%.3f, %.3f) um, "
-            "cropped patch=%dx%d",
+            "ViT mosaic canvas allocated: target %dx%d px (%.2f x %.2f um), "
+            "oversample=%d -> fine %dx%d px, origin=(%.3f, %.3f) um, cropped patch=%dx%d",
             canvas_h, canvas_w,
             canvas_h * ps * 1e6, canvas_w * ps * 1e6,
+            S, fine_h, fine_w,
             origin_y_um, origin_x_um,
             cropped_h, cropped_w,
         )
         return True
+
+    def _bin_to_target(self, fine: np.ndarray) -> np.ndarray:
+        """Mean-bin an S×-oversampled fine array down to the target grid.
+
+        Mean (not sum) keeps ``counts`` in patch-coverage units so the
+        ``min_overlap`` threshold semantics are unchanged, and because canvas
+        and counts are binned with the same factor it cancels in the
+        ``canvas/counts`` ratio. A bin only partially covered by a patch gets a
+        fractional count — the box-filter weight that anti-aliases the comb.
+        """
+        S = self._oversample
+        if S <= 1:
+            return fine
+        Ht, Wt = self._target_h, self._target_w
+        return (
+            fine[:Ht * S, :Wt * S]
+            .reshape(Ht, S, Wt, S)
+            .mean(axis=(1, 3))
+            .astype(np.float32)
+        )
 
     def _stitch_batch(self, pred: np.ndarray, indices: np.ndarray):
         """Stitch the batch into the in-memory mosaic and return a snapshot.
@@ -674,7 +719,9 @@ class SaveViTResult(Operator):
         # (canvas can't grow — tiled doesn't allow node deletion via the
         # writer client). The canvas is sized from commanded extent ×
         # overshoot_factor so this should be rare in practice.
-        ps = self._pixel_size_m
+        # Positions, bounds, and the canvas are all in FINE pixels (the canvas
+        # is S× oversampled). Use the fine pixel size for the µm→px mapping.
+        ps = self._pixel_size_m / self._oversample
         oy_um, ox_um = self._canvas_origin_um
         canvas_h, canvas_w = self._mosaic.shape
         margin_y = self._half_h + 1
@@ -751,11 +798,22 @@ class SaveViTResult(Operator):
                 100.0 * float((self._counts >= 0.5).mean()),
             )
 
+        # Block-upsample each patch by S so it covers S× more fine cells and
+        # keeps its physical size on the fine grid. The sub-pixel accuracy comes
+        # from placing at fine-integer positions; the mean-bin at snapshot time
+        # turns the partial-bin coverage into proper box-filter weights.
+        S = self._oversample
+        if S > 1:
+            phase_place = np.repeat(np.repeat(phase_batch, S, axis=1), S, axis=2)
+            amp_place = np.repeat(np.repeat(amp_batch, S, axis=1), S, axis=2)
+        else:
+            phase_place, amp_place = phase_batch, amp_batch
+
         try:
             self._mosaic, self._counts, _bbox = stitch_batch_livestitch_into(
                 self._mosaic,
                 self._counts,
-                phase_batch,
+                phase_place,
                 positions_px,
             )
         except Exception:
@@ -766,7 +824,7 @@ class SaveViTResult(Operator):
             self._mosaic_amp, self._counts_amp, _ = stitch_batch_livestitch_into(
                 self._mosaic_amp,
                 self._counts_amp,
-                amp_batch,
+                amp_place,
                 positions_px,
             )
         except Exception:
@@ -774,36 +832,39 @@ class SaveViTResult(Operator):
             self._mosaic_amp = None
             self._counts_amp = None
 
-        # Bounding box comes directly from the livestitch return value.
-        canvas_h, canvas_w = self._mosaic.shape
-        py_min, py_max, px_min, px_max = _bbox
+        # Write the FINE (S× oversampled) canvas straight to Tiled — no
+        # downsample. The mean-bin step introduced a coverage/normalization
+        # banding artifact, so we skip it: the finer placement that smoothed the
+        # comb is kept, the mosaic is just S× larger and carries the fine pixel
+        # size. Everything below stays in FINE pixels.
+        S = self._oversample
+        ps_fine = self._pixel_size_m / S
+        mosaic_t = self._mosaic
+        counts_t = self._counts
+        mosaic_amp_t = self._mosaic_amp
+        counts_amp_t = self._counts_amp
+        canvas_h, canvas_w = mosaic_t.shape  # fine dims
+        py_min, py_max, px_min, px_max = _bbox  # already fine
 
         # Crop the internal padding plus the configured edge trim before handing
         # off. canvas_pad pixels are FFT wrap-around safety; edge_trim drops the
         # low-overlap/artifact ring around the scan (default = half the patch).
-        # The full canvas is kept for stitching, so the cropped edge pixels
-        # still received contributions from patches just outside the crop — we
-        # simply don't ship the noisy border. crop_mosaic_border raises if the
-        # trim would leave no pixels; the canvas size is fixed from the commanded
-        # scan range at scan start, so that is a deterministic config error and
-        # is allowed to surface rather than be silently clamped. Translate
-        # origin_um and bbox into cropped coords so pixel↔position mapping stays
-        # correct on the dashboard side.
-        cp = self._canvas_pad + (self._edge_trim or 0)
+        # These are TARGET-pixel quantities, so scale them to fine pixels.
+        cp = (self._canvas_pad + (self._edge_trim or 0)) * S
         cropped_h = canvas_h - 2 * cp
         cropped_w = canvas_w - 2 * cp
-        mosaic_snap = crop_mosaic_border(self._mosaic, cp).copy()
-        counts_snap = crop_mosaic_border(self._counts, cp).copy()
+        mosaic_snap = crop_mosaic_border(mosaic_t, cp).copy()
+        counts_snap = crop_mosaic_border(counts_t, cp).copy()
         mosaic_amp_snap = (
-            crop_mosaic_border(self._mosaic_amp, cp).copy()
-            if self._mosaic_amp is not None else None
+            crop_mosaic_border(mosaic_amp_t, cp).copy()
+            if mosaic_amp_t is not None else None
         )
         counts_amp_snap = (
-            crop_mosaic_border(self._counts_amp, cp).copy()
-            if self._counts_amp is not None else None
+            crop_mosaic_border(counts_amp_t, cp).copy()
+            if counts_amp_t is not None else None
         )
         oy_um, ox_um = self._canvas_origin_um
-        origin_snap = (oy_um + cp * ps * 1e6, ox_um + cp * ps * 1e6)
+        origin_snap = (oy_um + cp * ps_fine * 1e6, ox_um + cp * ps_fine * 1e6)
         bbox = (
             max(0, py_min - cp),
             min(cropped_h, py_max - cp),
@@ -814,14 +875,14 @@ class SaveViTResult(Operator):
         # Hand off to MosaicWriterOp via a copy. The downstream operator runs
         # on its own scheduler thread and does the (heavier) normalize +
         # tiled write so this compute thread can return to the next ViT
-        # batch immediately. Copying ~7 MB total takes well under 2 ms.
+        # batch immediately.
         return (
             mosaic_snap,
             counts_snap,
             mosaic_amp_snap,
             counts_amp_snap,
             self.batch_num,
-            self._pixel_size_m,
+            ps_fine,
             origin_snap,
             bbox,
             self._min_overlap_count,
