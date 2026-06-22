@@ -274,6 +274,14 @@ class ImageBatchOp(Operator):
 
 class ImagePreprocessorOp(Operator):
     def __init__(self, *args, **kwargs):
+        # When the ViT branch is not wired (recon_mode='iterative'), the
+        # diff_amp output has no downstream receiver. Drop its blocking
+        # DownstreamMessageAffordable condition in setup() so the unconnected
+        # port cannot stall this operator — otherwise Holoscan reports
+        # "E00042 ... entity will never tick" and no diffraction ever reaches
+        # the iterative engine. Defaults True to preserve ViT-mode backpressure
+        # on the bounded ViT input queue.
+        self._vit_connected = kwargs.pop("vit_connected", True)
         super().__init__(*args,**kwargs)
         self.logger = logging.getLogger("ImagePreprocessorOp")
         logging.basicConfig(level=logging.INFO)
@@ -331,7 +339,12 @@ class ImagePreprocessorOp(Operator):
     def setup(self, spec: OperatorSpec):
         spec.input("image_batch").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
         spec.input("image_indices_in").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
-        spec.output("diff_amp")
+        diff_amp_out = spec.output("diff_amp")
+        if not self._vit_connected:
+            # iterative mode: no ViT consumer for diff_amp. Without this the
+            # unconnected port's affordable condition can never be met and the
+            # whole operator never ticks (Holoscan E00042).
+            diff_amp_out.condition(ConditionType.NONE)
         # Separate RAW-amplitude output for the iterative engine (normalization=1,
         # scale=1 => sqrt(intensity)). The ViT branch consumes the vit-normalized
         # ``diff_amp``; the engine must NOT — its frozen warm-start probe has a

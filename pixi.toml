@@ -46,6 +46,10 @@ numba-cuda = {version = "*", extras = ["cu12"]}
 tensorrt-cu12 = "==10.16.1.11"
 tensorrt-cu12-libs = { url = "https://pypi.nvidia.com/tensorrt-cu12-libs/tensorrt_cu12_libs-10.16.1.11-py3-none-manylinux_2_28_x86_64.whl" }
 pycuda = "*"
+# Reads the probe baked into a model's ONNX to derive the ViT-patch
+# inner_crop (holoptycho/engine_probe.py). Without it inner_crop silently
+# falls back to patch//4.
+onnx = "*"
 
 [feature.mpi.target.linux-64.dependencies]
 openmpi = "*"
