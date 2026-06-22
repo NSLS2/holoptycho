@@ -21,6 +21,7 @@ import numpy as np
 
 from holoscan.core import Operator, OperatorSpec, ConditionType, IOSpec
 from ptychoml.stitch import (
+    crop_mosaic_border,
     normalize_mosaic,
     stitch_batch_livestitch_into,
 )
@@ -782,50 +783,33 @@ class SaveViTResult(Operator):
         # low-overlap/artifact ring around the scan (default = half the patch).
         # The full canvas is kept for stitching, so the cropped edge pixels
         # still received contributions from patches just outside the crop — we
-        # simply don't ship the noisy border. Clamp so the cropped mosaic keeps
-        # a sane minimum size. Translate origin_um and bbox into cropped coords
-        # so pixel↔position mapping stays correct on the dashboard side.
+        # simply don't ship the noisy border. crop_mosaic_border raises if the
+        # trim would leave no pixels; the canvas size is fixed from the commanded
+        # scan range at scan start, so that is a deterministic config error and
+        # is allowed to surface rather than be silently clamped. Translate
+        # origin_um and bbox into cropped coords so pixel↔position mapping stays
+        # correct on the dashboard side.
         cp = self._canvas_pad + (self._edge_trim or 0)
-        max_cp = (min(canvas_h, canvas_w) - 2) // 2
-        if cp > max_cp:
-            self._logger.warning(
-                "ViT mosaic: canvas_pad+edge_trim=%d exceeds half the canvas "
-                "(%dx%d); clamping to %d.", cp, canvas_h, canvas_w, max(0, max_cp),
-            )
-            cp = max(0, max_cp)
-        if cp > 0:
-            cropped_h = canvas_h - 2 * cp
-            cropped_w = canvas_w - 2 * cp
-            mosaic_snap = self._mosaic[cp:cp + cropped_h, cp:cp + cropped_w].copy()
-            counts_snap = self._counts[cp:cp + cropped_h, cp:cp + cropped_w].copy()
-            mosaic_amp_snap = (
-                self._mosaic_amp[cp:cp + cropped_h, cp:cp + cropped_w].copy()
-                if self._mosaic_amp is not None else None
-            )
-            counts_amp_snap = (
-                self._counts_amp[cp:cp + cropped_h, cp:cp + cropped_w].copy()
-                if self._counts_amp is not None else None
-            )
-            oy_um, ox_um = self._canvas_origin_um
-            origin_snap = (oy_um + cp * ps * 1e6, ox_um + cp * ps * 1e6)
-            bbox = (
-                max(0, py_min - cp),
-                min(cropped_h, py_max - cp),
-                max(0, px_min - cp),
-                min(cropped_w, px_max - cp),
-            )
-        else:
-            mosaic_snap = self._mosaic.copy()
-            counts_snap = self._counts.copy()
-            mosaic_amp_snap = self._mosaic_amp.copy() if self._mosaic_amp is not None else None
-            counts_amp_snap = self._counts_amp.copy() if self._counts_amp is not None else None
-            origin_snap = self._canvas_origin_um
-            bbox = (
-                max(0, py_min),
-                min(canvas_h, py_max),
-                max(0, px_min),
-                min(canvas_w, px_max),
-            )
+        cropped_h = canvas_h - 2 * cp
+        cropped_w = canvas_w - 2 * cp
+        mosaic_snap = crop_mosaic_border(self._mosaic, cp).copy()
+        counts_snap = crop_mosaic_border(self._counts, cp).copy()
+        mosaic_amp_snap = (
+            crop_mosaic_border(self._mosaic_amp, cp).copy()
+            if self._mosaic_amp is not None else None
+        )
+        counts_amp_snap = (
+            crop_mosaic_border(self._counts_amp, cp).copy()
+            if self._counts_amp is not None else None
+        )
+        oy_um, ox_um = self._canvas_origin_um
+        origin_snap = (oy_um + cp * ps * 1e6, ox_um + cp * ps * 1e6)
+        bbox = (
+            max(0, py_min - cp),
+            min(cropped_h, py_max - cp),
+            max(0, px_min - cp),
+            min(cropped_w, px_max - cp),
+        )
 
         # Hand off to MosaicWriterOp via a copy. The downstream operator runs
         # on its own scheduler thread and does the (heavier) normalize +
