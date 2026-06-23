@@ -88,12 +88,6 @@ class TiledWriter:
         # fine_tune writes are enabled.
         self._dp_node = None
         self._dp_chunk_size = 0
-        # Registration kwargs for the dp / inference buffers, captured at
-        # start_*_buffer so reset_*_buffer can re-register a fresh (cleared)
-        # array on each new scan. These buffers are live-viz only and not
-        # persisted per scan, so each new scan reuses one buffer.
-        self._dp_buffer_kwargs = None
-        self._inference_buffer_kwargs = None
         # ViT inference output buffer (sibling to dp; same stride).
         self._inference_node = None
         # ViT mosaic node, set by the first write_vit_mosaic so subsequent
@@ -308,15 +302,6 @@ class TiledWriter:
         if self._run is None:
             logger.warning("start_diffraction_buffer before start_run; skipping")
             return
-        # Remember the args so reset_diffraction_buffer can re-register an
-        # identical fresh buffer on a new scan.
-        self._dp_buffer_kwargs = dict(
-            n_keep=int(n_keep),
-            frame_shape=(int(frame_shape[0]), int(frame_shape[1])),
-            dtype=dtype,
-            frames_per_chunk=int(frames_per_chunk),
-            stride=int(stride),
-        )
         try:
             from tiled.structures.array import ArrayStructure, BuiltinDtype
             from tiled.structures.core import StructureFamily
@@ -436,19 +421,18 @@ class TiledWriter:
             logger.exception("TiledWriter.write_diffraction_chunk failed")
 
     def reset_diffraction_buffer(self) -> None:
-        """Clear the dp buffer for a new scan.
+        """Logically clear the dp buffer for a new scan.
 
-        The dp buffer is live-viz only (not persisted per scan), so each new
-        scan reuses one buffer. ``start_diffraction_buffer`` deletes any prior
-        ``dp`` node before creating the new one, so re-calling it with the
-        stored kwargs registers a fresh, zero-init array — wiping the previous
-        scan's frames (important when the new scan is shorter, so no stale tail
-        shows on the dashboard). Also rebases the ``dp_frames_written`` counter.
+        Tiled does not allow deleting/replacing a node via the writer client,
+        so we cannot re-register a fresh array. Instead we clear *logically*:
+        the new scan's frames overwrite rows from 0 (the Eiger frame index
+        reset already rebases ``row = idx // stride``), ``extend=True`` on the
+        patches grows the array if the new scan is longer, and resetting
+        ``dp_frames_written`` to 0 rebases the dashboard's frame slider so any
+        rows beyond the new scan's extent (stale data from a longer previous
+        scan) stay hidden. The dp buffer is live-viz only, so leftover bytes in
+        not-yet-overwritten rows are harmless — the slider never reaches them.
         """
-        kwargs = getattr(self, "_dp_buffer_kwargs", None)
-        if kwargs is None:
-            return
-        self.start_diffraction_buffer(**kwargs)
         if self._run is not None:
             try:
                 self._run.update_metadata(metadata={"dp_frames_written": 0})
@@ -481,14 +465,6 @@ class TiledWriter:
         if self._run is None:
             logger.warning("start_inference_buffer before start_run; skipping")
             return
-        self._inference_buffer_kwargs = dict(
-            n_keep=int(n_keep),
-            frame_shape=(int(frame_shape[0]), int(frame_shape[1])),
-            dtype=dtype,
-            n_channels=int(n_channels),
-            frames_per_chunk=int(frames_per_chunk),
-            stride=int(stride),
-        )
         try:
             from tiled.structures.array import ArrayStructure, BuiltinDtype
             from tiled.structures.core import StructureFamily
@@ -568,15 +544,6 @@ class TiledWriter:
                     )
         except Exception:
             logger.exception("TiledWriter.write_inference_chunk failed")
-
-    def reset_inference_buffer(self) -> None:
-        """Clear the inference buffer for a new scan (see
-        ``reset_diffraction_buffer``). Re-registers a fresh zero-init array via
-        the stored kwargs so the previous scan's predictions are wiped."""
-        kwargs = getattr(self, "_inference_buffer_kwargs", None)
-        if kwargs is None:
-            return
-        self.start_inference_buffer(**kwargs)
 
     def write_probe_positions_m(
         self,

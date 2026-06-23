@@ -585,9 +585,6 @@ class InferenceFrameWriterOp(Operator):
     def __init__(self, *args, stride: int = 1, **kwargs):
         super().__init__(*args, **kwargs)
         self._stride = max(1, int(stride))
-        # New-scan detection (see FrameWriterOp): clear the inference buffer
-        # when the Eiger frame index resets.
-        self._max_idx_seen = -1
 
     def setup(self, spec: OperatorSpec):
         spec.input("results").connector(
@@ -599,13 +596,10 @@ class InferenceFrameWriterOp(Operator):
             results = op_input.receive("results")
             pred, indices = results
             idx_arr = np.asarray(indices)
-            # New-scan detection: clear the inference buffer when the frame
-            # index resets (see FrameWriterOp).
-            batch_min = int(idx_arr.min())
-            if batch_min < self._max_idx_seen:
-                _writer.reset_inference_buffer()
-                self._max_idx_seen = -1
-            self._max_idx_seen = max(self._max_idx_seen, int(idx_arr.max()))
+            # New scan = Eiger frame index reset; the inference buffer is
+            # live-viz only and its rows are overwritten from 0 by the new
+            # scan, so no explicit clear is needed (the dashboard bounds it by
+            # dp_frames_written, which FrameWriterOp rebases).
             if self._stride <= 1:
                 kept_pred = np.asarray(pred)
                 kept_rows = idx_arr
