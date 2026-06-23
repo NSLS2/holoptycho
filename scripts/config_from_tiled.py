@@ -846,6 +846,20 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--mosaic-transpose",
+        action="store_true",
+        help=(
+            "Transpose the ViT mosaic so the written array is image[y(slow), "
+            "x(fast)] — x_range horizontal (landscape), the standard image "
+            "convention — instead of the internal image[x(fast), y(slow)] "
+            "(portrait, bigger fast extent vertical). Only the final array and "
+            "its origin row/col are swapped (exactly np.transpose of the "
+            "untransposed mosaic); stitching and placement are unchanged. Note "
+            "this rotates the sample content into the transposed frame. Off by "
+            "default."
+        ),
+    )
+    recon.add_argument(
         "--min-overlap-count",
         type=float,
         default=None,
@@ -1005,6 +1019,9 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         # mosaic middle. Needed on a live mid-scan join AND on a replay of a
         # scan whose recorded first line settled. Real JSON bool.
         config["mosaic_slow_gate"] = True
+    if getattr(args, "mosaic_transpose", False):
+        # Landscape transpose of the written mosaic (image[slow, fast]).
+        config["mosaic_transpose"] = True
     if args.min_overlap_count is not None:
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.mosaic_edge_trim is not None:
