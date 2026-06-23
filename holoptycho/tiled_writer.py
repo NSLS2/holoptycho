@@ -704,6 +704,50 @@ class TiledWriter:
         except Exception:
             logger.exception("TiledWriter.write_vit_mosaic failed")
 
+    @staticmethod
+    def _fit_to(arr: np.ndarray, h: int, w: int) -> np.ndarray:
+        """Center pad (with NaN) / crop a 2D mosaic to (h, w) for the stack."""
+        a = np.asarray(arr, dtype=np.float32)
+        ah, aw = a.shape
+        if (ah, aw) == (h, w):
+            return a
+        out = np.full((h, w), np.nan, dtype=np.float32)
+        # source crop window (center) + dest offset
+        sy = max((ah - h) // 2, 0); sx = max((aw - w) // 2, 0)
+        dy = max((h - ah) // 2, 0); dx = max((w - aw) // 2, 0)
+        ch = min(ah, h); cw = min(aw, w)
+        out[dy:dy + ch, dx:dx + cw] = a[sy:sy + ch, sx:sx + cw]
+        return out
+
+    def _ensure_mosaic_stack(self, h: int, w: int, max_scans: int):
+        """Register vit/mosaic_stack + _amp as (max_scans, h, w) float32, once."""
+        if getattr(self, "_mosaic_stack_node", None) is not None:
+            return
+        from tiled.structures.array import ArrayStructure, BuiltinDtype
+        from tiled.structures.core import StructureFamily
+        from tiled.structures.data_source import DataSource
+
+        vit = _get_or_create(self._run, "vit")
+        dt = BuiltinDtype.from_numpy_dtype(np.dtype(np.float32))
+        structure = ArrayStructure(
+            shape=(int(max_scans), int(h), int(w)),
+            chunks=((1,) * int(max_scans), (int(h),), (int(w),)),
+            data_type=dt,
+        )
+        ds = DataSource(structure=structure, structure_family=StructureFamily.array)
+        nodes = {}
+        for key in ("mosaic_stack", "mosaic_stack_amp"):
+            if key in vit:
+                del vit[key]
+            nodes[key] = vit.new(
+                StructureFamily.array, [ds], key=key,
+                specs=_SPECS, access_tags=_ACCESS_TAGS,
+            )
+        self._mosaic_stack_node = nodes["mosaic_stack"]
+        self._mosaic_stack_amp_node = nodes["mosaic_stack_amp"]
+        self._mosaic_stack_hw = (int(h), int(w))
+        self._mosaic_stack_max = int(max_scans)
+
     def archive_vit_mosaic(
         self,
         scan_index: int,
@@ -711,30 +755,46 @@ class TiledWriter:
         mosaic_amp: np.ndarray | None = None,
         *,
         meta: dict | None = None,
+        max_scans: int = 1024,
     ) -> None:
-        """Archive a finished scan's final mosaic to ``vit/mosaics/{index}``.
+        """Append a finished scan's final mosaic to the 3D stack ``vit/mosaic_stack``.
 
-        ``vit/mosaic`` always tracks the live *current* scan; this preserves
-        each completed scan's final phase (and amplitude) mosaic under
-        ``vit/mosaics/NNN/{mosaic,mosaic_amp}`` so one live session keeps every
-        scan. Also stamps ``num_mosaics`` in the run metadata.
+        ``vit/mosaic`` always tracks the live *current* scan; this preserves each
+        completed scan's final phase (and amplitude) mosaic as slice
+        ``[scan_index]`` of ``vit/mosaic_stack`` / ``vit/mosaic_stack_amp``
+        ``(max_scans, H, W)`` float32 — a single array readable in one call. The
+        first archived scan fixes ``H/W``; later scans are center pad/cropped to
+        it (sizes match when the scan shape is pinned via the override flags).
+        ``num_mosaics`` in the run metadata tracks how many slices are filled.
         """
         if self._run is None:
             logger.warning("archive_vit_mosaic before start_run; skipping")
             return
+        si = int(scan_index)
+        if si >= int(max_scans):
+            logger.warning(
+                "archive_vit_mosaic: scan_index %d >= max_scans %d; not stacked",
+                si, int(max_scans),
+            )
+            return
         try:
-            vit = _get_or_create(self._run, "vit")
-            mosaics = _get_or_create(vit, "mosaics")
-            node = _get_or_create(mosaics, f"{int(scan_index):03d}")
-            m = dict(meta or {})
-            m["scan_index"] = int(scan_index)
-            self._write_or_overwrite_array(node, "mosaic", mosaic, metadata=m)
-            if mosaic_amp is not None:
-                self._write_or_overwrite_array(node, "mosaic_amp", mosaic_amp, metadata=m)
-            self._run.update_metadata(metadata={"num_mosaics": int(scan_index) + 1})
+            h, w = int(mosaic.shape[0]), int(mosaic.shape[1])
+            self._ensure_mosaic_stack(h, w, max_scans)
+            sh, sw = self._mosaic_stack_hw
+            self._mosaic_stack_node.patch(
+                self._fit_to(mosaic, sh, sw)[None], offset=(si, 0, 0)
+            )
+            if mosaic_amp is not None and self._mosaic_stack_amp_node is not None:
+                self._mosaic_stack_amp_node.patch(
+                    self._fit_to(mosaic_amp, sh, sw)[None], offset=(si, 0, 0)
+                )
+            self._run.update_metadata(metadata={
+                "num_mosaics": si + 1,
+                "mosaic_stack_shape": [sh, sw],
+            })
             logger.info(
-                "TiledWriter.archive_vit_mosaic run=%s scan_index=%d shape=%s",
-                self._run_uid, int(scan_index), tuple(mosaic.shape),
+                "TiledWriter.archive_vit_mosaic run=%s scan_index=%d -> stack[%d] (%d,%d)",
+                self._run_uid, si, si, sh, sw,
             )
         except Exception:
             logger.exception("TiledWriter.archive_vit_mosaic failed")
