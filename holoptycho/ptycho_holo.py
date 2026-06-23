@@ -780,6 +780,10 @@ class PtychoApp(Application):
                 f"dp_orient must be 'auto' or one of {D4_NAMES}; got {_dp_orient_cfg!r}"
             )
         self.image_proc.dp_orient = _dp_orient_cfg
+        # ImageBatchOp writes the segmentation mask/box for the dashboard; give
+        # it the same dp_orient so those overlays land in the saved-DP frame
+        # (diffraction/dp applies dp_orient to the tap). 'auto' seeds identity.
+        self.image_batch.dp_orient = _dp_orient_cfg
         # Per-scan ViT normalization: the max intensity across all DPs in
         # this scan, with hot pixels excluded. In live mode we don't have
         # the full DP stack to compute it from, so it must come from the

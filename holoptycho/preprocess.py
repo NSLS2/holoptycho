@@ -12,6 +12,7 @@ from ptychoml.preprocess import (
     crop_to_roi,
     inpaint_bad_pixels,
     preprocess_diffraction,
+    D4_NAMES,
 )
 
 from .orientation import compute_pos_bases, reorient_d4
@@ -122,6 +123,10 @@ class ImageBatchOp(Operator):
         self._hr_buf = None           # transient (batchsize, Hh, Wh) first-batch buffer
         self._headroom_roi = None     # global-coords headroom window
         self._seg_box_stamped = False  # crop box written to run metadata yet?
+        # D4 orientation applied to the saved DP tap (diffraction/dp). The
+        # segmentation mask/box are computed pre-dp_orient, so we apply this to
+        # them before writing so they overlay the saved DP. Set by compose().
+        self.dp_orient = 'identity'
 
         # Per-second compute() throughput counters. See note in EigerZmqRxOp.
         self._diag_window_start = time.time()
@@ -272,28 +277,32 @@ class ImageBatchOp(Operator):
                 int(box[0, 0]), int(box[0, 1]), int(box[1, 0]), int(box[1, 1]),
             )
 
-        # Stamp the segmented beam blob into the run metadata + a mask node
+        # Write the segmented beam blob into the run metadata + a mask node
         # (once) so the dashboard can overlay the segmentation on the DP plot to
-        # confirm the auto-centering found the beam. We express everything in
-        # DP-relative pixels (relative to the crop box origin) so it lines up
-        # with the cropped detector frame the GUI shows.
-        #   * segmentation_box  — the blob bounding box [[by0,bx0],[by1,bx1]].
-        #   * vit/segmentation_mask — the blob's boolean mask cropped to the
-        #     ny x nx DP region (uint8), the actual segmented shape.
-        if not self._seg_box_stamped and blob_bbox is not None:
-            y0c = int(self._center_box[0, 0])
-            x0c = int(self._center_box[1, 0])
-            seg_box = [
-                [int(blob_bbox[0, 0]) - y0c, int(blob_bbox[1, 0]) - x0c],
-                [int(blob_bbox[0, 1]) - y0c, int(blob_bbox[1, 1]) - x0c],
-            ]
-            # Crop the window-local blob mask to the crop box (→ DP frame).
+        # confirm the auto-centering found the beam. Both are in the SAVED-DP
+        # frame: crop the blob mask to the ny x nx DP region, apply dp_orient
+        # (diffraction/dp applies it to the tap), and derive the box from the
+        # oriented mask so the box and mask stay consistent and aligned.
+        #   * vit/segmentation_mask — the blob mask (uint8) in the DP frame.
+        #   * segmentation_box      — its bbox [[by0,bx0],[by1,bx1]] in DP px.
+        if not self._seg_box_stamped and blob_mask is not None:
             hy0 = int(self._headroom_roi[0, 0])
             hx0 = int(self._headroom_roi[1, 0])
-            ry0, rx0 = y0c - hy0, x0c - hx0
-            mask_dp = np.ascontiguousarray(
-                blob_mask[ry0:ry0 + ny, rx0:rx0 + nx]
-            ).astype(np.uint8)
+            ry0 = int(self._center_box[0, 0]) - hy0
+            rx0 = int(self._center_box[1, 0]) - hx0
+            mask_crop = blob_mask[ry0:ry0 + ny, rx0:rx0 + nx].astype(np.uint8)
+            # Align with diffraction/dp by applying the same D4. ('auto' seeds
+            # identity, matching the first-batch tap before the sweep resolves.)
+            do = self.dp_orient if self.dp_orient in D4_NAMES else 'identity'
+            mask_dp = np.ascontiguousarray(apply_d4(mask_crop[None], do)[0])
+            ys, xs = np.where(mask_dp)
+            if len(ys):
+                seg_box = [
+                    [int(ys.min()), int(xs.min())],
+                    [int(ys.max()) + 1, int(xs.max()) + 1],
+                ]
+            else:
+                seg_box = [[0, 0], [0, 0]]
             try:
                 from .tiled_writer import get_writer
                 w = get_writer()
