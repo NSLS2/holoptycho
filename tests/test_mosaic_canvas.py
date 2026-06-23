@@ -1,7 +1,12 @@
 """Tests for the ViT mosaic-canvas logic (holoptycho-specific)."""
 import numpy as np
 
-from holoptycho.mosaic_canvas import estimate_canvas_mid, partition_pending
+from holoptycho.mosaic_canvas import (
+    estimate_canvas_mid,
+    fit_slow_axis,
+    partition_pending,
+    slow_gate_mask,
+)
 
 
 def test_uses_observed_midpoint_when_range_well_covered():
@@ -111,3 +116,74 @@ def test_partition_pending_carries_patch_with_index():
 
 def test_partition_pending_empty():
     assert partition_pending([], np.zeros((3, 2))) == ([], [])
+
+
+# ----- slow-axis gate (mid-scan-join settling rejection) --------------------
+
+def _raster_slow(n_bogus=200, n_lines=210, period=280, rng_um=21.0, seed=0):
+    """Build (frame_idx, slow) for a raster with a leading bogus settling line.
+
+    The first ``n_bogus`` frames sit at slow≈0 (stale encoder reading on a
+    mid-scan join); the real scan then ramps slow from +rng/2 down to -rng/2,
+    one step per fast-line.
+    """
+    rng = np.random.default_rng(seed)
+    idx, slow = [], []
+    for i in range(n_bogus):
+        idx.append(i)
+        slow.append(0.0 + rng.normal(0, 0.05))
+    f = n_bogus
+    half = rng_um / 2.0
+    for ln in range(n_lines):
+        s = half - ln * (rng_um / (n_lines - 1))
+        for _ in range(period):
+            idx.append(f)
+            slow.append(s + rng.normal(0, 0.02))
+            f += 1
+    return np.array(idx), np.array(slow)
+
+
+def test_fit_slow_axis_rejects_leading_bogus_line():
+    idx, slow = _raster_slow()
+    m = idx < 1500  # warm-up window: bogus line + a few clean lines
+    tol = 0.05 * 28.0
+    fit = fit_slow_axis(idx[m], slow[m], tol=tol, min_frames=512)
+    assert fit is not None
+    a, b = fit
+    assert a > 9.0          # extrapolated start ≈ +10.5
+    assert b < 0            # decreasing scan
+    keep = slow_gate_mask(idx[m], slow[m], a, b, tol)
+    bogus = idx[m] < 200
+    assert keep[bogus].sum() == 0        # all bogus dropped
+    assert keep[~bogus].all()            # all clean kept
+
+
+def test_fit_slow_axis_returns_none_when_too_few():
+    idx = np.arange(100)
+    slow = np.linspace(10, -10, 100)
+    assert fit_slow_axis(idx, slow, tol=1.0, min_frames=512) is None
+
+
+def test_slow_axis_better_than_fast_axis():
+    # The fast axis sweeps its full range each line -> not linear in frame idx,
+    # so it yields far fewer inliers than the genuinely-linear slow axis.
+    idx, slow = _raster_slow()
+    rng = np.random.default_rng(1)
+    fast = []
+    for _ in range(200):
+        fast.append(rng.uniform(-14, 14))
+    for _ln in range(210):
+        for k in range(280):
+            fast.append(14 - 28 * (k / 280) + rng.normal(0, 0.02))
+    fast = np.array(fast)
+    m = idx < 1500
+    tol = 0.05 * 28.0
+    fs = fit_slow_axis(idx[m], slow[m], tol=tol, min_frames=512)
+    ff = fit_slow_axis(idx[m], fast[m], tol=tol, min_frames=512)
+    frac_slow = slow_gate_mask(idx[m], slow[m], *fs, tol).mean()
+    frac_fast = (
+        slow_gate_mask(idx[m], fast[m], *ff, tol).mean() if ff else 0.0
+    )
+    assert frac_slow > 0.6
+    assert frac_slow > frac_fast
+

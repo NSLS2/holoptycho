@@ -26,7 +26,12 @@ from ptychoml.stitch import (
     stitch_batch_livestitch_into,
 )
 from ptychoml.preprocess import apply_d4, D4_NAMES
-from .mosaic_canvas import estimate_canvas_mid, partition_pending
+from .mosaic_canvas import (
+    estimate_canvas_mid,
+    fit_slow_axis,
+    partition_pending,
+    slow_gate_mask,
+)
 from .tiled_writer import get_writer
 
 # Module-level writer shared with ptycho_holo.py operators.
@@ -391,6 +396,7 @@ class SaveViTResult(Operator):
         enable_batch_writes: bool = False,
         patch_flip: str = 'identity',
         oversample: int = 1,
+        slow_gate: bool = False,
         **kwargs,
     ):
         # Holoscan's Operator.__init__ calls setup(spec), so any attribute
@@ -465,6 +471,29 @@ class SaveViTResult(Operator):
         # positions arrive. Prevents rows from being permanently missing when
         # PointProcessorOp is momentarily behind the ViT branch.
         self._pending_frames: list[tuple[np.ndarray, int]] = []
+        # Slow-axis monotonic gate. The opening frames of a scan can carry a
+        # stale slow-axis encoder reading (≈ mid-range) before the PandA
+        # position stream syncs to the true scan start — both on a live
+        # mid-scan join and on a replay of a scan whose recorded first line
+        # settled. Stitched as-is they paint a bright band across the middle of
+        # the canvas (the "first batch at top AND middle" bug). When enabled we
+        # buffer the opening frames, fit the monotonic slow(frame_idx) line,
+        # and reject the leading outliers. Off by default (no gate); enabled
+        # per-run via the ``mosaic_slow_gate`` config flag.
+        self._slow_gate_enabled = bool(slow_gate)
+        self._slow_gate_locked = False
+        self._slow_gate_fit: tuple[float, float] | None = None  # (a, b)
+        self._slow_gate_col = 0
+        self._slow_gate_tol = 0.0
+        # Residual tolerance: a frame is on-trajectory if its slow position is
+        # within 5% of the (larger commanded) scan range of where the fitted
+        # monotonic line puts its frame index. The stale leading frames sit
+        # ~half a range off, far beyond this.
+        _ranges = [r for r in (x_range_um, y_range_um) if r]
+        if _ranges:
+            self._slow_gate_tol = 0.05 * float(max(_ranges))
+        # (pred_2hw, frame_idx) buffered during the gate warm-up window.
+        self._slow_gate_warmup: list[tuple[np.ndarray, int]] = []
         # Whether stitching is even possible (requires scan-grid params and a
         # positions provider). If not, we still write the per-batch arrays
         # so an offline analyst has the raw data.
@@ -493,6 +522,11 @@ class SaveViTResult(Operator):
         self._half_w = 0
         self._crop_box_stamped = False
         self._pending_frames.clear()
+        # A reset means a fresh scan from frame 0, so the mid-scan-join gate is
+        # no longer relevant — clear it so the new scan stitches normally.
+        self._slow_gate_locked = False
+        self._slow_gate_fit = None
+        self._slow_gate_warmup.clear()
 
     def _ensure_canvas(self, patch_h: int, patch_w: int, positions_um: np.ndarray) -> bool:
         """Allocate canvas + counts on first batch. Returns True if ready."""
@@ -662,6 +696,119 @@ class SaveViTResult(Operator):
             .astype(np.float32)
         )
 
+    _SLOW_GATE_MIN_FRAMES = 512
+    _SLOW_GATE_MAX_WARMUP = 6000
+    _SLOW_GATE_MIN_INLIER_FRAC = 0.6
+
+    def _slow_gate(self, pred, indices, positions_um):
+        """Drop mid-scan-join leading settling frames.
+
+        Returns ``(pred, indices)`` of the frames to stitch this call, or
+        ``(None, None)`` while still buffering the warm-up window (nothing to
+        stitch yet). The slow axis steps ~linearly with absolute frame index in
+        a clean raster; the stale opening frames sit ~half a range off that
+        line and are rejected once it is fitted. The slow column (0 vs 1) is
+        auto-detected as the more-linear axis so the gate is robust to the
+        ``position_swap_xy`` convention.
+        """
+        idx = np.asarray(indices, dtype=np.int64)
+        n = len(positions_um)
+
+        if self._slow_gate_locked:
+            if self._slow_gate_fit is None:
+                return pred, indices  # gate gave up — pass everything through
+            keep = self._gate_keep_mask(idx, positions_um)
+            n_drop = int((~keep).sum())
+            if n_drop:
+                self._logger.debug(
+                    "slow-gate: dropped %d off-trajectory frames", n_drop)
+            return pred[keep], indices[keep]
+
+        # --- warm-up: buffer this batch, then try to lock the fit ----------
+        for i in range(len(idx)):
+            self._slow_gate_warmup.append((pred[i].copy(), int(idx[i])))
+        buf_idx = np.array([j for _, j in self._slow_gate_warmup], dtype=np.int64)
+        inrange = buf_idx < n
+        rows = np.full((len(buf_idx), 2), np.nan)
+        rows[inrange] = positions_um[buf_idx[inrange]]
+        finite = np.isfinite(rows).all(axis=1)
+
+        best = None  # (inlier_frac, col, (a, b))
+        if int(finite.sum()) >= self._SLOW_GATE_MIN_FRAMES:
+            for col in (0, 1):
+                fit = fit_slow_axis(
+                    buf_idx[finite], rows[finite, col],
+                    tol=self._slow_gate_tol,
+                    min_frames=self._SLOW_GATE_MIN_FRAMES,
+                )
+                if fit is None:
+                    continue
+                frac = float(slow_gate_mask(
+                    buf_idx[finite], rows[finite, col], *fit,
+                    self._slow_gate_tol).mean())
+                if best is None or frac > best[0]:
+                    best = (frac, col, fit)
+
+        if best is None or best[0] < self._SLOW_GATE_MIN_INLIER_FRAC:
+            if len(self._slow_gate_warmup) > self._SLOW_GATE_MAX_WARMUP:
+                self._logger.warning(
+                    "slow-gate: no monotonic trajectory after %d frames — "
+                    "disabling gate and flushing buffer",
+                    len(self._slow_gate_warmup))
+                self._slow_gate_locked = True
+                self._slow_gate_fit = None
+                self._slow_gate_col = 0
+                return self._flush_warmup(positions_um, keep_mask=None)
+            return None, None  # keep buffering
+
+        frac, col, fit = best
+        self._slow_gate_locked = True
+        self._slow_gate_fit = fit
+        self._slow_gate_col = col
+        a, b = fit
+        keep = np.zeros(len(buf_idx), dtype=bool)
+        keep[finite] = slow_gate_mask(
+            buf_idx[finite], rows[finite, col], a, b, self._slow_gate_tol)
+        n_drop = int((finite & ~keep).sum())
+        self._logger.info(
+            "slow-gate locked on col %d: a=%.3fum b=%.3eum/frame tol=%.3fum "
+            "inliers=%.0f%%; dropped %d leading off-trajectory frames of %d",
+            col, a, b, self._slow_gate_tol, 100 * frac, n_drop, len(buf_idx))
+        return self._flush_warmup(positions_um, keep_mask=keep)
+
+    def _gate_keep_mask(self, idx, positions_um):
+        """Keep-mask for a locked gate: NaN-position frames pass (they retry
+        via the pending buffer); finite ones must match the fitted line."""
+        a, b = self._slow_gate_fit
+        col = self._slow_gate_col
+        n = len(positions_um)
+        keep = np.ones(len(idx), dtype=bool)
+        inrange = idx < n
+        slow = np.full(len(idx), np.nan)
+        slow[inrange] = positions_um[idx[inrange], col]
+        finite = np.isfinite(slow)
+        keep[finite] = slow_gate_mask(
+            idx[finite], slow[finite], a, b, self._slow_gate_tol)
+        return keep
+
+    def _flush_warmup(self, positions_um, keep_mask):
+        """Drain the warm-up buffer: return on-trajectory frames to stitch now;
+        NaN-position frames go to the retry buffer; off-trajectory dropped."""
+        n = len(positions_um)
+        kept_pred, kept_idx = [], []
+        for k, (p, j) in enumerate(self._slow_gate_warmup):
+            if j < n and np.isfinite(positions_um[j]).all():
+                if keep_mask is None or keep_mask[k]:
+                    kept_pred.append(p)
+                    kept_idx.append(j)
+                # else: leading off-trajectory settling frame — drop
+            else:
+                self._pending_frames.append((p, j))
+        self._slow_gate_warmup = []
+        if not kept_pred:
+            return None, None
+        return np.stack(kept_pred, axis=0), np.array(kept_idx, dtype=np.int64)
+
     def _stitch_batch(self, pred: np.ndarray, indices: np.ndarray):
         """Stitch the batch into the in-memory mosaic and return a snapshot.
 
@@ -694,6 +841,17 @@ class SaveViTResult(Operator):
                 extra_idx = np.array([i for _, i in now_ready], dtype=indices.dtype)
                 pred = np.concatenate([pred, extra_pred], axis=0)
                 indices = np.concatenate([indices, extra_idx])
+
+        # Mid-scan-join slow-axis gate: hold the opening frames until the
+        # monotonic slow(frame_idx) trajectory is established, then drop the
+        # stale leading settling frames that would otherwise smear a bright
+        # band across the mosaic middle. No-op once the scan started at frame 0
+        # (gate disabled). Runs before _ensure_canvas so the bogus opening
+        # positions don't bias the canvas centring either.
+        if self._slow_gate_enabled:
+            pred, indices = self._slow_gate(pred, indices, positions_um)
+            if pred is None or len(indices) == 0:
+                return
 
         if not self._ensure_canvas(pred.shape[-1], pred.shape[-1], positions_um):
             # Canvas not ready yet (no finite positions) — buffer everything.

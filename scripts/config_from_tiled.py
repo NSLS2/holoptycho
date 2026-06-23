@@ -832,6 +832,20 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--mosaic-slow-gate",
+        action="store_true",
+        help=(
+            "Reject the bogus settling frames at the start of the scan (a "
+            "stale slow-axis encoder reading ≈ mid-range before the PandA "
+            "position stream syncs to the true start). Without it those frames "
+            "smear a bright band across the middle of the ViT mosaic. The gate "
+            "buffers the opening frames (~512), fits the monotonic "
+            "slow(frame_idx) raster line, and drops the leading outliers. "
+            "Useful on a live mid-scan join AND on a replay of a scan whose "
+            "recorded first line settled. Off by default."
+        ),
+    )
+    recon.add_argument(
         "--min-overlap-count",
         type=float,
         default=None,
@@ -985,6 +999,12 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     if getattr(args, "allow_mid_scan_join", False):
         # Real JSON bool: pipeline reads via bool(getattr(...)) after literal_eval.
         config["allow_mid_scan_join"] = True
+    if getattr(args, "mosaic_slow_gate", False):
+        # Reject the bogus settling frames at the start of the data (stale
+        # slow-axis encoder reading) so they don't smear a band across the
+        # mosaic middle. Needed on a live mid-scan join AND on a replay of a
+        # scan whose recorded first line settled. Real JSON bool.
+        config["mosaic_slow_gate"] = True
     if args.min_overlap_count is not None:
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.mosaic_edge_trim is not None:

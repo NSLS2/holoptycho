@@ -1154,6 +1154,9 @@ class PtychoApp(Application):
             edge_trim=_edge_trim,
             oversample=int(getattr(self.param, "mosaic_oversample", 1) or 1),
             enable_batch_writes=enable_batch_writes,
+            slow_gate=bool(
+                getattr(self.param, "mosaic_slow_gate", False)
+            ),
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")

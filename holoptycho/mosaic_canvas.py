@@ -9,6 +9,57 @@ from __future__ import annotations
 import numpy as np
 
 
+def fit_slow_axis(frame_idx, slow_vals, *, tol, min_frames=512, max_iter=3):
+    """Fit the monotonic slow-axis trajectory ``slow ≈ a + b·frame_idx``.
+
+    A clean fly raster steps the slow axis once per fast-line, so the slow
+    position is ~linear in absolute frame index. When the pipeline joins a
+    scan mid-way, the first ~1-3 fast-lines arrive with a *stale* slow-axis
+    encoder reading (≈ mid-range) before the position stream syncs to the true
+    scan start — those frames sit at a slow value wildly inconsistent with
+    their (very low) frame index, so they are large-residual outliers against
+    the line. We fit by least squares, reject points whose residual exceeds
+    ``tol``, and refit a few times so the small leading bogus run can't drag
+    the line. The leading frames then fail the residual test and get dropped
+    from the mosaic.
+
+    Returns ``(a, b)`` once at least ``min_frames`` samples spanning a usable
+    index range are available, else ``None`` (not enough to lock yet — caller
+    keeps buffering). ``a`` is the slow value extrapolated to ``frame_idx==0``,
+    ``b`` the per-frame slope (sign = scan direction).
+    """
+    fi = np.asarray(frame_idx, dtype=np.float64)
+    sv = np.asarray(slow_vals, dtype=np.float64)
+    if len(fi) < min_frames or fi.ptp() < 1:
+        return None
+    keep = np.ones(len(fi), dtype=bool)
+    a = b = 0.0
+    for _ in range(max_iter):
+        b, a = np.polyfit(fi[keep], sv[keep], 1)
+        resid = np.abs(sv - (a + b * fi))
+        new_keep = resid <= tol
+        if new_keep.sum() < min_frames // 2:
+            # Refit would throw away too much — keep the previous fit.
+            break
+        if np.array_equal(new_keep, keep):
+            break
+        keep = new_keep
+    return float(a), float(b)
+
+
+def slow_gate_mask(frame_idx, slow_vals, a, b, tol):
+    """Boolean mask of frames consistent with the locked slow-axis line.
+
+    ``True`` where ``|slow - (a + b·frame_idx)| <= tol`` — i.e. the frame's
+    slow position matches where the monotonic raster says that frame index
+    should be. Leading mid-scan-join settling frames (stale slow at the wrong
+    index) fall outside ``tol`` and are excluded.
+    """
+    fi = np.asarray(frame_idx, dtype=np.float64)
+    sv = np.asarray(slow_vals, dtype=np.float64)
+    return np.abs(sv - (a + b * fi)) <= tol
+
+
 def partition_pending(pending_frames, positions_um):
     """Split buffered ``(patch, frame_index)`` pairs by position availability.
 
