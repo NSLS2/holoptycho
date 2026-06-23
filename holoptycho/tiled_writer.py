@@ -704,6 +704,41 @@ class TiledWriter:
         except Exception:
             logger.exception("TiledWriter.write_vit_mosaic failed")
 
+    def archive_vit_mosaic(
+        self,
+        scan_index: int,
+        mosaic: np.ndarray,
+        mosaic_amp: np.ndarray | None = None,
+        *,
+        meta: dict | None = None,
+    ) -> None:
+        """Archive a finished scan's final mosaic to ``vit/mosaics/{index}``.
+
+        ``vit/mosaic`` always tracks the live *current* scan; this preserves
+        each completed scan's final phase (and amplitude) mosaic under
+        ``vit/mosaics/NNN/{mosaic,mosaic_amp}`` so one live session keeps every
+        scan. Also stamps ``num_mosaics`` in the run metadata.
+        """
+        if self._run is None:
+            logger.warning("archive_vit_mosaic before start_run; skipping")
+            return
+        try:
+            vit = _get_or_create(self._run, "vit")
+            mosaics = _get_or_create(vit, "mosaics")
+            node = _get_or_create(mosaics, f"{int(scan_index):03d}")
+            m = dict(meta or {})
+            m["scan_index"] = int(scan_index)
+            self._write_or_overwrite_array(node, "mosaic", mosaic, metadata=m)
+            if mosaic_amp is not None:
+                self._write_or_overwrite_array(node, "mosaic_amp", mosaic_amp, metadata=m)
+            self._run.update_metadata(metadata={"num_mosaics": int(scan_index) + 1})
+            logger.info(
+                "TiledWriter.archive_vit_mosaic run=%s scan_index=%d shape=%s",
+                self._run_uid, int(scan_index), tuple(mosaic.shape),
+            )
+        except Exception:
+            logger.exception("TiledWriter.archive_vit_mosaic failed")
+
     def patch_vit_mosaic(
         self,
         subregion: np.ndarray,

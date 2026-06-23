@@ -1045,6 +1045,15 @@ class MosaicWriterOp(Operator):
         self._last_seen_batch_num = -1
         self._fill_value = 0.0
         self._fill_value_amp = 0.0
+        # Per-scan mosaic history: vit/mosaic always holds the live CURRENT
+        # scan, and on each new-scan detection the just-finished scan's final
+        # mosaic is archived to vit/mosaics/{index}. _scan_index is the index of
+        # the scan currently being written; the last normalised mosaic/amp are
+        # cached so they can be archived when the next scan starts.
+        self._scan_index = 0
+        self._last_mosaic = None
+        self._last_mosaic_amp = None
+        self._last_mosaic_meta = None
 
     def setup(self, spec: OperatorSpec):
         # capacity=1 + POP gives single-slot, latest-wins semantics: while
@@ -1070,8 +1079,21 @@ class MosaicWriterOp(Operator):
             t0 = time.perf_counter()
 
             # Reset on new-scan detection: SaveViTResult resets batch_num to 0
-            # at the start of each scan.
+            # at the start of each scan. Archive the just-finished scan's final
+            # mosaic to vit/mosaics/{index} before clearing for the new scan, so
+            # one live session preserves every scan's mosaic (vit/mosaic itself
+            # always tracks the current scan for the live dashboard).
             if batch_num < self._last_seen_batch_num:
+                if self._last_mosaic is not None:
+                    _writer.archive_vit_mosaic(
+                        self._scan_index,
+                        self._last_mosaic,
+                        self._last_mosaic_amp,
+                        meta=self._last_mosaic_meta or {},
+                    )
+                self._scan_index += 1
+                self._last_mosaic = None
+                self._last_mosaic_amp = None
                 self._fill_value = 0.0
                 self._fill_value_amp = 0.0
             self._last_seen_batch_num = batch_num
@@ -1094,6 +1116,15 @@ class MosaicWriterOp(Operator):
                 pixel_size_m=pixel_size_m,
                 canvas_origin_um=canvas_origin_um,
             )
+            # Cache for archival to vit/mosaics/{index} when the next scan
+            # starts (so the final state of this scan is preserved).
+            self._last_mosaic = normalised
+            self._last_mosaic_meta = {
+                "pixel_size_m": float(pixel_size_m),
+                "canvas_origin_um": [
+                    float(canvas_origin_um[0]), float(canvas_origin_um[1])
+                ],
+            }
             if mosaic_amp is not None and counts_amp is not None:
                 self._fill_value_amp, norm_amp = normalize_mosaic(
                     mosaic_amp, counts_amp, min_overlap_count
@@ -1104,6 +1135,7 @@ class MosaicWriterOp(Operator):
                     pixel_size_m=pixel_size_m,
                     canvas_origin_um=canvas_origin_um,
                 )
+                self._last_mosaic_amp = norm_amp
             t_done = time.perf_counter()
             self._logger.info(
                 "MosaicWriterOp: chunk %d/%d (%d frames) FULL "
