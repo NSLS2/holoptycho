@@ -397,6 +397,7 @@ class SaveViTResult(Operator):
         patch_flip: str = 'identity',
         oversample: int = 1,
         slow_gate: bool = False,
+        transpose: bool = False,
         **kwargs,
     ):
         # Holoscan's Operator.__init__ calls setup(spec), so any attribute
@@ -444,6 +445,13 @@ class SaveViTResult(Operator):
         # (1px streaks along the scan axes) in real space — no Fourier wrap or
         # phase-wrap artifacts. S=1 (default) = original behaviour.
         self._oversample = max(1, int(oversample))
+        # Transpose the mosaic at the snapshot hand-off so the written array is
+        # image[y(slow), x(fast)] (x_range horizontal / landscape) instead of
+        # the internal image[x(fast), y(slow)] (portrait). Stitching, canvas
+        # allocation and placement are unchanged — only the final array (and its
+        # origin row/col) are swapped, so it is exactly np.transpose() of the
+        # untransposed mosaic. Off by default.
+        self._transpose = bool(transpose)
         # Target-grid canvas dims (set in _ensure_canvas); the in-memory canvas
         # is S× larger on each axis.
         self._target_h: int = 0
@@ -1049,6 +1057,20 @@ class SaveViTResult(Operator):
             max(0, px_min - cp),
             min(cropped_w, px_max - cp),
         )
+
+        # Optional landscape transpose: swap rows<->cols of every snapshot
+        # array (and the origin/bbox row<->col) so the written mosaic is
+        # image[slow, fast]. ascontiguousarray keeps the downstream tiled
+        # write/normalize on C-contiguous buffers.
+        if self._transpose:
+            mosaic_snap = np.ascontiguousarray(mosaic_snap.T)
+            counts_snap = np.ascontiguousarray(counts_snap.T)
+            if mosaic_amp_snap is not None:
+                mosaic_amp_snap = np.ascontiguousarray(mosaic_amp_snap.T)
+            if counts_amp_snap is not None:
+                counts_amp_snap = np.ascontiguousarray(counts_amp_snap.T)
+            origin_snap = (origin_snap[1], origin_snap[0])
+            bbox = (bbox[2], bbox[3], bbox[0], bbox[1])
 
         # Hand off to MosaicWriterOp via a copy. The downstream operator runs
         # on its own scheduler thread and does the (heavier) normalize +

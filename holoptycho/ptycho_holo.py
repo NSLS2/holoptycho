@@ -1157,6 +1157,9 @@ class PtychoApp(Application):
             slow_gate=bool(
                 getattr(self.param, "mosaic_slow_gate", False)
             ),
+            transpose=bool(
+                getattr(self.param, "mosaic_transpose", False)
+            ),
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
