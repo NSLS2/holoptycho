@@ -483,6 +483,11 @@ class FrameWriterOp(Operator):
         # (mid-scan join for live monitoring) — the early dp rows stay empty.
         # Default False keeps the fail-fast guard for fine-tunable runs.
         self._allow_mid_scan_join = bool(allow_mid_scan_join)
+        # Highest scan-frame index seen; a batch whose first index drops below
+        # it marks a new scan (Eiger frame counter reset). The dp buffer is
+        # live-viz only, so on a new scan we clear it and start over rather than
+        # persist per scan.
+        self._max_idx_seen = -1
 
     def setup(self, spec: OperatorSpec):
         spec.input("intensity").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
@@ -522,6 +527,21 @@ class FrameWriterOp(Operator):
                     first, first - 1,
                 )
             self._first_batch = False
+
+        # New-scan detection: the Eiger frame index resets to 0 at the start of
+        # each scan, so a batch whose minimum index drops below the high-water
+        # mark is a new scan. The dp buffer is live-viz only (not persisted per
+        # scan), so clear it and rebase before writing the new scan's frames.
+        batch_min = int(idx_arr.min())
+        if batch_min < self._max_idx_seen:
+            logging.getLogger("holoptycho.FrameWriterOp").info(
+                "New scan detected (frame %d < seen %d) — clearing dp buffer",
+                batch_min, self._max_idx_seen,
+            )
+            _writer.reset_diffraction_buffer()
+            self._max_row_written = 0
+            self._max_idx_seen = -1
+        self._max_idx_seen = max(self._max_idx_seen, int(idx_arr.max()))
 
         if self._stride <= 1:
             kept_frames = np.asarray(frames)
@@ -565,6 +585,9 @@ class InferenceFrameWriterOp(Operator):
     def __init__(self, *args, stride: int = 1, **kwargs):
         super().__init__(*args, **kwargs)
         self._stride = max(1, int(stride))
+        # New-scan detection (see FrameWriterOp): clear the inference buffer
+        # when the Eiger frame index resets.
+        self._max_idx_seen = -1
 
     def setup(self, spec: OperatorSpec):
         spec.input("results").connector(
@@ -576,6 +599,13 @@ class InferenceFrameWriterOp(Operator):
             results = op_input.receive("results")
             pred, indices = results
             idx_arr = np.asarray(indices)
+            # New-scan detection: clear the inference buffer when the frame
+            # index resets (see FrameWriterOp).
+            batch_min = int(idx_arr.min())
+            if batch_min < self._max_idx_seen:
+                _writer.reset_inference_buffer()
+                self._max_idx_seen = -1
+            self._max_idx_seen = max(self._max_idx_seen, int(idx_arr.max()))
             if self._stride <= 1:
                 kept_pred = np.asarray(pred)
                 kept_rows = idx_arr

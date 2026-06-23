@@ -88,6 +88,12 @@ class TiledWriter:
         # fine_tune writes are enabled.
         self._dp_node = None
         self._dp_chunk_size = 0
+        # Registration kwargs for the dp / inference buffers, captured at
+        # start_*_buffer so reset_*_buffer can re-register a fresh (cleared)
+        # array on each new scan. These buffers are live-viz only and not
+        # persisted per scan, so each new scan reuses one buffer.
+        self._dp_buffer_kwargs = None
+        self._inference_buffer_kwargs = None
         # ViT inference output buffer (sibling to dp; same stride).
         self._inference_node = None
         # ViT mosaic node, set by the first write_vit_mosaic so subsequent
@@ -302,6 +308,15 @@ class TiledWriter:
         if self._run is None:
             logger.warning("start_diffraction_buffer before start_run; skipping")
             return
+        # Remember the args so reset_diffraction_buffer can re-register an
+        # identical fresh buffer on a new scan.
+        self._dp_buffer_kwargs = dict(
+            n_keep=int(n_keep),
+            frame_shape=(int(frame_shape[0]), int(frame_shape[1])),
+            dtype=dtype,
+            frames_per_chunk=int(frames_per_chunk),
+            stride=int(stride),
+        )
         try:
             from tiled.structures.array import ArrayStructure, BuiltinDtype
             from tiled.structures.core import StructureFamily
@@ -399,7 +414,11 @@ class TiledWriter:
             start = int(rows[0])
             if np.all(np.diff(rows) == 1):
                 # Contiguous rows — one patch covering [start, start+B).
-                self._dp_node.patch(amp_u8, offset=(start, 0, 0))
+                # extend=True grows dim0 when the scan delivers more frames than
+                # the pre-registered n_keep (configured x_num*y_num) — e.g. a
+                # mid-scan join or extra settling lines. Tiled fills any gap
+                # below the offset with the array's zero-init, same as before.
+                self._dp_node.patch(amp_u8, offset=(start, 0, 0), extend=True)
             else:
                 # Non-contiguous rows. Per-row patches so we don't corrupt
                 # slots between the present rows. Common when stride > 1 and
@@ -410,9 +429,33 @@ class TiledWriter:
                     start, int(rows[-1]), len(rows),
                 )
                 for i, r in enumerate(rows):
-                    self._dp_node.patch(amp_u8[i:i + 1], offset=(int(r), 0, 0))
+                    self._dp_node.patch(
+                        amp_u8[i:i + 1], offset=(int(r), 0, 0), extend=True
+                    )
         except Exception:
             logger.exception("TiledWriter.write_diffraction_chunk failed")
+
+    def reset_diffraction_buffer(self) -> None:
+        """Clear the dp buffer for a new scan.
+
+        The dp buffer is live-viz only (not persisted per scan), so each new
+        scan reuses one buffer. ``start_diffraction_buffer`` deletes any prior
+        ``dp`` node before creating the new one, so re-calling it with the
+        stored kwargs registers a fresh, zero-init array — wiping the previous
+        scan's frames (important when the new scan is shorter, so no stale tail
+        shows on the dashboard). Also rebases the ``dp_frames_written`` counter.
+        """
+        kwargs = getattr(self, "_dp_buffer_kwargs", None)
+        if kwargs is None:
+            return
+        self.start_diffraction_buffer(**kwargs)
+        if self._run is not None:
+            try:
+                self._run.update_metadata(metadata={"dp_frames_written": 0})
+            except Exception:
+                logger.exception(
+                    "reset_diffraction_buffer: dp_frames_written reset failed"
+                )
 
     def start_inference_buffer(
         self,
@@ -438,6 +481,14 @@ class TiledWriter:
         if self._run is None:
             logger.warning("start_inference_buffer before start_run; skipping")
             return
+        self._inference_buffer_kwargs = dict(
+            n_keep=int(n_keep),
+            frame_shape=(int(frame_shape[0]), int(frame_shape[1])),
+            dtype=dtype,
+            n_channels=int(n_channels),
+            frames_per_chunk=int(frames_per_chunk),
+            stride=int(stride),
+        )
         try:
             from tiled.structures.array import ArrayStructure, BuiltinDtype
             from tiled.structures.core import StructureFamily
@@ -502,7 +553,9 @@ class TiledWriter:
             arr = np.ascontiguousarray(np.asarray(preds, dtype=np.float32))
             start = int(rows[0])
             if np.all(np.diff(rows) == 1):
-                self._inference_node.patch(arr, offset=(start, 0, 0, 0))
+                # extend=True: grow dim0 to fit scans longer than the
+                # pre-registered n_keep (see write_diffraction_chunk).
+                self._inference_node.patch(arr, offset=(start, 0, 0, 0), extend=True)
             else:
                 logger.warning(
                     "write_inference_chunk: non-contiguous rows "
@@ -510,9 +563,20 @@ class TiledWriter:
                     start, int(rows[-1]), len(rows),
                 )
                 for i, r in enumerate(rows):
-                    self._inference_node.patch(arr[i:i + 1], offset=(int(r), 0, 0, 0))
+                    self._inference_node.patch(
+                        arr[i:i + 1], offset=(int(r), 0, 0, 0), extend=True
+                    )
         except Exception:
             logger.exception("TiledWriter.write_inference_chunk failed")
+
+    def reset_inference_buffer(self) -> None:
+        """Clear the inference buffer for a new scan (see
+        ``reset_diffraction_buffer``). Re-registers a fresh zero-init array via
+        the stored kwargs so the previous scan's predictions are wiped."""
+        kwargs = getattr(self, "_inference_buffer_kwargs", None)
+        if kwargs is None:
+            return
+        self.start_inference_buffer(**kwargs)
 
     def write_probe_positions_m(
         self,
