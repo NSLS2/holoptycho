@@ -797,6 +797,31 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--x-num", type=int, default=None,
+        help=(
+            "Override the scan fast-axis point count (x_num) from the run "
+            "metadata. Use to preallocate buffers for the LARGEST scan when "
+            "running a loop of differently-sized scans live, so one pipeline "
+            "handles them all: nz = x_num*y_num must be >= the biggest scan's "
+            "point count."
+        ),
+    )
+    recon.add_argument(
+        "--y-num", type=int, default=None,
+        help="Override the scan slow-axis point count (y_num). See --x-num.",
+    )
+    recon.add_argument(
+        "--x-range", type=float, default=None,
+        help=(
+            "Override the scan x range (um). Sizes the ViT mosaic canvas and the "
+            "iterative object grid; set to the largest scan's range when looping."
+        ),
+    )
+    recon.add_argument(
+        "--y-range", type=float, default=None,
+        help="Override the scan y range (um). See --x-range.",
+    )
+    recon.add_argument(
         "--min-overlap-count",
         type=float,
         default=None,
@@ -857,6 +882,19 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
     """Build a full hp start config from scan metadata plus CLI overrides."""
     config = load_config_from_tiled(run_uid, tiled_url=tiled_url)
     scan_num = config["scan_num"]
+
+    # Optional scan-shape overrides. Use these to preallocate buffers/canvas for
+    # the LARGEST scan when running a loop of differently-sized scans live, so a
+    # single pipeline handles them all (nz = x_num*y_num must be >= the biggest
+    # scan's point count; x/y_range size the mosaic canvas + object grid).
+    if getattr(args, "x_num", None) is not None:
+        config["x_num"] = str(int(args.x_num))
+    if getattr(args, "y_num", None) is not None:
+        config["y_num"] = str(int(args.y_num))
+    if getattr(args, "x_range", None) is not None:
+        config["x_range"] = str(float(args.x_range))
+    if getattr(args, "y_range", None) is not None:
+        config["y_range"] = str(float(args.y_range))
 
     # Defaults only fill in keys that ``load_config_from_tiled`` didn't set —
     # otherwise ``LEGACY_PTYCHO_DEFAULTS["z_m"] = "1.0"`` would overwrite the
