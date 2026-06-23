@@ -573,6 +573,27 @@ class TiledWriter:
         except Exception:
             logger.exception("TiledWriter.mark_run_complete failed")
 
+    def stamp_patch_crop_box(self, crop_box) -> None:
+        """Record the ViT-patch inner-crop bounding box in the run metadata.
+
+        ``crop_box`` is ``[[y0, x0], [y1, x1]]`` — the two corners (in patch
+        pixels) of the region of each ViT output patch that is actually
+        stitched into the mosaic (the ``inner_crop`` inset). The dashboard
+        reads this to draw a box on the amp/phase patch plots so operators can
+        see which part of the prediction is used.
+        """
+        if self._run is None:
+            logger.warning("stamp_patch_crop_box before start_run; skipping")
+            return
+        try:
+            self._run.update_metadata(metadata={"patch_crop_box": crop_box})
+            logger.info(
+                "TiledWriter.stamp_patch_crop_box run=%s box=%s",
+                self._run_uid, crop_box,
+            )
+        except Exception:
+            logger.exception("TiledWriter.stamp_patch_crop_box failed")
+
     def write_vit(
         self,
         batch_num: int,

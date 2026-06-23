@@ -452,6 +452,9 @@ class SaveViTResult(Operator):
         self._mosaic_amp: np.ndarray | None = None
         self._counts_amp: np.ndarray | None = None
         self._canvas_origin_um: tuple[float, float] | None = None
+        # Whether the patch inner-crop bounding box has been stamped into the
+        # run metadata yet (stamped once per scan from _ensure_canvas).
+        self._crop_box_stamped: bool = False
         # Cropped half-patch dims (set when canvas is allocated). Used by
         # the grow path to compute the buffer that must surround the
         # bounding box of all positions.
@@ -488,6 +491,7 @@ class SaveViTResult(Operator):
         self._canvas_origin_um = None
         self._half_h = 0
         self._half_w = 0
+        self._crop_box_stamped = False
         self._pending_frames.clear()
 
     def _ensure_canvas(self, patch_h: int, patch_w: int, positions_um: np.ndarray) -> bool:
@@ -526,6 +530,22 @@ class SaveViTResult(Operator):
             )
             self._stitch_enabled = False
             return False
+
+        # Stamp the patch inner-crop bounding box into the run metadata (once),
+        # so the dashboard can draw a box on the amp/phase patch plots showing
+        # which region of each ViT prediction is actually stitched. The crop is
+        # a centered, symmetric inset, so the box is the same in the raw patch
+        # frame regardless of patch_flip (D4 maps a centered square box to
+        # itself). Corners are (row, col) in patch pixels: top-left at the crop
+        # offset, bottom-right at patch_dim - crop.
+        if not self._crop_box_stamped:
+            c = self._inner_crop
+            crop_box = [[c, c], [patch_h - c, patch_w - c]]
+            try:
+                _writer.stamp_patch_crop_box(crop_box)
+            except Exception:
+                self._logger.exception("failed to stamp patch_crop_box")
+            self._crop_box_stamped = True
 
         # Pre-allocate the canvas to the commanded scan extent. Tiled does not
         # allow node deletion via the writer client, so the canvas shape must be
