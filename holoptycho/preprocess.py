@@ -32,7 +32,7 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
 
     Segmentation: average the batch (protects against an odd empty/saturated
     first frame), mask saturated pixels (which would bias the centroid),
-    threshold at 5% of peak to isolate the blob, run ``scipy.ndimage.label``,
+    threshold at 2% of peak to isolate the blob, run ``scipy.ndimage.label``,
     and take the centroid of the largest connected component. The box is clamped
     to stay inside ``headroom_roi``.
 
@@ -54,7 +54,7 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     peak = float(masked.max())
     if peak <= 0:
         return None, False
-    binary = masked > (0.05 * peak)
+    binary = masked > (0.02 * peak)
     labels, n_obj = label(binary)
     if n_obj == 0:
         return None, False

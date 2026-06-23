@@ -904,7 +904,7 @@ from `PtychoViTInferenceOp`, the chunking loop is misbehaving — check that
   **negative** value, set automatically when there's no ROI, searches the WHOLE
   frame — needed because the full live detector is 1062×1028 and the beam can be
   anywhere), averages it, masks saturated pixels,
-  thresholds at 5% of peak, runs `scipy.ndimage.label`, takes the centroid of
+  thresholds at 2% of peak, runs `scipy.ndimage.label`, takes the centroid of
   the largest component, and crops **every** batch (including the first) to an
   `nx × ny` box centered on it — real detector pixels, **no `np.roll`, no
   zero-fill** (the old lossy roll in `ImagePreprocessorOp` was removed). The
