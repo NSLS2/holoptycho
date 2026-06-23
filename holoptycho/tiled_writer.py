@@ -595,13 +595,14 @@ class TiledWriter:
             logger.exception("TiledWriter.stamp_patch_crop_box failed")
 
     def stamp_segmentation_box(self, box) -> None:
-        """Record the auto-center segmentation crop box in the run metadata.
+        """Record the segmented beam blob's bounding box in the run metadata.
 
-        ``box`` is ``[[y0, x0], [y1, x1]]`` — the two corners (in coordinate-
-        corrected detector pixels) of the ``nx x ny`` ROI the auto-centering
-        selected by segmenting the beam. The dashboard reads this to draw the
-        crop box on the detector / DP view so operators can confirm the beam
-        was found and centered. Only present when auto-centering ran.
+        ``box`` is ``[[by0, bx0], [by1, bx1]]`` — the two corners of the
+        segmented beam blob in **DP-relative** pixels (relative to the crop box
+        origin), so it overlays directly on the cropped detector frame the GUI
+        shows. The dashboard draws this on the DP plot to confirm the
+        auto-centering found a sensible beam. Only present when auto-centering
+        ran and a blob was found.
         """
         if self._run is None:
             logger.warning("stamp_segmentation_box before start_run; skipping")
@@ -614,6 +615,26 @@ class TiledWriter:
             )
         except Exception:
             logger.exception("TiledWriter.stamp_segmentation_box failed")
+
+    def write_segmentation_mask(self, mask: np.ndarray) -> None:
+        """Write the segmented beam blob mask to ``vit/segmentation_mask``.
+
+        ``mask`` is a ``(ny, nx)`` uint8 array (1 = segmented beam) cropped to
+        the DP region, so the dashboard can overlay the exact segmentation
+        shape on the cropped detector frame. Written once per scan.
+        """
+        if self._run is None:
+            logger.warning("write_segmentation_mask before start_run; skipping")
+            return
+        try:
+            vit = _get_or_create(self._run, "vit")
+            self._write_or_overwrite_array(vit, "segmentation_mask", mask)
+            logger.info(
+                "TiledWriter.write_segmentation_mask run=%s shape=%s",
+                self._run_uid, tuple(mask.shape),
+            )
+        except Exception:
+            logger.exception("TiledWriter.write_segmentation_mask failed")
 
     def write_vit(
         self,

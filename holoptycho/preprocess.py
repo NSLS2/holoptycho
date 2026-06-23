@@ -36,10 +36,15 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     and take the centroid of the largest connected component. The box is clamped
     to stay inside ``headroom_roi``.
 
-    Returns ``(box, clamped)`` where ``box`` is an integer ``np.array`` ROI, or
-    ``(None, False)`` when no blob is found (caller falls back to the configured
-    ROI). ``clamped`` is True when the beam sat beyond the headroom and the box
-    was pushed to the window edge.
+    Returns ``(box, clamped, blob_bbox, blob_mask)`` where ``box`` is an integer
+    ``np.array`` ROI, or ``(None, False, None, None)`` when no blob is found
+    (caller falls back to the configured ROI). ``clamped`` is True when the beam
+    sat beyond the headroom and the box was pushed to the window edge.
+    ``blob_bbox`` is ``[[by0, by1], [bx0, bx1]]`` — the bounding box of the
+    segmented beam blob in the same global convention as ``box``. ``blob_mask``
+    is the boolean mask of the segmented blob in **window-local** coords (shape
+    of the headroom window), so callers can crop it to the final box and show
+    exactly which pixels were segmented. Both are ``None`` when no blob.
     """
     from scipy.ndimage import label, center_of_mass
 
@@ -53,11 +58,11 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     masked = np.where(avg >= sat, 0.0, avg)
     peak = float(masked.max())
     if peak <= 0:
-        return None, False
+        return None, False, None, None
     binary = masked > (0.02 * peak)
     labels, n_obj = label(binary)
     if n_obj == 0:
-        return None, False
+        return None, False, None, None
     sizes = np.bincount(labels.ravel())
     sizes[0] = 0
     largest = int(np.argmax(sizes))
@@ -66,6 +71,14 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     Hh, Wh = avg.shape
     hy0 = int(headroom_roi[0, 0])
     hx0 = int(headroom_roi[1, 0])
+    # Segmented blob: window-local boolean mask + its bounding box lifted to
+    # global coords.
+    blob_mask = labels == largest
+    bys, bxs = np.where(blob_mask)
+    blob_bbox = np.array([
+        [hy0 + int(bys.min()), hy0 + int(bys.max()) + 1],
+        [hx0 + int(bxs.min()), hx0 + int(bxs.max()) + 1],
+    ])
     # Absolute raw-detector centroid, then box centered on it.
     y0 = int(round(hy0 + cy - ny / 2.0))
     x0 = int(round(hx0 + cx - nx / 2.0))
@@ -73,7 +86,7 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     y0c = min(max(y0, hy0), hy0 + Hh - ny)
     x0c = min(max(x0, hx0), hx0 + Wh - nx)
     clamped = (y0c != y0) or (x0c != x0)
-    return np.array([[y0c, y0c + ny], [x0c, x0c + nx]]), clamped
+    return np.array([[y0c, y0c + ny], [x0c, x0c + nx]]), clamped, blob_bbox, blob_mask
 
 
 class ImageBatchOp(Operator):
@@ -237,7 +250,9 @@ class ImageBatchOp(Operator):
         # the configured ROI so it matches images_to_add's allocation).
         ny = int(self.roi[0, 1] - self.roi[0, 0])
         nx = int(self.roi[1, 1] - self.roi[1, 0])
-        box, clamped = compute_center_box(self._hr_buf, self._headroom_roi, nx, ny)
+        box, clamped, blob_bbox, blob_mask = compute_center_box(
+            self._hr_buf, self._headroom_roi, nx, ny
+        )
         if box is None:
             self._center_box = np.array(self.roi)
             self.logger.warning(
@@ -257,22 +272,35 @@ class ImageBatchOp(Operator):
                 int(box[0, 0]), int(box[0, 1]), int(box[1, 0]), int(box[1, 1]),
             )
 
-        # Stamp the auto-center crop box into the run metadata (once) so the
-        # dashboard can draw it on the detector / DP view to confirm the beam
-        # was centered. ``_center_box`` is [[y0, y1], [x0, x1]] in coordinate-
-        # corrected detector pixels; convert to two corners [[y0, x0], [y1, x1]]
-        # (same convention as patch_crop_box).
-        if not self._seg_box_stamped and self._center_box is not None:
-            cb = self._center_box
+        # Stamp the segmented beam blob into the run metadata + a mask node
+        # (once) so the dashboard can overlay the segmentation on the DP plot to
+        # confirm the auto-centering found the beam. We express everything in
+        # DP-relative pixels (relative to the crop box origin) so it lines up
+        # with the cropped detector frame the GUI shows.
+        #   * segmentation_box  — the blob bounding box [[by0,bx0],[by1,bx1]].
+        #   * vit/segmentation_mask — the blob's boolean mask cropped to the
+        #     ny x nx DP region (uint8), the actual segmented shape.
+        if not self._seg_box_stamped and blob_bbox is not None:
+            y0c = int(self._center_box[0, 0])
+            x0c = int(self._center_box[1, 0])
             seg_box = [
-                [int(cb[0, 0]), int(cb[1, 0])],
-                [int(cb[0, 1]), int(cb[1, 1])],
+                [int(blob_bbox[0, 0]) - y0c, int(blob_bbox[1, 0]) - x0c],
+                [int(blob_bbox[0, 1]) - y0c, int(blob_bbox[1, 1]) - x0c],
             ]
+            # Crop the window-local blob mask to the crop box (→ DP frame).
+            hy0 = int(self._headroom_roi[0, 0])
+            hx0 = int(self._headroom_roi[1, 0])
+            ry0, rx0 = y0c - hy0, x0c - hx0
+            mask_dp = np.ascontiguousarray(
+                blob_mask[ry0:ry0 + ny, rx0:rx0 + nx]
+            ).astype(np.uint8)
             try:
                 from .tiled_writer import get_writer
-                get_writer().stamp_segmentation_box(seg_box)
+                w = get_writer()
+                w.stamp_segmentation_box(seg_box)
+                w.write_segmentation_mask(mask_dp)
             except Exception:
-                self.logger.exception("failed to stamp segmentation_box")
+                self.logger.exception("failed to write segmentation overlay")
             self._seg_box_stamped = True
 
         # Emit the buffered first batch cropped to the centered box. The buffer

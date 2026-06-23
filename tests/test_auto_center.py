@@ -58,7 +58,7 @@ def test_box_centers_offcenter_blob_losslessly():
     hroi = _headroom(roi, 24, H, W)
     frame = _frame_with_blob(H, W, by, bx)
 
-    box, clamped = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
+    box, clamped, *_ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
 
     assert not clamped
     assert box[0, 1] - box[0, 0] == ny and box[1, 1] - box[1, 0] == nx
@@ -84,7 +84,7 @@ def test_box_is_plain_global_crop():
     hroi = _headroom(roi, 24, H, W)
     frame = _frame_with_blob(H, W, by, bx)
 
-    box, _ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
+    box, *_ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
     cropped = np.asarray(crop_to_roi(frame, box))
 
     assert cropped.shape == (ny, nx)
@@ -99,7 +99,7 @@ def test_box_clamped_when_beam_beyond_headroom():
     hroi = _headroom(roi, 24, H, W)  # window rows/cols [10:90]
     frame = _frame_with_blob(H, W, 88, 88)  # near the window edge
 
-    box, clamped = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
+    box, clamped, *_ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
 
     assert clamped
     assert box[0, 1] - box[0, 0] == ny and box[1, 1] - box[1, 0] == nx
@@ -115,7 +115,7 @@ def test_no_blob_returns_none():
     hroi = _headroom(roi, 24, H, W)
     frame = np.zeros((H, W), dtype=np.uint32)
 
-    box, clamped = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
+    box, clamped, *_ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
 
     assert box is None and clamped is False
 
@@ -130,7 +130,7 @@ def test_centered_beam_box_equals_configured_roi():
     hroi = _headroom(roi, 24, H, W)
     frame = _frame_with_blob(H, W, 50, 50)
 
-    box, clamped = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
+    box, clamped, *_ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
 
     assert not clamped
     assert box.tolist() == roi.tolist()
@@ -159,7 +159,7 @@ def test_full_frame_search_finds_offcenter_beam():
     frame = _frame_with_blob(H, W, by, bx, r=5.0)
     hroi = np.array([[0, H], [0, W]])  # whole-frame headroom (the M<0 result)
 
-    box, clamped = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
+    box, clamped, *_ = compute_center_box(_hbatch(frame, hroi), hroi, nx, ny)
 
     assert not clamped
     assert abs((box[0, 0] + box[0, 1]) / 2 - by) <= 1
