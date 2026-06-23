@@ -19,6 +19,41 @@ set -euo pipefail
 DEV_IMAGE="cuda-dev"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- Live vs replay ZMQ sources --------------------------------------------
+# Default: replay (localhost:5555/5556, paired with scripts/replay_from_tiled.py).
+# --live: connect to the beamline Eiger + PandA streams and fetch the Eiger
+# CurveZMQ keys from Key Vault (resolved here on the host, where `az` is logged
+# in — the container has no `az`). Mirrors `start.sh --live`.
+LIVE=0
+for _arg in "$@"; do
+  case "$_arg" in
+    --live) LIVE=1 ;;
+    -h|--help)
+      echo "Usage: ./start_editable.sh [--live]"
+      echo "  --live   Connect to the live beamline ZMQ (Eiger + PandA) instead of replay."
+      exit 0 ;;
+  esac
+done
+
+KEYVAULT="genesisdemoskv"
+SEG_KEY_ENV=""   # extra env lines (CurveZMQ keys) injected only in --live
+if [ "$LIVE" = 1 ]; then
+  BEAMLINE_HOST="xf03idc-eiger2-ioc.nsls2.bnl.local"
+  SERVER_STREAM_SOURCE="tcp://${BEAMLINE_HOST}:5559"
+  PANDA_STREAM_SOURCE="tcp://${BEAMLINE_HOST}:6666"
+  echo "Live mode: fetching Eiger CurveZMQ keys from Key Vault ($KEYVAULT)..."
+  _spk="$(az keyvault secret show --vault-name "$KEYVAULT" --name holoptycho-eiger-server-public-key --query value -o tsv)"
+  _cpk="$(az keyvault secret show --vault-name "$KEYVAULT" --name holoptycho-client-public-key --query value -o tsv)"
+  _csk="$(az keyvault secret show --vault-name "$KEYVAULT" --name holoptycho-client-secret-key --query value -o tsv)"
+  SEG_KEY_ENV="SERVER_PUBLIC_KEY=${_spk}
+CLIENT_PUBLIC_KEY=${_cpk}
+CLIENT_SECRET_KEY=${_csk}"
+  echo "Live mode: Eiger=${SERVER_STREAM_SOURCE} PandA=${PANDA_STREAM_SOURCE}"
+else
+  SERVER_STREAM_SOURCE="tcp://localhost:5555"
+  PANDA_STREAM_SOURCE="tcp://localhost:5556"
+fi
+
 # --- Podman runtime setup --------------------------------------------------
 # On hosts where `docker` is an alias for rootless podman (e.g. a Slurm
 # compute node), podman needs a writable XDG_RUNTIME_DIR. Always point it at
@@ -108,8 +143,9 @@ AZURE_CERTIFICATE_B64=$(az keyvault secret show --vault-name genesisdemoskv --na
 AZURE_RESOURCE_GROUP=rg-genesis-demos
 AZURE_ML_WORKSPACE=genesis-mlw
 TILED_BASE_URL=https://tiled.nsls2.bnl.gov
-SERVER_STREAM_SOURCE=tcp://localhost:5555
-PANDA_STREAM_SOURCE=tcp://localhost:5556
+SERVER_STREAM_SOURCE=${SERVER_STREAM_SOURCE}
+PANDA_STREAM_SOURCE=${PANDA_STREAM_SOURCE}
+${SEG_KEY_ENV}
 ENGINE_CACHE_DIR=/models
 HOLOPTYCHO_DB_PATH=/tmp/holoptycho.db
 GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
