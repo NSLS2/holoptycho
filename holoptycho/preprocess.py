@@ -32,10 +32,11 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     same global convention as the operator's ``self.roi``.
 
     Segmentation: average the batch (protects against an odd empty/saturated
-    first frame), mask saturated pixels (which would bias the centroid),
+    first frame), mask saturated pixels (which would bias the segmentation),
     threshold at 2% of peak to isolate the blob, run ``scipy.ndimage.label``,
-    and take the centroid of the largest connected component. The box is clamped
-    to stay inside ``headroom_roi``.
+    and centre the crop on the **bounding-box centre** of the largest connected
+    component (the geometric centre of the segmented blob, not its intensity-
+    weighted centroid). The box is clamped to stay inside ``headroom_roi``.
 
     Returns ``(box, clamped, blob_bbox, blob_mask)`` where ``box`` is an integer
     ``np.array`` ROI, or ``(None, False, None, None)`` when no blob is found
@@ -47,11 +48,11 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     of the headroom window), so callers can crop it to the final box and show
     exactly which pixels were segmented. Both are ``None`` when no blob.
     """
-    from scipy.ndimage import label, center_of_mass
+    from scipy.ndimage import label
 
     avg = headroom_batch.astype(np.float32).mean(axis=0)
     # Saturation mask: pixels at/near uint max are hot/bad and would bias the
-    # centroid. Drop them from the segmentation input (floats: no saturation).
+    # segmentation. Drop them from the input (floats: no saturation).
     try:
         sat = float(np.iinfo(headroom_batch.dtype).max) - 1.0
     except ValueError:
@@ -67,7 +68,6 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     sizes = np.bincount(labels.ravel())
     sizes[0] = 0
     largest = int(np.argmax(sizes))
-    cy, cx = center_of_mass(masked, labels, largest)  # window-local (row, col)
 
     Hh, Wh = avg.shape
     hy0 = int(headroom_roi[0, 0])
@@ -76,11 +76,20 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     # global coords.
     blob_mask = labels == largest
     bys, bxs = np.where(blob_mask)
+    by0, by1 = int(bys.min()), int(bys.max())
+    bx0, bx1 = int(bxs.min()), int(bxs.max())
     blob_bbox = np.array([
-        [hy0 + int(bys.min()), hy0 + int(bys.max()) + 1],
-        [hx0 + int(bxs.min()), hx0 + int(bxs.max()) + 1],
+        [hy0 + by0, hy0 + by1 + 1],
+        [hx0 + bx0, hx0 + bx1 + 1],
     ])
-    # Absolute raw-detector centroid, then box centered on it.
+    # Centre the crop on the GEOMETRIC centre of the blob's bounding box (not
+    # the intensity-weighted centroid), so the DP is centered on the same box
+    # the dashboard draws. The +1 matches the exclusive-max convention the
+    # stored bbox uses ([by0, by1+1]) so the DP centre lands on the drawn box
+    # centre, not half a pixel off. window-local (row, col):
+    cy = (by0 + by1 + 1) / 2.0
+    cx = (bx0 + bx1 + 1) / 2.0
+    # Absolute raw-detector centre, then box centered on it.
     y0 = int(round(hy0 + cy - ny / 2.0))
     x0 = int(round(hx0 + cx - nx / 2.0))
     # Clamp so the ny x nx box stays inside the headroom window.
