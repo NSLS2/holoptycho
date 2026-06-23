@@ -594,6 +594,27 @@ class TiledWriter:
         except Exception:
             logger.exception("TiledWriter.stamp_patch_crop_box failed")
 
+    def stamp_segmentation_box(self, box) -> None:
+        """Record the auto-center segmentation crop box in the run metadata.
+
+        ``box`` is ``[[y0, x0], [y1, x1]]`` — the two corners (in coordinate-
+        corrected detector pixels) of the ``nx x ny`` ROI the auto-centering
+        selected by segmenting the beam. The dashboard reads this to draw the
+        crop box on the detector / DP view so operators can confirm the beam
+        was found and centered. Only present when auto-centering ran.
+        """
+        if self._run is None:
+            logger.warning("stamp_segmentation_box before start_run; skipping")
+            return
+        try:
+            self._run.update_metadata(metadata={"segmentation_box": box})
+            logger.info(
+                "TiledWriter.stamp_segmentation_box run=%s box=%s",
+                self._run_uid, box,
+            )
+        except Exception:
+            logger.exception("TiledWriter.stamp_segmentation_box failed")
+
     def write_vit(
         self,
         batch_num: int,

@@ -108,6 +108,7 @@ class ImageBatchOp(Operator):
         self._center_box = None       # cached ny x nx global ROI once computed
         self._hr_buf = None           # transient (batchsize, Hh, Wh) first-batch buffer
         self._headroom_roi = None     # global-coords headroom window
+        self._seg_box_stamped = False  # crop box written to run metadata yet?
 
         # Per-second compute() throughput counters. See note in EigerZmqRxOp.
         self._diag_window_start = time.time()
@@ -255,6 +256,24 @@ class ImageBatchOp(Operator):
                 "Auto-centering: centered crop box rows %d:%d cols %d:%d",
                 int(box[0, 0]), int(box[0, 1]), int(box[1, 0]), int(box[1, 1]),
             )
+
+        # Stamp the auto-center crop box into the run metadata (once) so the
+        # dashboard can draw it on the detector / DP view to confirm the beam
+        # was centered. ``_center_box`` is [[y0, y1], [x0, x1]] in coordinate-
+        # corrected detector pixels; convert to two corners [[y0, x0], [y1, x1]]
+        # (same convention as patch_crop_box).
+        if not self._seg_box_stamped and self._center_box is not None:
+            cb = self._center_box
+            seg_box = [
+                [int(cb[0, 0]), int(cb[1, 0])],
+                [int(cb[0, 1]), int(cb[1, 1])],
+            ]
+            try:
+                from .tiled_writer import get_writer
+                get_writer().stamp_segmentation_box(seg_box)
+            except Exception:
+                self.logger.exception("failed to stamp segmentation_box")
+            self._seg_box_stamped = True
 
         # Emit the buffered first batch cropped to the centered box. The buffer
         # is already coordinate-corrected, so slicing it to the box is exactly
