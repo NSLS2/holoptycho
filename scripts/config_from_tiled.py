@@ -822,6 +822,16 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Override the scan y range (um). See --x-range.",
     )
     recon.add_argument(
+        "--allow-mid-scan-join",
+        action="store_true",
+        help=(
+            "Allow the pipeline to start in the middle of an in-progress scan "
+            "(first received frame != 0) instead of erroring. The skipped early "
+            "rows stay empty — fine for LIVE monitoring, but do NOT use such a "
+            "run for fine-tuning (the empty dp rows would poison training)."
+        ),
+    )
+    recon.add_argument(
         "--min-overlap-count",
         type=float,
         default=None,
@@ -972,6 +982,9 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
 
     if args.overshoot_factor is not None:
         config["mosaic_overshoot_factor"] = str(args.overshoot_factor)
+    if getattr(args, "allow_mid_scan_join", False):
+        # Real JSON bool: pipeline reads via bool(getattr(...)) after literal_eval.
+        config["allow_mid_scan_join"] = True
     if args.min_overlap_count is not None:
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.mosaic_edge_trim is not None:

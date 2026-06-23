@@ -473,12 +473,16 @@ class FrameWriterOp(Operator):
     # endpoint from drowning under per-batch updates on fast scans.
     _PROGRESS_UPDATE_INTERVAL_S = 1.0
 
-    def __init__(self, *args, stride: int = 1, **kwargs):
+    def __init__(self, *args, stride: int = 1, allow_mid_scan_join: bool = False, **kwargs):
         super().__init__(*args, **kwargs)
         self._stride = max(1, int(stride))
         self._first_batch = True
         self._max_row_written = 0
         self._last_progress_push = 0.0
+        # When True, a first batch that doesn't start at scan-frame 0 is allowed
+        # (mid-scan join for live monitoring) — the early dp rows stay empty.
+        # Default False keeps the fail-fast guard for fine-tunable runs.
+        self._allow_mid_scan_join = bool(allow_mid_scan_join)
 
     def setup(self, spec: OperatorSpec):
         spec.input("intensity").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
@@ -495,17 +499,27 @@ class FrameWriterOp(Operator):
             # with the zero initial state. A model trained on those slots
             # would learn that "black detector" maps to whatever object/probe
             # was at those positions — real harm. Better to abort the run so
-            # the operator can fix the publisher and retry.
+            # the operator can fix the publisher and retry — UNLESS
+            # allow_mid_scan_join is set (live monitoring, where joining an
+            # in-progress scan is intentional and the empty early rows are fine).
             first = int(idx_arr[0])
             if first != 0:
-                raise RuntimeError(
-                    f"FrameWriterOp: first batch starts at scan frame {first}, "
-                    "expected 0. Frames were dropped before the pipeline could "
-                    "receive them. Likely cause: publisher started pushing "
-                    "before holoptycho's ZMQ SUB was live (ZMQ PUB silently "
-                    "drops to a not-yet-subscribed peer). Restart the "
-                    "publisher after /run returns 200 — the API now blocks "
-                    "until the pipeline is ready."
+                if not self._allow_mid_scan_join:
+                    raise RuntimeError(
+                        f"FrameWriterOp: first batch starts at scan frame {first}, "
+                        "expected 0. Frames were dropped before the pipeline could "
+                        "receive them. Likely cause: publisher started pushing "
+                        "before holoptycho's ZMQ SUB was live (ZMQ PUB silently "
+                        "drops to a not-yet-subscribed peer). Restart the "
+                        "publisher after /run returns 200 — the API now blocks "
+                        "until the pipeline is ready. (Pass allow_mid_scan_join "
+                        "to join an in-progress scan on purpose.)"
+                    )
+                logging.getLogger("holoptycho.FrameWriterOp").warning(
+                    "Joining mid-scan: first batch at frame %d (rows 0..%d will "
+                    "be empty). allow_mid_scan_join is set — fine for live "
+                    "monitoring, but do NOT use this run for fine-tuning.",
+                    first, first - 1,
                 )
             self._first_batch = False
 
@@ -1146,7 +1160,12 @@ class PtychoApp(Application):
         self.positions_writer = PositionsWriterOp(self, name="positions_writer")
         if enable_batch_writes:
             self.batch_writer = BatchWriterOp(self, name="batch_writer")
-        self.frame_writer = FrameWriterOp(self, name="frame_writer", stride=frame_write_stride)
+        self.frame_writer = FrameWriterOp(
+            self, name="frame_writer", stride=frame_write_stride,
+            allow_mid_scan_join=bool(
+                getattr(self.param, "allow_mid_scan_join", False)
+            ),
+        )
         if recon_mode in ("vit", "both"):
             self.inference_writer = InferenceFrameWriterOp(
                 self, name="inference_writer", stride=frame_write_stride,
