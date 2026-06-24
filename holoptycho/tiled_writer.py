@@ -399,7 +399,11 @@ class TiledWriter:
             start = int(rows[0])
             if np.all(np.diff(rows) == 1):
                 # Contiguous rows — one patch covering [start, start+B).
-                self._dp_node.patch(amp_u8, offset=(start, 0, 0))
+                # extend=True grows dim0 when the scan delivers more frames than
+                # the pre-registered n_keep (configured x_num*y_num) — e.g. a
+                # mid-scan join or extra settling lines. Tiled fills any gap
+                # below the offset with the array's zero-init, same as before.
+                self._dp_node.patch(amp_u8, offset=(start, 0, 0), extend=True)
             else:
                 # Non-contiguous rows. Per-row patches so we don't corrupt
                 # slots between the present rows. Common when stride > 1 and
@@ -410,9 +414,32 @@ class TiledWriter:
                     start, int(rows[-1]), len(rows),
                 )
                 for i, r in enumerate(rows):
-                    self._dp_node.patch(amp_u8[i:i + 1], offset=(int(r), 0, 0))
+                    self._dp_node.patch(
+                        amp_u8[i:i + 1], offset=(int(r), 0, 0), extend=True
+                    )
         except Exception:
             logger.exception("TiledWriter.write_diffraction_chunk failed")
+
+    def reset_diffraction_buffer(self) -> None:
+        """Logically clear the dp buffer for a new scan.
+
+        Tiled does not allow deleting/replacing a node via the writer client,
+        so we cannot re-register a fresh array. Instead we clear *logically*:
+        the new scan's frames overwrite rows from 0 (the Eiger frame index
+        reset already rebases ``row = idx // stride``), ``extend=True`` on the
+        patches grows the array if the new scan is longer, and resetting
+        ``dp_frames_written`` to 0 rebases the dashboard's frame slider so any
+        rows beyond the new scan's extent (stale data from a longer previous
+        scan) stay hidden. The dp buffer is live-viz only, so leftover bytes in
+        not-yet-overwritten rows are harmless — the slider never reaches them.
+        """
+        if self._run is not None:
+            try:
+                self._run.update_metadata(metadata={"dp_frames_written": 0})
+            except Exception:
+                logger.exception(
+                    "reset_diffraction_buffer: dp_frames_written reset failed"
+                )
 
     def start_inference_buffer(
         self,
@@ -502,7 +529,9 @@ class TiledWriter:
             arr = np.ascontiguousarray(np.asarray(preds, dtype=np.float32))
             start = int(rows[0])
             if np.all(np.diff(rows) == 1):
-                self._inference_node.patch(arr, offset=(start, 0, 0, 0))
+                # extend=True: grow dim0 to fit scans longer than the
+                # pre-registered n_keep (see write_diffraction_chunk).
+                self._inference_node.patch(arr, offset=(start, 0, 0, 0), extend=True)
             else:
                 logger.warning(
                     "write_inference_chunk: non-contiguous rows "
@@ -510,7 +539,9 @@ class TiledWriter:
                     start, int(rows[-1]), len(rows),
                 )
                 for i, r in enumerate(rows):
-                    self._inference_node.patch(arr[i:i + 1], offset=(int(r), 0, 0, 0))
+                    self._inference_node.patch(
+                        arr[i:i + 1], offset=(int(r), 0, 0, 0), extend=True
+                    )
         except Exception:
             logger.exception("TiledWriter.write_inference_chunk failed")
 

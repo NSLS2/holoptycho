@@ -61,7 +61,8 @@ LEGACY_PTYCHO_DEFAULTS = {
     "pc_flag": "False",
     "save_tmp_pic_flag": "False",
     "position_correction_flag": "False",
-    "angle_correction_flag": "False",
+    "angle_correction_flag": "True",
+    "angle_flip_flag": "False",
     "sf_flag": "False",
     "ms_pie_flag": "False",
     "weak_obj_flag": "False",
@@ -706,6 +707,49 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Search margin (px per side) for --auto-center-dp (default: nx//4).",
     )
     recon.add_argument(
+        "--no-angle-foreshorten",
+        action="store_true",
+        help=(
+            "Disable (A) the tomography fast-axis foreshortening (scale fast "
+            "positions by |cos(theta)|, |sin| past 45deg). ON by default. "
+            "It scales the SHARED positions (ViT mosaic + engine), so disable "
+            "it if the per-projection mosaic looks compressed/blurred."
+        ),
+    )
+    recon.add_argument(
+        "--angle-flip",
+        action="store_true",
+        help=(
+            "Enable (B) the fast-axis handedness flip for angles <= -45deg "
+            "(sign reversal so projections past -45 keep a consistent "
+            "sample-frame orientation). OFF by default. Independent of the "
+            "foreshortening."
+        ),
+    )
+    recon.add_argument(
+        "--vit-max-lead",
+        type=int,
+        default=None,
+        help=(
+            "Throttle the ViT branch to run at most this many frames ahead of "
+            "the filled scan positions. Prevents the ViT-vs-positions race that "
+            "smears the mosaic (blur/skew), especially with fast models. 0/unset "
+            "= no throttle. Try a few hundred (e.g. 128) — small enough to keep "
+            "ViT and positions in sync, large enough not to stall throughput."
+        ),
+    )
+    recon.add_argument(
+        "--segmentation-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Threshold (fraction of peak, 0-1) for the auto-center beam "
+            "segmentation in compute_center_box. Default 0.02 (2%%). Increase "
+            "(e.g. 0.05) to isolate the beam more tightly, dropping faint "
+            "surrounding signal/halo."
+        ),
+    )
+    recon.add_argument(
         "--max-iterations",
         type=int,
         default=None,
@@ -729,11 +773,9 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         "--dp-orient",
         default=None,
         help="Shared diffraction orientation on the model-input branch: a D4 "
-        "name or 'auto'. Default (unset) = 'identity' — the frame is already "
-        "in the global coordinate system after detector_orientation, so no "
-        "further rotation is applied and the runtime orientation autodetect is "
-        "OFF. Pass 'auto' to opt in to the ViT autodetect sweep, or a D4 name "
-        "to pin a different fixed orientation.",
+        "name or 'auto'. Default (unset) = 'rot90_cw'. Pass 'auto' to opt in "
+        "to the ViT autodetect sweep, 'identity' to disable rotation, or "
+        "another D4 name to pin a fixed orientation.",
     )
     recon.add_argument(
         "--dp-orient-iterative",
@@ -787,13 +829,13 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument(
         "--overshoot-factor",
         type=float,
-        default=None,
+        default=1.4,
         help=(
             "Canvas safety margin as a multiple of the commanded scan range. "
-            "1.2 (default) adds 20%% extra border; 1.0 allocates exactly the "
-            "commanded range; values below 1.0 crop the canvas to a fraction "
-            "of the commanded range. Reduce for scans with little overshoot to "
-            "shrink the blank border around the stitched mosaic."
+            "1.4 (default) adds 40%% extra border for encoder overshoot; 1.0 "
+            "allocates exactly the commanded range; values below 1.0 crop the "
+            "canvas to a fraction of the commanded range. Reduce for scans with "
+            "little overshoot to shrink the blank border around the mosaic."
         ),
     )
     recon.add_argument(
@@ -809,6 +851,14 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument(
         "--y-num", type=int, default=None,
         help="Override the scan slow-axis point count (y_num). See --x-num.",
+    )
+    recon.add_argument(
+        "--angle", type=float, default=None,
+        help=(
+            "Override the tomography rotation angle (degrees), normally read "
+            "from the baseline zpsth/dsth. Feeds the angle foreshortening / "
+            "flip when those are enabled."
+        ),
     )
     recon.add_argument(
         "--x-range", type=float, default=None,
@@ -846,6 +896,32 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--mosaic-transpose",
+        action="store_true",
+        help=(
+            "Transpose the ViT mosaic so the written array is image[y(slow), "
+            "x(fast)] — x_range horizontal (landscape), the standard image "
+            "convention — instead of the internal image[x(fast), y(slow)] "
+            "(portrait, bigger fast extent vertical). Only the final array and "
+            "its origin row/col are swapped (exactly np.transpose of the "
+            "untransposed mosaic); stitching and placement are unchanged. Note "
+            "this rotates the sample content into the transposed frame. Off by "
+            "default."
+        ),
+    )
+    recon.add_argument(
+        "--frame-write-stride",
+        type=int,
+        default=None,
+        help=(
+            "Detector-frame downsampling for the diffraction/dp + inference "
+            "Tiled buffers. Row r holds scan frame r*stride. Default 1000 for "
+            "vit-only (spot-check), 1 for iterative/both. Pass 1 to capture "
+            "EVERY frame (needed to correlate detector content vs positions, "
+            "or for fine-tuning) — ~1 MB/frame over WAN."
+        ),
+    )
+    recon.add_argument(
         "--min-overlap-count",
         type=float,
         default=None,
@@ -855,6 +931,18 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
             "to the median fill value, masking the low-coverage canvas border. "
             "Must be >= 0.5 (FFT-leakage suppression floor). Default: 0.5 "
             "(any coverage accepted)."
+        ),
+    )
+    recon.add_argument(
+        "--inner-crop",
+        type=int,
+        default=None,
+        help=(
+            "Pixels to trim from EACH edge of every ViT output patch before "
+            "stitching, dropping the FFT-leakage border outside the probe "
+            "support. Precedence: this explicit value > value derived from the "
+            "ONNX probe geometry > auto (min(patch)//4, e.g. 64 for a 256-px "
+            "patch). Larger = keep only the central, highest-quality region."
         ),
     )
     recon.add_argument(
@@ -892,11 +980,11 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument(
         "--mode",
         choices=["iterative", "vit", "both"],
-        default="both",
+        default="vit",
         help=(
             "Which reconstruction branches to wire in the pipeline. "
-            "'iterative' = DM/ML solver only, 'vit' = ViT inference only, "
-            "'both' = parallel (default). Useful for isolating GPU-contention "
+            "'iterative' = DM/ML solver only, 'vit' = ViT inference only "
+            "(default), 'both' = parallel. Useful for isolating GPU-contention "
             "issues on single-GPU nodes."
         ),
     )
@@ -919,6 +1007,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["x_range"] = str(float(args.x_range))
     if getattr(args, "y_range", None) is not None:
         config["y_range"] = str(float(args.y_range))
+    if getattr(args, "angle", None) is not None:
+        config["angle"] = str(round(float(args.angle), 4))
 
     # Defaults only fill in keys that ``load_config_from_tiled`` didn't set —
     # otherwise ``LEGACY_PTYCHO_DEFAULTS["z_m"] = "1.0"`` would overwrite the
@@ -1005,12 +1095,27 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         # mosaic middle. Needed on a live mid-scan join AND on a replay of a
         # scan whose recorded first line settled. Real JSON bool.
         config["mosaic_slow_gate"] = True
+    if getattr(args, "mosaic_transpose", False):
+        # Landscape transpose of the written mosaic (image[slow, fast]).
+        config["mosaic_transpose"] = True
     if args.min_overlap_count is not None:
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.mosaic_edge_trim is not None:
         config["mosaic_edge_trim"] = str(args.mosaic_edge_trim)
+    if getattr(args, "inner_crop", None) is not None:
+        config["inner_crop"] = str(int(args.inner_crop))
     if getattr(args, "mosaic_oversample", None) is not None:
         config["mosaic_oversample"] = str(int(args.mosaic_oversample))
+    if getattr(args, "frame_write_stride", None) is not None:
+        config["frame_write_stride"] = str(int(args.frame_write_stride))
+    if getattr(args, "no_angle_foreshorten", False):
+        config["angle_correction_flag"] = "False"
+    if getattr(args, "angle_flip", False):
+        config["angle_flip_flag"] = "True"
+    if getattr(args, "vit_max_lead", None) is not None:
+        config["vit_max_lead"] = str(int(args.vit_max_lead))
+    if getattr(args, "segmentation_threshold", None) is not None:
+        config["segmentation_threshold"] = str(float(args.segmentation_threshold))
     if args.auto_center_headroom is not None:
         config["auto_center_headroom"] = str(int(args.auto_center_headroom))
     elif auto_center and not roi_passed:
@@ -1019,8 +1124,9 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         # bounded headroom around offset 0 would miss it.
         config["auto_center_headroom"] = "-1"
     # Shared dp_orient: emitted ONLY when set. Absent key = the pipeline
-    # default ('identity', autodetect off). 'auto' opts in to the runtime
-    # autodetect sweep; any D4 name pins that fixed orientation.
+    # default ('rot90_cw', autodetect off). 'auto' opts in to the runtime
+    # autodetect sweep; any D4 name pins that fixed orientation ('identity'
+    # to disable rotation).
     if args.dp_orient is not None:
         config["dp_orient"] = str(args.dp_orient)
     # Iteration cap: emitted only when set (the pipeline default is

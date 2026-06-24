@@ -483,6 +483,11 @@ class FrameWriterOp(Operator):
         # (mid-scan join for live monitoring) — the early dp rows stay empty.
         # Default False keeps the fail-fast guard for fine-tunable runs.
         self._allow_mid_scan_join = bool(allow_mid_scan_join)
+        # Highest scan-frame index seen; a batch whose first index drops below
+        # it marks a new scan (Eiger frame counter reset). The dp buffer is
+        # live-viz only, so on a new scan we clear it and start over rather than
+        # persist per scan.
+        self._max_idx_seen = -1
 
     def setup(self, spec: OperatorSpec):
         spec.input("intensity").connector(IOSpec.ConnectorType.DOUBLE_BUFFER, capacity=32)
@@ -522,6 +527,21 @@ class FrameWriterOp(Operator):
                     first, first - 1,
                 )
             self._first_batch = False
+
+        # New-scan detection: the Eiger frame index resets to 0 at the start of
+        # each scan, so a batch whose minimum index drops below the high-water
+        # mark is a new scan. The dp buffer is live-viz only (not persisted per
+        # scan), so clear it and rebase before writing the new scan's frames.
+        batch_min = int(idx_arr.min())
+        if batch_min < self._max_idx_seen:
+            logging.getLogger("holoptycho.FrameWriterOp").info(
+                "New scan detected (frame %d < seen %d) — clearing dp buffer",
+                batch_min, self._max_idx_seen,
+            )
+            _writer.reset_diffraction_buffer()
+            self._max_row_written = 0
+            self._max_idx_seen = -1
+        self._max_idx_seen = max(self._max_idx_seen, int(idx_arr.max()))
 
         if self._stride <= 1:
             kept_frames = np.asarray(frames)
@@ -576,6 +596,10 @@ class InferenceFrameWriterOp(Operator):
             results = op_input.receive("results")
             pred, indices = results
             idx_arr = np.asarray(indices)
+            # New scan = Eiger frame index reset; the inference buffer is
+            # live-viz only and its rows are overwritten from 0 by the new
+            # scan, so no explicit clear is needed (the dashboard bounds it by
+            # dp_frames_written, which FrameWriterOp rebases).
             if self._stride <= 1:
                 kept_pred = np.asarray(pred)
                 kept_rows = idx_arr
@@ -697,6 +721,9 @@ class PtychoApp(Application):
         self.point_proc.ny_prb = ny_prb
 
         self.point_proc.angle_correction_flag = param.angle_correction_flag
+        self.point_proc.angle_flip_flag = bool(
+            getattr(param, "angle_flip_flag", False)
+        )
 
         if has_recon:
             self.pty.num_points_min = self.min_points
@@ -780,12 +807,12 @@ class PtychoApp(Application):
         # ImagePreprocessorOp docstrings for what each does. The saved /dp tap
         # follows dp_orient (no separate tap_orient knob).
         # dp_orient: D4 aligning the (global) diffraction frame to the model /
-        # scan convention. The frame is already global after
-        # detector_orientation, so the default is 'identity' — fully
-        # deterministic, no runtime sweep. 'auto' opts in to the ViT
-        # orientation-autodetect sweep (vit/both modes), which overwrites
-        # dp_orient at runtime with the best-scoring D4.
-        _dp_orient_cfg = str(getattr(self.param, "dp_orient", None) or "identity")
+        # scan convention. Default 'rot90_cw' (matches the iterative branch's
+        # default and the historical np.rot90(axes=(2,1)) on the engine DP).
+        # 'auto' opts in to the ViT orientation-autodetect sweep (vit/both
+        # modes), which overwrites dp_orient at runtime with the best-scoring
+        # D4. Pass 'identity' to disable any rotation.
+        _dp_orient_cfg = str(getattr(self.param, "dp_orient", None) or "rot90_cw")
         self.orient_autodetect = _dp_orient_cfg == "auto"
         if self.orient_autodetect:
             _dp_orient_cfg = "identity"  # seed only; the sweep overwrites it
@@ -904,6 +931,9 @@ class PtychoApp(Application):
         self.image_batch.auto_center = bool(getattr(self.param, "auto_center_dp", False))
         self.image_batch.headroom = int(
             getattr(self.param, "auto_center_headroom", int(self.param.nx) // 4)
+        )
+        self.image_batch.seg_threshold = float(
+            getattr(self.param, "segmentation_threshold", 0.02)
         )
 
         # PointProcessorOp: set scan geometry from config.
@@ -1160,6 +1190,7 @@ class PtychoApp(Application):
             transpose=bool(
                 getattr(self.param, "mosaic_transpose", False)
             ),
+            vit_max_lead=int(getattr(self.param, "vit_max_lead", 0) or 0),
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")
