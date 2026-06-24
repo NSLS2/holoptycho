@@ -929,6 +929,9 @@ class PtychoApp(Application):
         self.image_batch.headroom = int(
             getattr(self.param, "auto_center_headroom", int(self.param.nx) // 4)
         )
+        self.image_batch.seg_threshold = float(
+            getattr(self.param, "segmentation_threshold", 0.02)
+        )
 
         # PointProcessorOp: set scan geometry from config.
         self.point_proc.x_range_um = np.abs(self.param.x_range)

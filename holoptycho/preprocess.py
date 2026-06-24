@@ -23,7 +23,7 @@ from holoscan.logger import LogLevel, set_log_level
 from holoscan.decorator import create_op, Input
 
 
-def compute_center_box(headroom_batch, headroom_roi, nx, ny):
+def compute_center_box(headroom_batch, headroom_roi, nx, ny, threshold=0.02):
     """One-shot segmentation-based centered crop box (lossless auto-centering).
 
     Given a batch of (coordinate-corrected, global) detector frames cropped to
@@ -33,7 +33,8 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
 
     Segmentation: average the batch (protects against an odd empty/saturated
     first frame), mask saturated pixels (which would bias the segmentation),
-    threshold at 2% of peak to isolate the blob, run ``scipy.ndimage.label``,
+    threshold at ``threshold`` (fraction, default 0.02 = 2%) of peak to isolate
+    the blob, run ``scipy.ndimage.label``,
     and centre the crop on the **bounding-box centre** of the largest connected
     component (the geometric centre of the segmented blob, not its intensity-
     weighted centroid). The box is clamped to stay inside ``headroom_roi``.
@@ -61,7 +62,7 @@ def compute_center_box(headroom_batch, headroom_roi, nx, ny):
     peak = float(masked.max())
     if peak <= 0:
         return None, False, None, None
-    binary = masked > (0.02 * peak)
+    binary = masked > (float(threshold) * peak)
     labels, n_obj = label(binary)
     if n_obj == 0:
         return None, False, None, None
@@ -127,6 +128,10 @@ class ImageBatchOp(Operator):
         # ny x nx crop box is computed once and reused for every batch (incl. the
         # first). Set from config by compose(). See compute_center_box().
         self.auto_center = False
+        # Segmentation threshold (fraction of peak) for the auto-center blob
+        # detection in compute_center_box. Higher = tighter beam isolation
+        # (drops more faint surrounding signal). Set from config by compose().
+        self.seg_threshold = 0.02
         self.headroom = 0
         self._center_box = None       # cached ny x nx global ROI once computed
         self._hr_buf = None           # transient (batchsize, Hh, Wh) first-batch buffer
@@ -265,7 +270,7 @@ class ImageBatchOp(Operator):
         ny = int(self.roi[0, 1] - self.roi[0, 0])
         nx = int(self.roi[1, 1] - self.roi[1, 0])
         box, clamped, blob_bbox, blob_mask = compute_center_box(
-            self._hr_buf, self._headroom_roi, nx, ny
+            self._hr_buf, self._headroom_roi, nx, ny, threshold=self.seg_threshold
         )
         if box is None:
             self._center_box = np.array(self.roi)

@@ -706,6 +706,17 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Search margin (px per side) for --auto-center-dp (default: nx//4).",
     )
     recon.add_argument(
+        "--segmentation-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Threshold (fraction of peak, 0-1) for the auto-center beam "
+            "segmentation in compute_center_box. Default 0.02 (2%%). Increase "
+            "(e.g. 0.05) to isolate the beam more tightly, dropping faint "
+            "surrounding signal/halo."
+        ),
+    )
+    recon.add_argument(
         "--max-iterations",
         type=int,
         default=None,
@@ -884,6 +895,18 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--inner-crop",
+        type=int,
+        default=None,
+        help=(
+            "Pixels to trim from EACH edge of every ViT output patch before "
+            "stitching, dropping the FFT-leakage border outside the probe "
+            "support. Precedence: this explicit value > value derived from the "
+            "ONNX probe geometry > auto (min(patch)//4, e.g. 64 for a 256-px "
+            "patch). Larger = keep only the central, highest-quality region."
+        ),
+    )
+    recon.add_argument(
         "--mosaic-edge-trim",
         type=int,
         default=None,
@@ -1038,10 +1061,14 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_min_overlap"] = str(args.min_overlap_count)
     if args.mosaic_edge_trim is not None:
         config["mosaic_edge_trim"] = str(args.mosaic_edge_trim)
+    if getattr(args, "inner_crop", None) is not None:
+        config["inner_crop"] = str(int(args.inner_crop))
     if getattr(args, "mosaic_oversample", None) is not None:
         config["mosaic_oversample"] = str(int(args.mosaic_oversample))
     if getattr(args, "frame_write_stride", None) is not None:
         config["frame_write_stride"] = str(int(args.frame_write_stride))
+    if getattr(args, "segmentation_threshold", None) is not None:
+        config["segmentation_threshold"] = str(float(args.segmentation_threshold))
     if args.auto_center_headroom is not None:
         config["auto_center_headroom"] = str(int(args.auto_center_headroom))
     elif auto_center and not roi_passed:
