@@ -535,6 +535,7 @@ class PointProcessorOp(Operator):
         self.positions_um = None
 
         self.angle_correction_flag = True
+        self.angle_flip_flag = False
         self.angle = 0
 
         self.buffer = []
@@ -668,15 +669,20 @@ class PointProcessorOp(Operator):
                     pos0 = pos0*self.x_ratio*self.x_direction
                     pos1 = pos1*self.y_ratio*self.y_direction
 
+                    # (A) Foreshortening: scale the fast axis by the
+                    # projection factor (|cos| up to 45deg, |sin| past it) —
+                    # the tomography lab->sample length correction.
                     if self.angle_correction_flag:
-                        # print('rescale x axis...')
                         if np.abs(self.angle) <= 45.:
                             pos0 *= np.abs(np.cos(self.angle*np.pi/180.))
                         else:
                             pos0 *= np.abs(np.sin(self.angle*np.pi/180.))
 
-                        if self.angle <= -45.:
-                            pos0 *= -1
+                    # (B) Handedness flip: independently of (A), reverse the
+                    # fast-axis sign for angles <= -45deg so projections past
+                    # -45 keep a consistent sample-frame orientation.
+                    if self.angle_flip_flag and self.angle <= -45.:
+                        pos0 *= -1
                 else:
                     pos0 = self.pos0_simul[self.pos_loaded_num:p_total_num]
                     pos1 = self.pos1_simul[self.pos_loaded_num:p_total_num]

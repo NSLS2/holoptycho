@@ -721,6 +721,9 @@ class PtychoApp(Application):
         self.point_proc.ny_prb = ny_prb
 
         self.point_proc.angle_correction_flag = param.angle_correction_flag
+        self.point_proc.angle_flip_flag = bool(
+            getattr(param, "angle_flip_flag", False)
+        )
 
         if has_recon:
             self.pty.num_points_min = self.min_points

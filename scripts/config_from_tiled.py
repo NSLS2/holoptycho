@@ -62,6 +62,7 @@ LEGACY_PTYCHO_DEFAULTS = {
     "save_tmp_pic_flag": "False",
     "position_correction_flag": "False",
     "angle_correction_flag": "False",
+    "angle_flip_flag": "False",
     "sf_flag": "False",
     "ms_pie_flag": "False",
     "weak_obj_flag": "False",
@@ -706,14 +707,31 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Search margin (px per side) for --auto-center-dp (default: nx//4).",
     )
     recon.add_argument(
+        "--angle-foreshorten",
+        action="store_true",
+        help=(
+            "Enable (A) the tomography fast-axis foreshortening: scale fast "
+            "positions by |cos(theta)| (|sin| past 45deg). OFF by default. "
+            "Scales the SHARED positions (ViT mosaic + engine)."
+        ),
+    )
+    recon.add_argument(
+        "--angle-flip",
+        action="store_true",
+        help=(
+            "Enable (B) the fast-axis handedness flip for angles <= -45deg "
+            "(sign reversal so projections past -45 keep a consistent "
+            "sample-frame orientation). OFF by default. Independent of "
+            "--angle-foreshorten."
+        ),
+    )
+    recon.add_argument(
         "--angle-correction",
         action="store_true",
         help=(
-            "Enable the tomography cos(theta) fast-axis foreshortening "
-            "(angle_correction_flag). OFF by default — the correction scales "
-            "the SHARED positions (ViT mosaic + engine), which can misalign "
-            "mosaic patches (blur), and past +/-45deg it also flips the fast "
-            "axis. Pass this only when you want lab->sample-frame positions."
+            "Convenience: enable BOTH --angle-foreshorten and --angle-flip "
+            "(the full lab->sample-frame transform for tomo reconstruction). "
+            "OFF by default; note it can blur the per-projection ViT mosaic."
         ),
     )
     recon.add_argument(
@@ -1078,8 +1096,11 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_oversample"] = str(int(args.mosaic_oversample))
     if getattr(args, "frame_write_stride", None) is not None:
         config["frame_write_stride"] = str(int(args.frame_write_stride))
-    if getattr(args, "angle_correction", False):
+    _ang_full = getattr(args, "angle_correction", False)
+    if _ang_full or getattr(args, "angle_foreshorten", False):
         config["angle_correction_flag"] = "True"
+    if _ang_full or getattr(args, "angle_flip", False):
+        config["angle_flip_flag"] = "True"
     if getattr(args, "segmentation_threshold", None) is not None:
         config["segmentation_threshold"] = str(float(args.segmentation_threshold))
     if args.auto_center_headroom is not None:
