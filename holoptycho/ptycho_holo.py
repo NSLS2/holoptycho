@@ -1190,6 +1190,7 @@ class PtychoApp(Application):
             transpose=bool(
                 getattr(self.param, "mosaic_transpose", False)
             ),
+            vit_max_lead=int(getattr(self.param, "vit_max_lead", 0) or 0),
             name="vit_save",
         )
         self.mosaic_writer = MosaicWriterOp(self, name="mosaic_writer")

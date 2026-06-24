@@ -727,6 +727,18 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--vit-max-lead",
+        type=int,
+        default=None,
+        help=(
+            "Throttle the ViT branch to run at most this many frames ahead of "
+            "the filled scan positions. Prevents the ViT-vs-positions race that "
+            "smears the mosaic (blur/skew), especially with fast models. 0/unset "
+            "= no throttle. Try a few hundred (e.g. 128) — small enough to keep "
+            "ViT and positions in sync, large enough not to stall throughput."
+        ),
+    )
+    recon.add_argument(
         "--segmentation-threshold",
         type=float,
         default=None,
@@ -1090,6 +1102,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["angle_correction_flag"] = "False"
     if getattr(args, "angle_flip", False):
         config["angle_flip_flag"] = "True"
+    if getattr(args, "vit_max_lead", None) is not None:
+        config["vit_max_lead"] = str(int(args.vit_max_lead))
     if getattr(args, "segmentation_threshold", None) is not None:
         config["segmentation_threshold"] = str(float(args.segmentation_threshold))
     if args.auto_center_headroom is not None:

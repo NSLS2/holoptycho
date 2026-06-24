@@ -398,6 +398,7 @@ class SaveViTResult(Operator):
         oversample: int = 1,
         slow_gate: bool = False,
         transpose: bool = False,
+        vit_max_lead: int = 0,
         **kwargs,
     ):
         # Holoscan's Operator.__init__ calls setup(spec), so any attribute
@@ -452,6 +453,14 @@ class SaveViTResult(Operator):
         # origin row/col) are swapped, so it is exactly np.transpose() of the
         # untransposed mosaic. Off by default.
         self._transpose = bool(transpose)
+        # Race throttle: cap how far the ViT branch may run AHEAD of the filled
+        # positions. When >0, compute() pauses if this batch's max frame index
+        # exceeds (n_filled_positions + vit_max_lead), letting PointProcessorOp
+        # catch up. Blocking here backpressures the upstream inference op, so it
+        # throttles the whole ViT branch — preventing the ViT-vs-positions race
+        # that misaligns the mosaic (blur/skew). 0 = disabled.
+        self._vit_max_lead = max(0, int(vit_max_lead))
+        self._vit_throttle_max_wait_s = 5.0
         # Target-grid canvas dims (set in _ensure_canvas); the in-memory canvas
         # is S× larger on each axis.
         self._target_h: int = 0
@@ -1101,12 +1110,54 @@ class SaveViTResult(Operator):
         if self._enable_batch_writes:
             spec.output("vit_batch").condition(ConditionType.NONE)
 
+    def _throttle_to_positions(self, batch_max_idx: int) -> None:
+        """Pause until the ViT lead over filled positions is <= _vit_max_lead.
+
+        Counts the finite rows of positions_um (positions fill in frame order,
+        so the count == highest filled frame index + 1). Sleeps in small steps
+        until ``batch_max_idx <= n_filled + _vit_max_lead`` or the max wait
+        elapses (so a stalled PandA stream can't deadlock the branch).
+        """
+        deadline = time.time() + self._vit_throttle_max_wait_s
+        waited = False
+        while True:
+            pos = self._positions_provider()
+            n_filled = (
+                int(np.isfinite(pos[:, 0]).sum()) if pos is not None else 0
+            )
+            if batch_max_idx <= n_filled + self._vit_max_lead:
+                break
+            if time.time() >= deadline:
+                self._logger.debug(
+                    "vit throttle: gave up waiting (frame %d > filled %d + "
+                    "lead %d) after %.1fs",
+                    batch_max_idx, n_filled, self._vit_max_lead,
+                    self._vit_throttle_max_wait_s,
+                )
+                break
+            waited = True
+            time.sleep(0.005)
+        if waited:
+            self._logger.debug(
+                "vit throttle: paused until positions caught up (frame %d, "
+                "lead<=%d)", batch_max_idx, self._vit_max_lead,
+            )
+
     def compute(self, op_input, op_output, context):
         try:
             results = op_input.receive("results")
             if results is None:
                 return
             pred, indices = results
+
+            # Race throttle: if the ViT branch is running more than
+            # _vit_max_lead frames ahead of the filled scan positions, pause
+            # (re-checking) until PointProcessorOp catches up or the max wait
+            # elapses. Blocking this op backpressures the upstream inference op,
+            # throttling the whole ViT branch so it can't outrun positions and
+            # smear the mosaic. No-op when disabled or positions keep up.
+            if self._vit_max_lead > 0 and self._positions_provider is not None:
+                self._throttle_to_positions(int(indices.max()))
 
             # Detect new scan: if smallest index in this batch is less than
             # what we've seen, a new scan has started
