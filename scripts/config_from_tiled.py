@@ -817,13 +817,13 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument(
         "--overshoot-factor",
         type=float,
-        default=None,
+        default=1.4,
         help=(
             "Canvas safety margin as a multiple of the commanded scan range. "
-            "1.2 (default) adds 20%% extra border; 1.0 allocates exactly the "
-            "commanded range; values below 1.0 crop the canvas to a fraction "
-            "of the commanded range. Reduce for scans with little overshoot to "
-            "shrink the blank border around the stitched mosaic."
+            "1.4 (default) adds 40%% extra border for encoder overshoot; 1.0 "
+            "allocates exactly the commanded range; values below 1.0 crop the "
+            "canvas to a fraction of the commanded range. Reduce for scans with "
+            "little overshoot to shrink the blank border around the mosaic."
         ),
     )
     recon.add_argument(
@@ -960,11 +960,11 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
     recon.add_argument(
         "--mode",
         choices=["iterative", "vit", "both"],
-        default="both",
+        default="vit",
         help=(
             "Which reconstruction branches to wire in the pipeline. "
-            "'iterative' = DM/ML solver only, 'vit' = ViT inference only, "
-            "'both' = parallel (default). Useful for isolating GPU-contention "
+            "'iterative' = DM/ML solver only, 'vit' = ViT inference only "
+            "(default), 'both' = parallel. Useful for isolating GPU-contention "
             "issues on single-GPU nodes."
         ),
     )
