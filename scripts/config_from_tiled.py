@@ -706,6 +706,16 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Search margin (px per side) for --auto-center-dp (default: nx//4).",
     )
     recon.add_argument(
+        "--no-angle-correction",
+        action="store_true",
+        help=(
+            "Disable the tomography cos(theta) fast-axis foreshortening "
+            "(angle_correction_flag). On by default; the correction scales the "
+            "SHARED positions (ViT mosaic + engine), which can misalign mosaic "
+            "patches (blur). Pass this to use raw lab-frame positions."
+        ),
+    )
+    recon.add_argument(
         "--segmentation-threshold",
         type=float,
         default=None,
@@ -1067,6 +1077,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_oversample"] = str(int(args.mosaic_oversample))
     if getattr(args, "frame_write_stride", None) is not None:
         config["frame_write_stride"] = str(int(args.frame_write_stride))
+    if getattr(args, "no_angle_correction", False):
+        config["angle_correction_flag"] = "False"
     if getattr(args, "segmentation_threshold", None) is not None:
         config["segmentation_threshold"] = str(float(args.segmentation_threshold))
     if args.auto_center_headroom is not None:
