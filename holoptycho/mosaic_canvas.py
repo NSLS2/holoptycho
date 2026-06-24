@@ -30,7 +30,7 @@ def fit_slow_axis(frame_idx, slow_vals, *, tol, min_frames=512, max_iter=3):
     """
     fi = np.asarray(frame_idx, dtype=np.float64)
     sv = np.asarray(slow_vals, dtype=np.float64)
-    if len(fi) < min_frames or fi.ptp() < 1:
+    if len(fi) < min_frames or np.ptp(fi) < 1:
         return None
     keep = np.ones(len(fi), dtype=bool)
     a = b = 0.0
