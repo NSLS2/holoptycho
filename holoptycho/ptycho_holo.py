@@ -807,12 +807,12 @@ class PtychoApp(Application):
         # ImagePreprocessorOp docstrings for what each does. The saved /dp tap
         # follows dp_orient (no separate tap_orient knob).
         # dp_orient: D4 aligning the (global) diffraction frame to the model /
-        # scan convention. The frame is already global after
-        # detector_orientation, so the default is 'identity' — fully
-        # deterministic, no runtime sweep. 'auto' opts in to the ViT
-        # orientation-autodetect sweep (vit/both modes), which overwrites
-        # dp_orient at runtime with the best-scoring D4.
-        _dp_orient_cfg = str(getattr(self.param, "dp_orient", None) or "identity")
+        # scan convention. Default 'rot90_cw' (matches the iterative branch's
+        # default and the historical np.rot90(axes=(2,1)) on the engine DP).
+        # 'auto' opts in to the ViT orientation-autodetect sweep (vit/both
+        # modes), which overwrites dp_orient at runtime with the best-scoring
+        # D4. Pass 'identity' to disable any rotation.
+        _dp_orient_cfg = str(getattr(self.param, "dp_orient", None) or "rot90_cw")
         self.orient_autodetect = _dp_orient_cfg == "auto"
         if self.orient_autodetect:
             _dp_orient_cfg = "identity"  # seed only; the sweep overwrites it

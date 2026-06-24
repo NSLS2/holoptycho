@@ -769,11 +769,9 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         "--dp-orient",
         default=None,
         help="Shared diffraction orientation on the model-input branch: a D4 "
-        "name or 'auto'. Default (unset) = 'identity' — the frame is already "
-        "in the global coordinate system after detector_orientation, so no "
-        "further rotation is applied and the runtime orientation autodetect is "
-        "OFF. Pass 'auto' to opt in to the ViT autodetect sweep, or a D4 name "
-        "to pin a different fixed orientation.",
+        "name or 'auto'. Default (unset) = 'rot90_cw'. Pass 'auto' to opt in "
+        "to the ViT autodetect sweep, 'identity' to disable rotation, or "
+        "another D4 name to pin a fixed orientation.",
     )
     recon.add_argument(
         "--dp-orient-iterative",
@@ -1111,8 +1109,9 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         # bounded headroom around offset 0 would miss it.
         config["auto_center_headroom"] = "-1"
     # Shared dp_orient: emitted ONLY when set. Absent key = the pipeline
-    # default ('identity', autodetect off). 'auto' opts in to the runtime
-    # autodetect sweep; any D4 name pins that fixed orientation.
+    # default ('rot90_cw', autodetect off). 'auto' opts in to the runtime
+    # autodetect sweep; any D4 name pins that fixed orientation ('identity'
+    # to disable rotation).
     if args.dp_orient is not None:
         config["dp_orient"] = str(args.dp_orient)
     # Iteration cap: emitted only when set (the pipeline default is
