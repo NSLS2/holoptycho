@@ -61,7 +61,7 @@ LEGACY_PTYCHO_DEFAULTS = {
     "pc_flag": "False",
     "save_tmp_pic_flag": "False",
     "position_correction_flag": "False",
-    "angle_correction_flag": "False",
+    "angle_correction_flag": "True",
     "sf_flag": "False",
     "ms_pie_flag": "False",
     "weak_obj_flag": "False",
@@ -860,6 +860,18 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         ),
     )
     recon.add_argument(
+        "--frame-write-stride",
+        type=int,
+        default=None,
+        help=(
+            "Detector-frame downsampling for the diffraction/dp + inference "
+            "Tiled buffers. Row r holds scan frame r*stride. Default 1000 for "
+            "vit-only (spot-check), 1 for iterative/both. Pass 1 to capture "
+            "EVERY frame (needed to correlate detector content vs positions, "
+            "or for fine-tuning) — ~1 MB/frame over WAN."
+        ),
+    )
+    recon.add_argument(
         "--min-overlap-count",
         type=float,
         default=None,
@@ -1028,6 +1040,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["mosaic_edge_trim"] = str(args.mosaic_edge_trim)
     if getattr(args, "mosaic_oversample", None) is not None:
         config["mosaic_oversample"] = str(int(args.mosaic_oversample))
+    if getattr(args, "frame_write_stride", None) is not None:
+        config["frame_write_stride"] = str(int(args.frame_write_stride))
     if args.auto_center_headroom is not None:
         config["auto_center_headroom"] = str(int(args.auto_center_headroom))
     elif auto_center and not roi_passed:
