@@ -853,6 +853,14 @@ def add_reconstruction_arguments(parser: argparse.ArgumentParser):
         help="Override the scan slow-axis point count (y_num). See --x-num.",
     )
     recon.add_argument(
+        "--angle", type=float, default=None,
+        help=(
+            "Override the tomography rotation angle (degrees), normally read "
+            "from the baseline zpsth/dsth. Feeds the angle foreshortening / "
+            "flip when those are enabled."
+        ),
+    )
+    recon.add_argument(
         "--x-range", type=float, default=None,
         help=(
             "Override the scan x range (um). Sizes the ViT mosaic canvas and the "
@@ -999,6 +1007,8 @@ def build_full_config(run_uid: str, tiled_url: str, args: argparse.Namespace) ->
         config["x_range"] = str(float(args.x_range))
     if getattr(args, "y_range", None) is not None:
         config["y_range"] = str(float(args.y_range))
+    if getattr(args, "angle", None) is not None:
+        config["angle"] = str(round(float(args.angle), 4))
 
     # Defaults only fill in keys that ``load_config_from_tiled`` didn't set —
     # otherwise ``LEGACY_PTYCHO_DEFAULTS["z_m"] = "1.0"`` would overwrite the
