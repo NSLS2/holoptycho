@@ -12,7 +12,11 @@
 # /path/to/models below before running (directory with .engine files).
 # $HOME/.ptycho_gui/root_home has .bashrc that defines ZMQ client keys
 
-PTYCHO_WORKING_DIR="/nsls2/data2/hxn/legacy/home/home/tshimamur/02Pixi/ptycho_gui"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo $SCRIPT_DIR
+PTYCHO_WORKING_DIR="$(cd "${SCRIPT_DIR}/../../../ptycho_gui" && pwd -P)"
+echo $PTYCHO_WORKING_DIR
+pwd
 MODEL_DIR="$PTYCHO_WORKING_DIR/holoscan-framework/models"
 podman run --rm --net host -it \
 --shm-size=32g \
