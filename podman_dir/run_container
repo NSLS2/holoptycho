@@ -13,10 +13,8 @@
 # $HOME/.ptycho_gui/root_home has .bashrc that defines ZMQ client keys
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-echo $SCRIPT_DIR
 PTYCHO_WORKING_DIR="$(cd "${SCRIPT_DIR}/../../../ptycho_gui" && pwd -P)"
-echo $PTYCHO_WORKING_DIR
-pwd
+echo "[run_container] Starting the GUI at $PTYCHO_WORKING_DIR"
 MODEL_DIR="$PTYCHO_WORKING_DIR/holoscan-framework/models"
 podman run --rm --net host -it \
 --shm-size=32g \
