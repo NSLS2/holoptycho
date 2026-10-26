@@ -1,4 +1,5 @@
 [workspace]
+requires-pixi = ">=0.82.1"
 name = "holoptycho"
 description = "Streaming ptychographic reconstruction on NVIDIA Holoscan (NSLS-II HXN)"
 channels = ["conda-forge"]
