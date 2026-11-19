@@ -11,6 +11,12 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+image_python_ok() {
+    podman run --rm hxn-ptycho-holoscan \
+        bash -lc 'env -u PYTHONHOME -u PYTHONUSERBASE PYTHONNOUSERSITE=1 /pixi_env/.pixi/envs/default/bin/python -c "import encodings"' \
+        >/dev/null 2>&1
+}
+
 # Build the image only when it is not already present
 if ! podman image exists hxn-ptycho-holoscan 2>/dev/null; then
     echo "[launch_holoscan_gui] Image 'hxn-ptycho-holoscan' not found — building..."
@@ -21,7 +27,17 @@ if ! podman image exists hxn-ptycho-holoscan 2>/dev/null; then
     fi
     echo "[launch_holoscan_gui] Build complete."
 else
-    echo "[launch_holoscan_gui] Image 'hxn-ptycho-holoscan' found — skipping build."
+    if image_python_ok; then
+        echo "[launch_holoscan_gui] Image 'hxn-ptycho-holoscan' found — skipping build."
+    else
+        echo "[launch_holoscan_gui] Image 'hxn-ptycho-holoscan' found but Python runtime check failed — rebuilding..."
+        "$SCRIPT_DIR/build_container"
+        if [ $? -ne 0 ]; then
+            echo "[launch_holoscan_gui] ERROR: build_container failed. Aborting." >&2
+            exit 1
+        fi
+        echo "[launch_holoscan_gui] Rebuild complete."
+    fi
 fi
 
 echo "[launch_holoscan_gui] Starting container and launching GUI..."

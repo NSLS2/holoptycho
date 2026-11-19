@@ -9,7 +9,7 @@ podman run --rm --net host -it \
 -v ./podman_dir:/podman_dir \
 -v ../:/ptycho_gui_holoscan \
 -v "$HOME/.Xauthority:/root/.Xauthority:rw" \
--v /nsls2/data/hxn/legacy:/nsls2/data2/hxn/legacy \
+-v /nsls2/data/hxn/legacy:/nsls2/data/hxn/legacy \
 -v /nsls2/data/hxn/legacy:/nsls2/data/hxn/legacy \
 -v /nsls2/data/hxn/legacy:/data \
 -v /nsls2/data/hxn/legacy/home/xf03id/src/hxntools:/hxntools \

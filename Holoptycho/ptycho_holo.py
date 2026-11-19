@@ -511,7 +511,7 @@ class PtychoApp(Application):
         self.pty = PtychoRecon(self,param=self.param,name='pty')
         # self.pty_ctrl = PtychoCtrl(self)
 
-        self.init = InitRecon(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points,scan_header_file='/nsls2/data2/hxn/legacy/users/startup_parameters/scan_header.txt')
+        self.init = InitRecon(self,param=self.param,batchsize = self.batchsize, min_points = self.min_points,scan_header_file='/nsls2/data/hxn/legacy/users/startup_parameters/scan_header.txt')
 
         # Temp
         self.o = SaveResult(self,name='out')

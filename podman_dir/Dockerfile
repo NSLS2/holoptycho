@@ -21,3 +21,6 @@ WORKDIR /pixi_env
 
 # Install pixi deps (postinstall task runs at container start, not here)
 RUN pixi install
+
+# Fail the image build early if the baked Python stdlib is incomplete.
+RUN /pixi_env/.pixi/envs/default/bin/python -c "import encodings; import sys; print(sys.executable)"

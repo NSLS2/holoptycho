@@ -1,3 +1,32 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-podman build --userns-uid-map=0:0:1 --userns-uid-map=1:1:1999 --userns-uid-map=65534:2000:2 "$SCRIPT_DIR/../podman_dir" -t hxn-ptycho-holoscan --network host
+
+build_once() {
+  podman build --userns-uid-map=0:0:1 --userns-uid-map=1:1:1999 --userns-uid-map=65534:2000:2 "$SCRIPT_DIR/../podman_dir" -t hxn-ptycho-holoscan --network host
+}
+
+recover_if_corrupt_store() {
+  local build_log="$1"
+  if grep -Eq 'may be corrupted|creating read-write layer|no such file or directory' "$build_log"; then
+    echo "[build_container] Detected a corrupted Podman storage state under /var/tmp; resetting rootless Podman storage and retrying build once..."
+    podman system reset --force
+    return 0
+  fi
+  return 1
+}
+
+build_log="$(mktemp -t podman-build-log.XXXXXX)"
+trap 'rm -f "$build_log"' EXIT
+
+if build_once 2>&1 | tee "$build_log"; then
+  exit 0
+fi
+
+if recover_if_corrupt_store "$build_log"; then
+  build_once
+else
+  echo "[build_container] Build failed; no known storage-corruption signature found for auto-recovery." >&2
+  exit 1
+fi

@@ -2,14 +2,18 @@
 channels = ["conda-forge"]
 description = "Add a short description here"
 name = "holoscan"
-platforms = ["linux-64"]
+platforms = [{ name = "linux-64-glibc235", platform = "linux-64", glibc = "2.35" }]
 version = "0.1.0"
+
+[environments]
+default = { features = ["holoscan"] }
 
 [tasks]
 postinstall = "pip install --no-build-isolation -e /ptycho_gui"
 
-[system-requirements]
-libc = { family = "glibc", version = "2.35" }
+[feature.holoscan]
+platforms = ["linux-64-glibc235"]
+
 
 [dependencies]
 python = ">=3.11,<3.12"

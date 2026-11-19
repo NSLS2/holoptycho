@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Host-side base directory that is mounted as /models inside the container
-MODELS_HOST_DIR="/nsls2/data2/hxn/legacy/home/home/tshimamur/02Pixi/ptycho_gui/holoscan-framework/models"
+MODELS_HOST_DIR="/nsls2/data/hxn/legacy/home/home/tshimamur/02Pixi/ptycho_gui/holoscan-framework/models"
 MODELS_CONTAINER_DIR="/models"
 
 # --- Prompt for ONNX file path ---
@@ -43,7 +43,7 @@ echo ""
 
 podman run --rm --device nvidia.com/gpu=all \
   -v "${MODELS_HOST_DIR}:${MODELS_CONTAINER_DIR}" \
-  -v /nsls2/data2/hxn/legacy/home/home/tshimamur/01Holoscan/edgePtychoViT:/edgePtychoViT \
+  -v /nsls2/data/hxn/legacy/home/home/tshimamur/01Holoscan/edgePtychoViT:/edgePtychoViT \
   hxn-ptycho-holoscan \
   pixi run python /edgePtychoViT/build_trt_engine.py \
         --onnx "${ONNX_CONTAINER_PATH}" \
